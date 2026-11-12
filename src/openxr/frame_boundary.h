@@ -45,6 +45,21 @@ struct FrameSink {
   virtual XrResult composeBackground(XrCompositionLayerProjection&) {
     return XR_ERROR_FUNCTION_UNSUPPORTED;
   }
+  // Frame generation 2.3 (Lock): the layer of a synthetic slot (FrameBoundary::syntheticSlot), called between its xrBeginFrame and xrEndFrame. Unsupported (the default) ends
+  // the slot with zero layers; any other failure is the boundary's, as compose()'s is.
+  virtual XrResult composeSlot(XrCompositionLayerProjection&) {
+    return XR_ERROR_FUNCTION_UNSUPPORTED;
+  }
+};
+
+// What one synthetic slot did (FrameBoundary::syntheticSlot).
+struct SyntheticSlotInfo {
+  XrTime predictedDisplayTime = 0;   // the runtime's prediction for the slot (it is never handed to the game)
+  XrDuration period = 0;
+  double waitMs = 0, endMs = 0;      // the slot's own xrWaitFrame (with its xrBeginFrame) and xrEndFrame
+  bool layers = false;               // a layer went with its end
+  uint64_t lateBefore = 0;           // lateFrames() as the slot began, so a caller can count the misses its wait and the next one saw
+  bool begun = false;                // its wait and begin succeeded: the slot took one of the session's frame sequences (the game's next frame skips it)
 };
 
 // Runtime = today's blocking wait, in WaitGetPoses. Deferred is OpenXR
@@ -172,6 +187,50 @@ class FrameBoundary final {
     if (!session_.frameOpen() || accepted_[0] || accepted_[1]) return XR_ERROR_CALL_ORDER_INVALID;
     return finish(true);
   }
+
+  // Frame generation 2.3 (Lock, fix.frame_generation = on; framegen_lock.h): one synthetic slot, run by the owner between two of the game's frames, before the game's next wait.
+  // Its own xrWaitFrame and xrBeginFrame, the sink's composeSlot layer, and its xrEndFrame; no game frame is opened, no Submit is taken, and the game is never handed its time.
+  // Refused with XR_ERROR_CALL_ORDER_INVALID and no XR call at all while a frame is open, a deferred frame or a pacer wait is outstanding, or the session is not running a
+  // frame loop: the caller lets Lock go and the game's own wait runs as it always does. The slot's prediction is a real one (noteReal): the late count and the floor carry
+  // through it, and the game's next prediction follows it. A failed XR call fails the boundary as waitAndBegin's and finish()'s do. Its end is not reported through
+  // endFrameReturned: the episodes and the slow regime keep the game's frames only.
+  XrResult syntheticSlot(SyntheticSlotInfo& info) {
+    info = {};
+    if (!ownerThread()) return XR_ERROR_CALL_ORDER_INVALID;
+    if (failed_) return lastResult_;
+    if (session_.frameOpen() || deferred_ || (pacer_ && pacer_->pending())) return XR_ERROR_CALL_ORDER_INVALID;
+    const Lifecycle life = session_.lifecycle();
+    if (!session_.running() || session_.terminal() ||
+        (life != Lifecycle::Ready && life != Lifecycle::Synchronized && life != Lifecycle::Visible && life != Lifecycle::Focused))
+      return XR_ERROR_CALL_ORDER_INVALID;
+    info.lateBefore = lateFramesTotal_;
+    Frame slot{};
+    XrResult r;
+    { SubmissionWallScope measured(&info.waitMs); r = session_.waitAndBegin(slot); }
+    if (XR_FAILED(r)) { failed_ = true; lastResult_ = r; return r; }
+    info.begun = true;
+    noteReal(XR_SUCCESS, slot.predictedDisplayTime, slot.predictedDisplayPeriod);
+    info.predictedDisplayTime = slot.predictedDisplayTime;
+    info.period = slot.predictedDisplayPeriod;
+    bool pixels = slot.shouldRender && !session_.terminal();
+    XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    if (pixels) {
+      const auto composed = sink_.composeSlot(layer);
+      if (composed == XR_ERROR_FUNCTION_UNSUPPORTED) pixels = false;
+      else if (XR_FAILED(composed)) { failed_ = true; lastResult_ = composed; return lastResult_; }
+      else if (composed != XR_SUCCESS || layer.type != XR_TYPE_COMPOSITION_LAYER_PROJECTION || layer.next ||
+               !layer.space || layer.viewCount != 2 || !layer.views) pixels = false;
+    }
+    const auto* header = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
+    XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+    end.layerCount = pixels ? 1u : 0u; end.layers = pixels ? &header : nullptr;
+    { SubmissionWallScope measured(&info.endMs); lastResult_ = session_.end(slot, end, {true, pixels}); }
+    if (lastResult_ != XR_SUCCESS) failed_ = true;
+    info.layers = pixels && lastResult_ == XR_SUCCESS;
+    ++syntheticSlots_;
+    return lastResult_;
+  }
+  uint64_t syntheticSlots() const { return syntheticSlots_; }
 
  private:
   // Records the last REAL (runtime-reported) predicted time/period and when
@@ -432,5 +491,6 @@ class FrameBoundary final {
   uint64_t deferredFrames_ = 0, synthesized_ = 0, readyAtWait_ = 0, kicks_ = 0;
   uint64_t drainedFrames_ = 0, drainedWaits_ = 0;
   uint64_t lateFramesTotal_ = 0, lateFramesWindow_ = 0;
+  uint64_t syntheticSlots_ = 0;
 };
 } // namespace edvr::openxr

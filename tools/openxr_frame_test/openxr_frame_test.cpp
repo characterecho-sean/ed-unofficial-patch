@@ -868,6 +868,7 @@ void turboPacingTest() {
   }
 }
 }
+#include "framegen_lock_cases.h"
 
 // The 30 s report's window summary was a full std::sort of up to 4096 doubles, 28 times; it is order statistics by selection now
 // (FrameCycleStats::distribution). Prove the report's text is unchanged: the previous sort-based definition, kept here verbatim,
@@ -940,6 +941,7 @@ int main(int argc, char** argv) {
   frameEndOwnerBodyRaceTest();
   latePacingSteadyTest(); latePacingSkippedPeriodTest(); latePacingPeriodChangeTest();
   blockedRuntimeIntegrationTest(); boundaryFailures();backgroundFrames();loadingTransitions();turboPacingTest();
+  lockcases::run();   // frame generation 2.3 (Lock): the gate, the slot schedule, the key-off identity
   reportSelectionTest();traceBatchTest();
   std::printf("openxr_frame_test: %u checks, %u failures\n", checks.load(), failures.load()); return failures.load() ? 1 : 0;
 }

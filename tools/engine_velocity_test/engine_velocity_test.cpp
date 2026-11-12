@@ -47,6 +47,8 @@
 
 #include "shader_tests.h"
 #include "overlay_depth_gpu_tests.h"
+#include "own_discard_gpu_tests.h"
+#include "keep_own_vs_tests.h"
 #include "emit_tests.h"
 #include "math_tests.h"
 #include "consumer_tests.h"
@@ -177,6 +179,27 @@ bool onePair(ID3D11Device* device, ID3D11DeviceContext* context, const std::wstr
     std::snprintf(name, sizeof(name), "%ls + %ls", p.vs, p.ps);
     const corpus_identity::Result r = corpus_identity::compare(device, context, ps, pps, in, ok, name);
     ok(r.driven, "real corpus pair driven for the o0..o3 identity check (not skipped)");
+    // diag.hull_layer = separate (TEMPORARY): the own ship's families and its decals take the own-discard variant
+    // (hull_layer.cpp); the guarded decal combination is the synthetic rig's (own_discard_gpu_tests.h).
+    if (std::wcscmp(p.vs, L"vs_66DE2CADB1F4AE6B") == 0 || std::wcscmp(p.vs, L"vs_61AE8EB05FDC18DD") == 0 ||
+        std::wcscmp(p.vs, L"vs_AACFDCF2FB9AD809") == 0 || std::wcscmp(p.vs, L"vs_DE545DC8EE4FBB87") == 0 ||
+        std::wcscmp(p.vs, L"vs_BBE58E40FE88EC80") == 0) {
+        std::vector<BYTE> dps;
+        const bool own = edvr::engineVelocityPatchPs(ps.data(), ps.size(), in, dps, why, false,
+                                                     edvr::dxbc_engine_velocity_detail::FlatMarkerKind::None, nullptr, true);
+        ok(own, why.c_str());
+        if (!own) return false;
+        const corpus_identity::Result d = corpus_identity::ownDiscard(device, context, ps, pps, dps, in, ok, name);
+        ok(d.driven, "real hull pair driven for the own-discard check (not skipped)");
+        // diag.hull_layer (TEMPORARY): the keep-own VS of the shader as bound (the slot patch for a family that needs it; the second
+        // skin of a skinned family too), own instances bit-identical and foreign ones culled (keep_own_vs_tests.h).
+        ok(keep_own_vs_tests::keepOwnStreamCheck(device, context, pvs, in, ok, name), "real hull VS: the keep-own variant is proven");
+        if (in.skinRegister < 32) {
+            std::vector<BYTE> skin;
+            const bool skinned = edvr::engineVelocityPatchVsSkin(vs.data(), vs.size(), in.skinRegister, skin, why);
+            if (skinned) ok(keep_own_vs_tests::keepOwnStreamCheck(device, context, skin, in, ok, name), "real hull VS: the second skin's keep-own variant is proven");
+        }
+    }
     if (std::wcscmp(p.ps, L"ps_03B17F89B31C4788") == 0)
         ok(r.covered > 0 && r.uncoveredChecked > 0 && r.uncoveredBad == 0,
            "station alpha pair: the real corpus drives survivors and discard, with discarded MRT6 untouched");
@@ -443,6 +466,8 @@ int wmain(int argc, wchar_t** argv) {
     edvr::g_runtimeProfile = edvr::RuntimeProfile::LegacyVr;
     shader_tests::run({device.Get(), context.Get(), &check});
     overlay_depth_gpu_tests::run(device.Get(), context.Get(), &check);
+    own_discard_gpu_tests::run(device.Get(), context.Get(), &check);   // diag.hull_layer = separate (TEMPORARY): the own-discard variant
+    keep_own_vs_tests::run(device.Get(), context.Get(), &check);       // diag.hull_layer (TEMPORARY): the keep-own vertex shader
     emit_tests::run({&check});
     math_tests::run({device.Get(), context.Get(), &check});
     consumer_tests::run({device.Get(), context.Get(), &check});

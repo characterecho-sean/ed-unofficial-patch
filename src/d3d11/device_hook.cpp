@@ -42,8 +42,10 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "../common/seat_context.h"   // seatContextPublish: the seat memory's word for the runtime
 #include "../common/guard.h"
 #include "../common/hotkey.h"
+#include "../common/framegen_gate.h"   // frame generation 2.4: the hotkey's off <-> last value (frameGenToggle)
 #include "fss_res.h"
 #include "journal_watch.h"
+#include "hull_layer.h"   // hullBenchPress: the hull variant bench's key (TEMPORARY)
 #include "native_on_foot.h"  // nativeOnFootFrameBoundary (the render-mode setter hook, flight F0)
 #include "flat_stationary_camera_capture.h"  // mapCameraFrame (the VR map camera's publisher)
 #include "galaxy_map_pointer.h"                // mapPointerFrame (the VR Galaxy Map's hover and panel depth)
@@ -289,12 +291,18 @@ struct State {
     // The eye dump key: both eyes as the headset receives them, to
     // edvr_logs\eyes as BMP (temporalPassArmEyeDump). Unbound by default.
     Hotkey eyesKey;
+    Hotkey hullBenchKey;   // TEMPORARY (the hull variant bench, 2026-11-10; hull_layer.h): hotkey.hull_bench, default unbound
+    // The frame generation key: flips fix.frame_generation through the
+    // Performance page's row (an A/B in the headset). Unbound by default.
+    Hotkey frameGenKey;
+    // Phase 2.4: the value the key last turned off (auto, on), which the next press restores; Off: none yet, so auto.
+    FrameGenMode frameGenLastOn = FrameGenMode::Off;
     // The on-foot flight recorder's mark (F213, hotkey.on_foot_mark): a line in the recording and in the log at the moment of a press. Bound by default (F9).
     Hotkey onFootMarkKey;
-    // What each of those three was last bound from (the ini text), so a reload
+    // What each of those was last bound from (the ini text), so a reload
     // that changes one re-resolves it and one that does not says nothing: the
     // settings menu's Hotkeys page writes them while the game runs.
-    std::string dumpKeyText, censusKeyText, eyesKeyText, gpuPassKeyText, blendProbeKeyText, onFootMarkKeyText;
+    std::string dumpKeyText, censusKeyText, eyesKeyText, gpuPassKeyText, blendProbeKeyText, frameGenKeyText, onFootMarkKeyText, hullBenchKeyText;
     bool        diagnosticKeysBound = false;
     // The player's own FSS enter/quit keys, adopted from their Elite
     // bindings; they give the FSS mode latch its frame-exact edges.
@@ -1375,6 +1383,30 @@ void tickHotkeys() {
     if (g_state->blendProbeKey.pressed()) blendProbeRequest("hotkey.blend_probe");   // TEMPORARY (blend_probe.h)
     // The eye dump key: the next treated frame's two eyes to disk.
     if (g_state->eyesKey.pressed()) temporalPassArmEyeDump();
+    // The hull variant bench (TEMPORARY): starts one, or cancels the one running.
+    if (g_state->hullBenchKey.pressed()) hullBenchPress();
+    // The frame generation key: the Performance page's row, flipped. The same write a pick makes (ini, mirror, then the reload that
+    // re-reads the key), so it persists like the row; the toast says the new state.
+    if (g_state->frameGenKey.pressed()) {
+        const unsigned long long frame = static_cast<unsigned long long>(g_state->frameCounter);
+        char was[16] = "";
+        if (runtimeFlatProfile()) {
+            Log::get().note("hotkey: frame generation key pressed at frame %llu in the flat profile; frame generation is VR only, nothing changed.", frame);
+        } else if (!menuRowValue("fix.frame_generation", was, sizeof(was))) {
+            Log::get().note("hotkey: frame generation key pressed at frame %llu, but the settings menu has no fix.frame_generation row this session; nothing changed.", frame);
+        } else {
+            // Phase 2.4: off goes back to the value the key last turned off (auto until there is one), anything else goes off and is remembered.
+            const FrameGenMode next = frameGenToggle(frameGenModeParse(was), g_state->frameGenLastOn);
+            const char* nextName = frameGenModeName(next);
+            if (menuSetRowValue("fix.frame_generation", nextName)) {
+                Log::get().note("hotkey: frame generation key: fix.frame_generation %s -> %s at frame %llu (written to the ini like the Performance page's row).",
+                                was[0] ? was : "(unset)", nextName, frame);
+                static char toast[48];
+                snprintf(toast, sizeof(toast), "Frame generation: %s", nextName);
+                menuShowNotice(toast);
+            }
+        }
+    }
     // F213: the on-foot recording's mark. Nothing else happens on this thread for it.
     if (g_state->onFootMarkKey.pressed()) onfootrec::mark();
     if (g_state->missedCensusNotes < kMissedDumpNotes &&
@@ -2143,6 +2175,19 @@ void configureDiagnosticHotkeys() {
          "hotkey: dump_eyes is set but bound nothing, so the eye dump cannot be armed this session "
          "(the settings menu's row still can).",
          " Both eyes go to edvr_logs\\eyes as BMP on each press, one hitch each."},
+        // TEMPORARY (the hull variant bench, 2026-11-10; hull_layer.h, docs/research-own-hull-layer-2026-11-08.md "Variant bench"): default
+        // unbound; a press runs every hull variant in turn (hold still ~10 s) and writes them to edvr_logs\eyes. Remove with the arc.
+        {&s.hullBenchKey, &s.hullBenchKeyText, Config::get().getString("hotkey.hull_bench", ""),
+         "hotkey.hull_bench", "hull bench",
+         "hotkey: hull_bench is set but bound nothing, so the hull variant bench cannot be run this session.",
+         " Runs every hull variant in turn (diag.hull_layer = separate; hold still ~10 s) to edvr_logs\\eyes; a second press cancels. Costs nothing until pressed."},
+        // The frame generation key (asked for 2026-11-08, for an A/B in the headset): each press flips fix.frame_generation
+        // through the Performance page's row, so the ini, the runtime's word and the Monitor block follow. Empty is off.
+        {&s.frameGenKey, &s.frameGenKeyText, Config::get().getString("hotkey.frame_generation", ""),
+         "hotkey.frame_generation", "frame generation",
+         "hotkey: frame_generation is set but bound nothing, so the frame generation key is off this session "
+         "(the Performance page's row still works).",
+         " Each press turns fix.frame_generation off, or back to the value it last turned off (auto at first; saved to the ini, like the Performance page's row), and says so in a toast."},
         // F213: the on-foot flight recorder's mark. Bound by default (F9 is in none of Elite's stock control schemes); a press only counts, writes one mark record when the
         // recorder is running and says so in the log either way. It does not touch the eye dump, which stalls a frame.
         {&s.onFootMarkKey, &s.onFootMarkKeyText, Config::get().getString("hotkey.on_foot_mark", "F9"),

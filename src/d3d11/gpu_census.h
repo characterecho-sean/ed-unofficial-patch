@@ -45,6 +45,10 @@ enum class GpuCensusSection : uint8_t {
     DoorMenu,                 // menu_panel.cpp's dispatch
     DoorUiLayerComposite,     // ui_layer.cpp's kComposite dispatch
     DoorSkyRing,              // sky_ring.cpp's dispatch (diag.sky_ring, TEMPORARY; docs/sky-flicker-2026-10-13.md) -- nested inside DoorTemporalWhole, so not a top-level door item
+    DoorFrameGenShadow,       // framegen_shadow.cpp's scorer (fix.frame_generation_shadow, TEMPORARY; docs/design-frame-generation-2026-10-26.md) -- nested inside DoorTemporalWhole, so not a top-level door
+                              // item; like the scope lens it has no turn in the rotation until it has been called this window, so with the key off the census samples exactly as before
+    DoorFrameGenSynth,        // framegen_synth.cpp's synthesizer (fix.frame_generation_shadow, TEMPORARY; docs/design-frame-generation-2026-10-26.md, Phase 2.1) -- nested inside DoorTemporalWhole and
+                              // in no total, called only with the key on, and without a turn in the rotation until called this window, exactly as the shadow scorer's section above
     DoorScopeZoom,            // scope_zoom.cpp's two passes (the scope lens, fix.native_on_foot_ads_scope_zoom; docs/design-vr-scope-magnification-2026-10-28.md section 8): a top-level
                               // door item, in the door total, called only in the right eye's scoped ADS -- it has no turn in the rotation until called this window, so with the key off the
                               // census samples exactly as it did before this section existed

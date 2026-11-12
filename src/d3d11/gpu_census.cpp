@@ -16,7 +16,7 @@ namespace edvr {
 namespace {
 
 constexpr size_t kSections = static_cast<size_t>(GpuCensusSection::Count);
-// DoorTemporalWhole .. DoorScopeZoom are indices 0..12; the in-frame sections
+// DoorTemporalWhole .. DoorScopeZoom are indices 0..14; the in-frame sections
 // start at FrameHologramPasses. Both ranges are contiguous by construction
 // (gpu_census.h), so a single index split is enough.
 constexpr size_t kDoorSections = static_cast<size_t>(GpuCensusSection::FrameHologramPasses);
@@ -31,13 +31,13 @@ unsigned occurrenceCapFor(GpuCensusSection section) noexcept {
 }
 
 // The door's parenthetical breakdown, DoorUpscaler..DoorScopeZoom (indices
-// 1..12) -- DoorTemporalWhole (index 0) has no slot of its own; it is the
+// 1..14) -- DoorTemporalWhole (index 0) has no slot of its own; it is the
 // "whole" that five of these nest inside (see gpuCensusLogLine). "sky ring -"
 // in a line means the diag.sky_ring dispatch never ran in the window (key off);
 // "lens -", that the scope lens ran in no frame of it (not in the scope's sights; the name is short because the worst-case census line is held under 1150 characters).
 constexpr const char* kDoorBreakdownNames[] = {
     "upscaler", "motion prep", "hologram resolve", "hologram depth copy", "hologram near-light", "hologram resolve draw",
-    "UI resolve", "sharpen", "menu", "UI layer composite", "sky ring", "lens"
+    "UI resolve", "sharpen", "menu", "UI layer composite", "sky ring", "frame generation shadow", "frame generation synth", "lens"
 };
 constexpr size_t kDoorBreakdownCount = sizeof(kDoorBreakdownNames) / sizeof(kDoorBreakdownNames[0]);
 // The three hologram sub-sections sit right after the umbrella (index DoorHologramResolve); the umbrella's line item carries them in brackets.
@@ -233,9 +233,12 @@ uint64_t turnOccurrences(GpuCensusSection owner) noexcept {
 }
 // The scope lens's door section (gpu_census.h) is a door item that runs only in the right eye's scoped ADS: like the world route's, it has no turn until called this window.
 constexpr size_t kScopeZoomSection = static_cast<size_t>(GpuCensusSection::DoorScopeZoom);
+// The frame-generation shadow scorer's door section (gpu_census.h) is called only with fix.frame_generation_shadow on: like the lens, no turn until called this window.
+constexpr size_t kFrameGenShadowSection = static_cast<size_t>(GpuCensusSection::DoorFrameGenShadow);
+constexpr size_t kFrameGenSynthSection = static_cast<size_t>(GpuCensusSection::DoorFrameGenSynth);   // the synthesizer's, with the same key and the same rule
 // A world-route, FSS reveal, on-foot depth readers', second-skin or scope lens section has no turn until it has been called this window (its first call counts whether or not it is on turn).
 bool hasNoTurnYet(size_t i) noexcept {
-    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || i == kOnFootDepthFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection || i == kLegacyGlassSection) &&
+    return ((i >= kWorldFirst && i < kWorldFirst + kWorldSections) || i == kFssFirst || i == kOnFootDepthFirst || (i >= kSkinFirst && i < kSkinFirst + kSkinSections) || i == kScopeZoomSection || i == kFrameGenShadowSection || i == kFrameGenSynthSection || i == kLegacyGlassSection) &&
            g_section[i].occurrences == 0;
 }
 // The next section to hold a turn: the fix sections after the first are not turns of their own, and a world-route, FSS reveal or second-skin
@@ -358,7 +361,8 @@ void logAndResetWindow(uint64_t now) {
     for (size_t i = 0; i < kDoorBreakdownCount; ++i) {
         const auto section = static_cast<GpuCensusSection>(1 + i);
         if (section == GpuCensusSection::DoorHoloDepthCopy || section == GpuCensusSection::DoorHoloNearLight ||
-            section == GpuCensusSection::DoorHoloResolveDraw)
+            section == GpuCensusSection::DoorHoloResolveDraw || section == GpuCensusSection::DoorFrameGenShadow ||
+            section == GpuCensusSection::DoorFrameGenSynth)
             continue;
         const Snapshot s = snapshotOf(g_section[1 + i], frames);
         appendItem(doorItems, kDoorBreakdownNames[i], s);
@@ -367,6 +371,9 @@ void logAndResetWindow(uint64_t now) {
             doorTotal += s.msPerFrame;
         }
     }
+    // The frame-generation shadow scorer (gpu_census.h DoorFrameGenShadow): nested inside the whole, in no total, its item on a line of its own below (the main line is full).
+    const Snapshot frameGenShadow = snapshotOf(g_section[kFrameGenShadowSection], frames);
+    const Snapshot frameGenSynth = snapshotOf(g_section[kFrameGenSynthSection], frames);   // Phase 2.1's synthesizer, the same way
     // F199: native on foot's depth readers (F85c's reticle march, F119's grid): part of the in-frame total, its item on a line of its own below (the main line is full).
     const Snapshot onFootDepth = snapshotOf(g_section[kOnFootDepthFirst], frames);
     double frameTotal = onFootDepth.msPerFrame;
@@ -496,6 +503,18 @@ void logAndResetWindow(uint64_t now) {
         appendItem(item, "on-foot depth", onFootDepth);
         Log::get().note("EDVR GPU census, native on foot's depth readers (F85c's reticle depth march and F119's head-containment grid, the GPU work behind F123's wall contact), included in the "
                         "in-frame figure above although not listed in it: %s.", item.c_str());
+    }
+    // The frame-generation shadow scorer's own line, only when it ran this window (fix.frame_generation_shadow on): inside the temporal whole's figure, never added to a total.
+    if (frameGenShadow.occurred) {
+        std::string item;
+        appendItem(item, "frame generation shadow", frameGenShadow);
+        Log::get().note("EDVR GPU census, the frame-generation shadow scorer (fix.frame_generation_shadow, TEMPORARY; inside the door's temporal whole above, not added to any total): %s.", item.c_str());
+    }
+    // The frame-generation synthesizer's own line, only when it ran this window (the same key): inside the temporal whole's figure, never added to a total.
+    if (frameGenSynth.occurred) {
+        std::string item;
+        appendItem(item, "frame generation synth", frameGenSynth);
+        Log::get().note("EDVR GPU census, the frame-generation synthesizer (fix.frame_generation_shadow, TEMPORARY; inside the door's temporal whole above, not added to any total): %s.", item.c_str());
     }
     // The hologram resolve's three parts (2026-10-13): their own line, because the main line's door items are at the log's length. They
     // are inside the umbrella's figure, so they are a breakdown of it and never part of a total.

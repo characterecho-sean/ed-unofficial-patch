@@ -42,6 +42,10 @@ void menuPanelSetNativeFrustum(const float tans[4]);
 void menuPanelClearNativeFrustum();
 void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bounds,
                                const float xf[12]);
+// The same composite over frame generation's S of the eye (native_menu.cpp nativeMenuFrameGenDraw), with
+// textures of its own (B's eye keeps its views and output), no door timing, and not counted as a draw.
+void* menuPanelCompositeNativeFrameGen(ID3D11Texture2D* src, int eye, const float* bounds,
+                                       const float xf[12]);
 
 enum MenuLineStyle : uint8_t {
     kMenuRow = 0,       // label left, value right

@@ -336,7 +336,7 @@ inline unsigned texelBytes(DXGI_FORMAT f) {
 // its slot. Textures are 16x16 (3D: 8^3) with full mips, patterned per level
 // and slice; arrays have 4 slices; buffers 16 structures, 64 typed elements
 // or 1 KB raw; samplers are linear wrap (comparison: LESS_EQUAL).
-inline bool bind(ID3D11Device* dev, ID3D11DeviceContext* ctx, const Decl& d, unsigned seed, std::string& why) {
+inline bool bind(ID3D11Device* dev, ID3D11DeviceContext* ctx, const Decl& d, unsigned seed, std::string& why, bool vertexStage = false) {
     const uint32_t salt = uint32_t(d.space) * 64u + d.slot;
     why = std::string("dummy for ") + d.space + std::to_string(d.slot) + " not created";
     if (d.space == 'b') {
@@ -348,7 +348,8 @@ inline bool bind(ID3D11Device* dev, ID3D11DeviceContext* ctx, const Decl& d, uns
         const D3D11_SUBRESOURCE_DATA init{data.data(), 0, 0};
         ComPtr<ID3D11Buffer> b;
         if (!d.size || d.size > 4096 || FAILED(dev->CreateBuffer(&bd, &init, &b))) return false;
-        ctx->PSSetConstantBuffers(d.slot, 1, b.GetAddressOf());
+        if (vertexStage) ctx->VSSetConstantBuffers(d.slot, 1, b.GetAddressOf());
+        else ctx->PSSetConstantBuffers(d.slot, 1, b.GetAddressOf());
         return true;
     }
     if (d.space == 's') {
@@ -361,7 +362,8 @@ inline bool bind(ID3D11Device* dev, ID3D11DeviceContext* ctx, const Decl& d, uns
         sd.MaxLOD = D3D11_FLOAT32_MAX;
         ComPtr<ID3D11SamplerState> s;
         if (FAILED(dev->CreateSamplerState(&sd, &s))) return false;
-        ctx->PSSetSamplers(d.slot, 1, s.GetAddressOf());
+        if (vertexStage) ctx->VSSetSamplers(d.slot, 1, s.GetAddressOf());
+        else ctx->PSSetSamplers(d.slot, 1, s.GetAddressOf());
         return true;
     }
     ComPtr<ID3D11Resource> res;
@@ -440,7 +442,8 @@ inline bool bind(ID3D11Device* dev, ID3D11DeviceContext* ctx, const Decl& d, uns
     }
     ComPtr<ID3D11ShaderResourceView> srv;
     if (FAILED(dev->CreateShaderResourceView(res.Get(), &vd, &srv))) return false;
-    ctx->PSSetShaderResources(d.slot, 1, srv.GetAddressOf());
+    if (vertexStage) ctx->VSSetShaderResources(d.slot, 1, srv.GetAddressOf());
+    else ctx->PSSetShaderResources(d.slot, 1, srv.GetAddressOf());
     why.clear();
     return true;
 }
@@ -708,6 +711,114 @@ inline Result compare(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::ve
           "identity: MRT6 holds 2 * slot + 1 and the fragment's depth on every texel the patched draw covered");
     check(r.uncoveredBad == 0,
           "identity: MRT6 remains bit-exact clear (-1, 0) on every uncovered or discarded texel");
+    return r;
+}
+
+// The own-discard variant's proof on a real pixel shader (diag.hull_layer = separate, TEMPORARY; dxbc_engine_velocity.h
+// kEngineVelocityOwnMaskSlot): over the same synthetic inputs and resources as compare(), under both data sets,
+//  - with an own mask at t127 that does not name the slot (5), the variant writes SV_Target0..3, depth and MRT6
+//    bit-identically to the normal patched shader;
+//  - with a mask that names it, the variant writes nothing: every target, the depth and MRT6 keep their clears.
+// `discardPs` is the variant of `patchedPs` (the same inputs, the same guard); a guarded pair is not driven here (its
+// t3 snapshot), the synthetic overlay rig proves that combination.
+inline Result ownDiscard(ID3D11Device* dev, ID3D11DeviceContext* ctx, const std::vector<BYTE>& stockPs,
+                         const std::vector<BYTE>& patchedPs, const std::vector<BYTE>& discardPs, const edvr::EngineVelocityInputs& in,
+                         void (*check)(bool, const char*), const char* name) {
+    using namespace detail;
+    Result r;
+    std::string why;
+    std::vector<Element> patchedIn, stockIn;
+    std::vector<Decl> decls;
+    DXGI_FORMAT formats[4] = {DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
+    ComPtr<ID3DBlob> vsCode;
+    const bool ready = inputs(patchedPs, patchedIn, why) && inputs(stockPs, stockIn, why) &&
+                       (vsCode = compileVs(vsSource(patchedIn, in), why)).Get() != nullptr &&
+                       covers(vsCode.Get(), patchedIn, why) && declarations(stockPs, decls, why) && outputs(stockPs, formats, why);
+    if (!ready) {
+        ctx->ClearState();
+        r.skipped = why;
+        std::printf("  own discard: %s: skipped: %s\n", name, why.c_str());
+        return r;
+    }
+    ComPtr<ID3D11VertexShader> vs;
+    ComPtr<ID3D11PixelShader> patched, discard;
+    check(SUCCEEDED(dev->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), nullptr, &vs)) &&
+              SUCCEEDED(dev->CreatePixelShader(patchedPs.data(), patchedPs.size(), nullptr, &patched)) &&
+              SUCCEEDED(dev->CreatePixelShader(discardPs.data(), discardPs.size(), nullptr, &discard)),
+          "own discard: the synthetic VS, the patched PS and its own-discard variant created");
+    if (!vs || !patched || !discard) return r;
+    // Two masks of 16 records: none own, and the slot (5) own.
+    ComPtr<ID3D11ShaderResourceView> masks[2];
+    for (unsigned m = 0; m < 2; ++m) {
+        uint32_t words[16] = {};
+        if (m == 1) words[5] = 1u;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = sizeof(words);
+        bd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+        D3D11_SUBRESOURCE_DATA init{words, 0, 0};
+        ComPtr<ID3D11Buffer> buf;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
+        sd.BufferEx.NumElements = 16;
+        sd.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
+        check(SUCCEEDED(dev->CreateBuffer(&bd, &init, &buf)) && SUCCEEDED(dev->CreateShaderResourceView(buf.Get(), &sd, &masks[m])),
+              "own discard: the raw own masks created");
+        if (!masks[m]) return r;
+    }
+    unsigned kept = 0, keptBad = 0, gone = 0, goneBad = 0;
+    for (unsigned seed = 0; seed < 2; ++seed) {
+        Frame normal, notOwn, own;
+        bool ran = true;
+        for (unsigned m = 0; m < 3 && ran; ++m) {
+            ctx->ClearState();
+            for (const auto& d : decls)
+                if (!bind(dev, ctx, d, seed, why)) {
+                    ctx->ClearState();
+                    r.skipped = why;
+                    std::printf("  own discard: %s: skipped: %s\n", name, why.c_str());
+                    return r;
+                }
+            if (m > 0) {
+                ID3D11ShaderResourceView* mask = masks[m - 1].Get();
+                ctx->PSSetShaderResources(edvr::kEngineVelocityOwnMaskSlot, 1, &mask);
+            }
+            ran = draw(dev, ctx, vs.Get(), m == 0 ? patched.Get() : discard.Get(), formats, true, m == 0 ? normal : m == 1 ? notOwn : own);
+        }
+        check(ran, "own discard: the three draws ran and read back");
+        if (!ran) return r;
+        for (unsigned t = 0; t < 6; ++t) {
+            const std::vector<BYTE>& n = t < 4 ? normal.target[t] : t == 4 ? normal.depth : normal.slot;
+            const std::vector<BYTE>& a = t < 4 ? notOwn.target[t] : t == 4 ? notOwn.depth : notOwn.slot;
+            const std::vector<BYTE>& b = t < 4 ? own.target[t] : t == 4 ? own.depth : own.slot;
+            if (n.empty()) continue;
+            const unsigned bytes = t < 4 ? 16u : t == 4 ? 4u : 8u;
+            BYTE clear[16] = {};
+            if (t < 4) clearTexel(formats[t], clear);
+            if (t == 5) { const float c[2] = {-1.0f, 0.0f}; std::memcpy(clear, c, 8); }
+            for (unsigned p = 0; p < kSize * kSize; ++p) {
+                const size_t at = size_t(p) * bytes;
+                ++kept;
+                if (a.size() != n.size() || std::memcmp(&a[at], &n[at], bytes) != 0) ++keptBad;
+                ++gone;
+                if (b.size() != n.size() || std::memcmp(&b[at], clear, bytes) != 0) ++goneBad;
+            }
+        }
+        // The draw must have covered something, or "discarded" proves nothing.
+        for (unsigned p = 0; p < kSize * kSize; ++p) {
+            uint32_t w;
+            std::memcpy(&w, &normal.depth[size_t(p) * 4], 4);
+            r.covered += w != 0u ? 1u : 0u;
+        }
+    }
+    ctx->ClearState();
+    r.driven = true;
+    std::printf("  own discard: %s: 2 data sets: not own %u texels compared to the patched shader, %u differ; own %u texels, "
+                "%u written; %u covered\n", name, kept, keptBad, gone, goneBad, r.covered);
+    check(r.covered > 0, "own discard: vacuous -- the patched draw covered no texel");
+    check(keptBad == 0, "own discard: a record outside the mask writes SV_Target0..3, depth and MRT6 bit-identically to the patched shader");
+    check(goneBad == 0, "own discard: a record in the mask writes nothing (targets, depth and MRT6 keep their clears)");
     return r;
 }
 

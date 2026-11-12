@@ -2,6 +2,8 @@
 #include "../../src/common/frame_flag.h"
 #include "../../src/common/parallel_projection_notice.h"
 #include "../../src/d3d11/menu_panel.h"
+#include "../../src/d3d11/native_menu.h"            // nativeMenuFrameGenDraw: EDVR's menu on frame generation's S
+#include "../../src/common/framegen_slot_report.h"  // kFrameGenFinish*
 #include "../../src/openxr/native_menu_client.h"
 #include "../../src/openxr/eye_capture.h"
 #include "../../src/openxr/immediate_executor.h"
@@ -286,6 +288,74 @@ int wmain(int argc, wchar_t** argv) {
         check(leftChanged < baseline.size() && rightChanged < baseline.size(), "color pass remains outside panel");
     } else check(false, "readback sizes");
     if (left) left->Release(); if (right) right->Release();
+
+    // Frame generation: EDVR's menu on S (src/d3d11/native_menu.h nativeMenuFrameGenDraw), drawn in place on the finished S the way the treat draws it on B. A still head: S's
+    // pixels are B's exactly. An anchored panel and a head step: S is what the treat draws for S's own eye (B's eye carried by the step), and not B. A head-locked panel and the
+    // same step: B's pixels again. Nothing showing: S untouched. Another thread: refused (menu), S untouched.
+    {
+        const float idRot[9] = {1,0,0, 0,1,0, 0,0,1}, zeroT[3] = {0,0,0};
+        const float a = 4.f * 3.14159265f / 180.f;
+        const float turn[9] = {std::cos(a),0,std::sin(a), 0,1,0, -std::sin(a),0,std::cos(a)}, stepT[3] = {.01f,0,0};
+        // eye_S = eye_B * step^-1 (x_S = rot x_B + t): rotation E rot^T, origin p - E rot^T t.
+        float eyesS[2][12]{};
+        for (int e = 0; e < 2; ++e) {
+            float r[9];
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) r[i*3+j] = eyes[e][i*4]*turn[j*3] + eyes[e][i*4+1]*turn[j*3+1] + eyes[e][i*4+2]*turn[j*3+2];
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) eyesS[e][i*4+j] = r[i*3+j];
+                eyesS[e][i*4+3] = eyes[e][i*4+3] - (r[i*3]*stepT[0] + r[i*3+1]*stepT[1] + r[i*3+2]*stepT[2]);
+            }
+        }
+        constexpr UINT bg = 0xff202020u;
+        // B through the treat (eye 0, the bounds given) and S through the frame-generation draw, each on a fresh source; returns both images.
+        const auto bImage = [&](const float b[4], std::vector<UINT>& px) {
+            ComPtr<ID3D11Texture2D> src; ID3D11Texture2D* out = nullptr; float ob[4]{};
+            const bool ok = makeSource(device.Get(), context.Get(), src, bg) && table.treatEye(table.context, 0, src.Get(), b, &out, ob) == S_OK && out &&
+                            readPixels(device.Get(), context.Get(), out, px);
+            if (out) out->Release();
+            return ok;
+        };
+        const auto sImage = [&](const float b[4], const float* rot, const float* t, std::vector<UINT>& px, uint32_t& why) {
+            ComPtr<ID3D11Texture2D> s;
+            const bool ok = makeSource(device.Get(), context.Get(), s, bg);
+            why = ok ? nativeMenuFrameGenDraw(context.Get(), 0, s.Get(), b, rot, t) : 99u;
+            return ok && readPixels(device.Get(), context.Get(), s.Get(), px);
+        };
+        const auto differing = [](const std::vector<UINT>& x, const std::vector<UINT>& y) {
+            size_t n = 0; for (size_t i = 0; i < x.size() && i < y.size(); ++i) n += x[i] != y[i]; return x.size() == y.size() ? n : size_t(-1);
+        };
+        std::vector<UINT> b0, s0, b1, s1, bFlip, sFlip;
+        uint32_t why = 0;
+        check(bImage(normal, b0) && sImage(normal, idRot, zeroT, s0, why) && why == edvr::kFrameGenFinishDone && differing(b0, baseline) > 0 && s0 == b0,
+              "menu on S: a still head: S's menu pixels are B's exactly");
+        check(bImage(flipped, bFlip) && sImage(flipped, idRot, zeroT, sFlip, why) && sFlip == bFlip && bFlip != b0, "menu on S: ...with B's flips too");
+        // S's own eye through the treat: the reference.
+        check(table.publishPose(table.context, head, eyesS, frusta, 17, 3) == S_OK && bImage(normal, b1), "menu on S: the treat for S's eye (reference)");
+        check(table.publishPose(table.context, head, eyes, frusta, 17, 3) == S_OK && sImage(normal, turn, stepT, s1, why) && why == edvr::kFrameGenFinishDone, "menu on S: S drawn with the step");
+        const size_t off = differing(s1, b1), moved = differing(s1, b0);
+        char text[200];
+        std::snprintf(text, sizeof(text), "menu on S: an anchored panel and a 4 degree turn with a 1 cm step: S is the treat for S's eye (%zu px differ, float rounding) and moved off B (%zu px)", off, moved);
+        check(off <= 64 && moved > 200, text);
+        std::printf("native_menu_test: %s\n", text);
+        // Head-locked: the panel rides the head, so S's eye sees it where B's did.
+        edvr::setMenuHeadLock(true, 9.f, -8.f);
+        std::vector<UINT> bh, sh;
+        check(bImage(normal, bh) && sImage(normal, turn, stepT, sh, why) && why == edvr::kFrameGenFinishDone && sh == bh && differing(bh, baseline) > 0,
+              "menu on S: head-locked and the same step: S's menu pixels are B's exactly");
+        edvr::setMenuHeadLock(false, 0.f, 0.f);
+        // Nothing showing: untouched (as B gets nothing).
+        edvr::setMenuVisible(0.f);
+        std::vector<UINT> sNone;
+        check(sImage(normal, turn, stepT, sNone, why) && why == edvr::kFrameGenFinishDone && sNone == baseline, "menu on S: the menu not showing: S untouched, finished");
+        edvr::setMenuVisible(1.f);
+        // Another thread: the menu shows and cannot be drawn there.
+        std::atomic<uint32_t> otherWhy{0};
+        ComPtr<ID3D11Texture2D> sOther; makeSource(device.Get(), context.Get(), sOther, bg);
+        std::thread other([&] { otherWhy = nativeMenuFrameGenDraw(context.Get(), 0, sOther.Get(), normal, idRot, zeroT); }); other.join();
+        std::vector<UINT> sOtherPx;
+        check(otherWhy == edvr::kFrameGenFinishMenu && readPixels(device.Get(), context.Get(), sOther.Get(), sOtherPx) && sOtherPx == baseline,
+              "menu on S: another thread: refused (menu), S untouched");
+    }
 
     // Head-locked monitor: change the actual source texture dimensions and
     // the published sizing channel together, then compare what was rendered.

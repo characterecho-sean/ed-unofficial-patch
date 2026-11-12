@@ -479,6 +479,18 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
 // The frame that arrived at this eye's door this sequence is exactly the temporal pass's output
 // (EDVR's own, rewritten in full each frame): the `ownedFrame` of a composite over `source`.
 bool uiLayerDoorFromPass(uint32_t eye);
+// Frame generation, Phase 2.3b: what the composite above did for this eye at `sequence`, so the synthesized S is finished the same way (native_sharpen.cpp, framegen_synth.h).
+// False when no composite was entered for the eye at that sequence. `layer` is the view the composite read (the SMAA output when the HUD was smoothed), `mult` its multiply
+// (null: none drew), w x h the layer's size and uv the rectangle it took for the frame's region; layer null: no UI was composited. pictureEdit: the door rewrote B's picture
+// before the UI (1 the shield ripple applied, 2 a press of the sights opened the scope lens), which S does not have. Views are the layer's, valid until its next composite.
+struct UiLayerFrameGenInputs {
+    ID3D11ShaderResourceView* layer = nullptr;
+    ID3D11ShaderResourceView* mult = nullptr;
+    uint32_t w = 0, h = 0;
+    float uv[4] = {};
+    uint32_t pictureEdit = 0;
+};
+bool uiLayerFrameGenInputs(uint64_t sequence, uint32_t eye, UiLayerFrameGenInputs* out);
 
 // ---- the flat profile's mono adapter (flat_ui_layer.h; docs/design-flat-ui-quality-2026-10-05.md) ----
 //

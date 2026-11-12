@@ -218,6 +218,7 @@ const char* kSampleIni =
     "# Developer instrument. Empty is off.\r\n"
     "#dump_draws =\r\n"
     "#dump_eyes =\r\n"
+    "#frame_generation =\r\n"
     "read_game_bindings = 1\r\n"
     "\r\n"
     "[menu]\r\n"
@@ -239,6 +240,7 @@ void testIniRoundTrip() {
         {"dump_draws", joy(kGladiator, 0)},
         {"dump_eyes", pad(kPadLeftShoulder)},
         {"dump_eyes", key(0xBA)},                  // ';': the one the ini's own comment rule would eat
+        {"frame_generation", key(0xE2)},           // the OEM_102 key (vk 0xE2), a free one on ISO keyboards
     };
     for (const Case& c : cases) {
         const std::string text = format(c.value);
@@ -2392,7 +2394,7 @@ void testRows() {
         checkf(contains(all, nEveryone, i), "hotkey.%s is on the page with developer mode off", key);
         checkf(contains(dev, nDev, i), "hotkey.%s is on the page with developer mode on", key);
     }
-    for (const char* key : {"dump_draws", "dump_eyes"}) {
+    for (const char* key : {"dump_draws", "dump_eyes", "frame_generation"}) {
         const int i = rowIndex(key);
         checkf(i >= 0, "hotkey.%s has a generated row", key);
         checkf(i >= 0 && kMenuRows[i].kind == MenuKind::Hotkey && kMenuRows[i].tier == MenuTier::Advanced &&
@@ -2401,7 +2403,7 @@ void testRows() {
         checkf(!contains(all, nEveryone, i), "hotkey.%s is NOT on the page with developer mode off", key);
         checkf(contains(dev, nDev, i), "hotkey.%s is on the page with developer mode on", key);
     }
-    check(nEveryone == 3 && nDev == 5, "three rows for everyone (menu, AA comparison, camera history), five in developer mode");
+    check(nEveryone == 3 && nDev == 6, "three rows for everyone (menu, AA comparison, camera history), six in developer mode");
     check(rowIndex("read_game_bindings") < 0, "a plain [hotkey] setting is not a row");
     // Table order is the page's order: the menu key first.
     check(nEveryone > 0 && strcmp(kMenuRows[all[0]].key, "menu") == 0, "the menu key leads the page");

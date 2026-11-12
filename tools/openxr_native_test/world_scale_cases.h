@@ -94,6 +94,7 @@ template<class Check> void runWorldScaleCases(Check&& check) {
         "world scale wiring: the temporal frame's eye transforms are the snapshot's, made from the geometry it is handed (the scaled one)");
   // ---- the readers of eyeToHead are the classified ones ----
   const std::vector<std::string> want={
+    "src\\common\\framegen_synth_math.h",      // (a) frame generation 2.2: the head step to the slot (frameGenSlotStep) composes the eye as Elite is given it, the pass's own
     "src\\common\\native_temporal.h",          // (a) the temporal frame struct: the eye transforms as given to Elite
     "src\\d3d11\\concourse_vr_bake_core.h",    // (a) TEMPORARY, the concourse cull's VR bake: where Elite's eye cameras land for an aimed base (the pair as Elite is given it)
     "src\\d3d11\\optimized_station.cpp",       // (a) TEMPORARY, ... its tick: the head and the eye pair of the frame, from nativeTemporalHeadPose
@@ -116,5 +117,23 @@ template<class Check> void runWorldScaleCases(Check&& check) {
   for(const auto& name:want)if(std::find(got.begin(),got.end(),name)==got.end())extra+=" (gone: "+name+")";
   if(!extra.empty())std::printf("world scale: the files that name eyeToHead changed:%s\n",extra.c_str());
   check(extra.empty(),"world scale: the files that name eyeToHead are the classified readers (a new one must be classified: it sees the scaled pair if it checks Elite's camera, the located eyes if it draws EDVR's own)");
+  // Frame generation 2.3 (Lock), the host's wiring as source pins (the schedule itself is openxr_frame_test's): the pair boundary runs in WaitGetPoses before the game's wait
+  // (and after the early returns that give a frame up), the late count is taken after that wait, and each hook returns at once with the key off.
+  {
+    const size_t boundaryAt=host.find("    framegenLockPairBoundary();   // frame generation 2.3");
+    const size_t retire=host.find("    timingRetire(); // Provider waitBegin rejects an unfinished previous pair.");
+    const size_t intro=host.find("    if(introRecentreRequested()) {");
+    const size_t gameWait=host.find("    lastCompositorResult=boundary.waitAndBegin(pacing);");
+    const size_t afterWait=host.find("    framegenLockAfterWait();   // frame generation 2.3");
+    check(boundaryAt!=std::string::npos&&intro<boundaryAt&&boundaryAt<retire&&retire<gameWait&&gameWait<afterWait&&afterWait!=std::string::npos,
+          "frame generation lock wiring: the pair boundary runs after WaitGetPoses' early returns and before the game's wait; the late count after it");
+    check(has(host,"    const uint32_t word=framegenLockWord();\n    const bool key=frameGenWordArmed(word);\n    if(!key&&!fl.was)return;")&&has(host,"  void framegenLockAfterWait() {\n    auto& fl=framegenLock;\n    if(!fl.slotRan)return;")&&
+              has(host,"    if(framegenLock.was)framegenLock.lastPairSequence=0;")&&has(host,"    if(framegenLock.was&&result==XR_SUCCESS&&pixels&&!frameWithheld) {")&&
+              has(host,"    if(!fl.was||!previousPairValid)return XR_ERROR_FUNCTION_UNSUPPORTED;"),
+          "frame generation lock wiring: with the key off (and never on) every hook returns before it touches anything");
+    check(has(host,"FrameGenLockConditions c;")&&has(host,"c.notDeferred=!(featureFrameKnown&&featureFrame.deferredPacing)&&!boundary.deferred();")&&
+              has(host,"c.finishDone=!pendingFrameEndFinish;")&&has(host,"c.admitted=frameGenWordAdmits(word);")&&has(host,"c.projection=fl.lastPairSequence!=0&&fl.lastPairSequence==activeFrameSequence&&!state.frameOpen()&&!frameWithheld;"),
+          "frame generation lock wiring: Lock stands aside for deferred pacing, waits for an overlapped finish, follows only a fresh pair with no frame open, and (2.4) engages in auto only while word 17 admits it");
+  }
 }
 } // namespace edvr::openxr::test

@@ -16,6 +16,7 @@
 #include "draw_gate.h"      // drawGateArm: a census armed mid-frame must not
                             // lose the frame it counts from
 #include "exposure_fix.h"   // lookupShaderHash: the shader hash registry
+#include "hull_layer.h"     // hullLayerWanted: dump v2 lifts an eye dump's census to the line ceiling (diag.hull_layer, TEMPORARY)
 
 namespace edvr {
 
@@ -59,6 +60,12 @@ constexpr uint32_t kCensusFramesMax = 30;
 // on the sessions that ask for it.
 constexpr uint32_t kMaxLines = 4096;
 constexpr uint32_t kMaxLinesCeiling = 16384;
+// Dump v2 (diag.hull_layer, TEMPORARY; docs\research-own-hull-layer-2026-11-08.md "Dump v2"): a census an eye dump arms (the "DC eye
+// capture link") records up to the ceiling whatever advanced.census_lines says, so a station frame is not cut at 4096 eye lines
+// (censuses 4-6 of edvr_gfx_20261108_231250.log). Bounded: when frames 0 and 1 already spent half the ceiling (a dense frame) the
+// census ends after them, and only the first kMaxLiftedCensuses of a session are lifted (at ~140 bytes a line, each lifted census
+// is at most ~4.6 MB of the 16 MB log, and ~2.3 MB of it eye lines).
+constexpr uint32_t kMaxLiftedCensuses = 3;
 
 // Distinct bound objects seen across one census. The first field capture
 // refuted the "a few dozen" estimate this started from: a cockpit census
@@ -136,6 +143,8 @@ bool     g_forceOffscreen = false; // the auto arm's rider: this census records
                                  // because it exists to watch an offscreen build
 uint32_t g_framesWanted = kCensusFrames;  // this census's length, from config
 uint32_t g_maxLines = kMaxLines; // this census's line cap, from config
+bool     g_lifted = false;       // dump v2: this census's cap was lifted to the ceiling (an eye dump's census, diag.hull_layer on)
+uint32_t g_liftedCensuses = 0;   // ... and how many were this session
 // The flat NumLock request (drawCensusFlatRequest): when set, the next census takes its length and cap from these, not from config.
 bool     g_flatRequest = false;
 uint32_t g_flatFrames = 0;
@@ -935,6 +944,30 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
         }
     }
 
+    // Render targets 1-3 (2026-11-08, docs/research-own-hull-layer-2026-11-08.md). r= has only ever been slot 0, so the
+    // G-buffer's other three targets and the lighting pass's second target were invisible; the hull layer's re-issue needs
+    // them to join each lighting draw's t1-3 to the G-buffer it reads, through the id table's res=. Omitted when all three
+    // are empty, as vt= is.
+    char mt[96] = "";
+    if (st.ok) {
+        ID3D11RenderTargetView* rtv[4] = {};
+        bool got = false;
+        guardedBudget(g_iaBudget, [&] {
+            ctx->OMGetRenderTargets(4, rtv, nullptr);
+            got = true;
+        });
+        if (got && (rtv[1] || rtv[2] || rtv[3])) {
+            char mb[3][24];
+            _snprintf_s(mt, sizeof(mt), _TRUNCATE, " mt=%s,%s,%s",
+                        bindingToken(rtv[1], Kind::kView, mb[0], sizeof(mb[0])),
+                        bindingToken(rtv[2], Kind::kView, mb[1], sizeof(mb[1])),
+                        bindingToken(rtv[3], Kind::kView, mb[2], sizeof(mb[2])));
+        }
+        for (ID3D11RenderTargetView* v : rtv) {
+            if (v) v->Release();
+        }
+    }
+
     // WHERE THE DRAW LANDS, which this has never recorded (2026-08-30).
     //
     // The black-planet hunt reached a draw that is ISSUED for both eyes,
@@ -1153,9 +1186,9 @@ static void recordDraw(ID3D11DeviceContext* ctx, char kind, uint32_t count,
     }
 
     Log::get().note(
-        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s%s%s q=%u",
+        "%s %u #%u %c n=%u i=%u r=%s d=%s c=%s s=%s,%s,%s,%s%s%s%s%s%s%s%s q=%u",
         tag, g_frameOrdinal, index, kind, count, instances, r, d, c, s0, s1,
-        s2, s3, tail, xt, pt, vsr, vt, sv, q);
+        s2, s3, tail, xt, pt, vsr, mt, vt, sv, q);
 
     // The CB watch, after the draw's own line so a DCW dump always follows
     // the draw it belongs to. Any recorded draw can match -- DC for the FSS
@@ -1680,6 +1713,12 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         g_unseenThisFrame = 0;
         g_seq = 0;
         ++g_frameOrdinal;
+        // Dump v2: a lifted census whose frames 0 and 1 spent half the ceiling ends after them (the log stays bounded; both are whole).
+        if (g_lifted && g_frameOrdinal == 2 && detail::g_drawCensusFramesLeft > 1 && g_eyeLines > g_maxLines / 2) {
+            Log::get().note("DC eye capture link: census=%u ends after 2 frames: dense, %u eye lines in frames 0-1 (over half of %u; diag.hull_layer, dump v2)",
+                            g_censusNo, g_eyeLines, g_maxLines);
+            detail::g_drawCensusFramesLeft = 1;
+        }
         if (--detail::g_drawCensusFramesLeft == 0) finish();
     }
     if (detail::g_drawCensusPending) {
@@ -1704,6 +1743,22 @@ void drawCensusFrameBoundary(uint32_t frameNo) {
         detail::g_drawCensusFramesLeft = g_framesWanted;
         detail::g_drawCensusCaptureIdActive=detail::g_drawCensusCaptureIdPending;
         detail::g_drawCensusCaptureIdPending=false;
+        // Dump v2 (diag.hull_layer on): an eye dump's census records up to the ceiling (kMaxLiftedCensuses above says the bounds).
+        g_lifted = false;
+        if (detail::g_drawCensusCaptureIdActive && hullLayerWanted()) {
+            if (g_liftedCensuses < kMaxLiftedCensuses) {
+                g_lifted = true;
+                ++g_liftedCensuses;
+                if (g_maxLines < kMaxLinesCeiling) g_maxLines = kMaxLinesCeiling;
+                Log::get().note("DC eye capture link: census=%u lines=%u (diag.hull_layer, dump v2: an eye dump's census records up to the ceiling; %u of %u "
+                                "this session; it ends after 2 frames when they are dense)",
+                                g_censusNo, g_maxLines, g_liftedCensuses, kMaxLiftedCensuses);
+            } else {
+                Log::get().note("DC eye capture link: census=%u lines=%u (diag.hull_layer, dump v2: %u censuses already lifted this session; this one keeps "
+                                "advanced.census_lines)",
+                                g_censusNo, g_maxLines, kMaxLiftedCensuses);
+            }
+        }
         g_frameOrdinal = 0;
         g_draws = 0;
         g_drawsThisFrame = 0;

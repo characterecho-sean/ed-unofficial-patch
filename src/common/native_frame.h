@@ -46,6 +46,17 @@
 // the percent the runtime moves the eyes Elite is told about by, in worldScalePercent (the last of the retired guard's 21 words; layout and size unchanged). A
 // provider that refuses 11 steps the runtime down to 10, which reads 100 (Elite's own scale). Same hand-copied-DLLs rule.
 #define EDVR_NATIVE_FRAME_VERSION_11 11u
+// Version 12 (frame generation, Phase 1: fix.frame_generation_shadow) is a ladder step like 11: the same shapes (input version 3, the whole output struct), and a version 12
+// answer carries 1 in reservedTerrainGuard[EDVR_NATIVE_FRAME_FRAMEGEN_SHADOW_WORD] while the key is on, 0 otherwise (layout and size unchanged). A provider that refuses 12
+// steps the runtime down to 11, and a runtime that never asks 12 never reads the word: either way the runtime reads "off". Same hand-copied-DLLs rule.
+#define EDVR_NATIVE_FRAME_VERSION_12 12u
+#define EDVR_NATIVE_FRAME_FRAMEGEN_SHADOW_WORD 18u
+// Frame generation, Phase 2.3 (fix.frame_generation = on, TEMPORARY): a version 12 answer from a d3d11.dll that knows the key carries 1 in reservedTerrainGuard[17] while it is on,
+// 0 otherwise. No ladder step: a version 12 provider from before 2.3 leaves the word zero (the retired guard's words are written zero), and a runtime from before it never reads
+// it; either way the runtime reads off. An answer older than 12 has the word zeroed by the runtime's ladder (native_frame_client.h).
+// Phase 2.4 (fix.frame_generation = auto): 2 while auto and the d3d11 half's performance gate does not admit Lock, 3 while it does (framegen_gate.h kFrameGenWord*). A runtime from
+// 2.3 reads only 1 as on, so auto reads off there; a d3d11.dll from 2.3 never writes 2 or 3.
+#define EDVR_NATIVE_FRAME_FRAMEGEN_LOCK_WORD 17u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_1 1u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_2 2u
 #define EDVR_NATIVE_FRAME_INPUT_VERSION_3 3u
@@ -158,6 +169,8 @@ struct EdvrNativeFrameOutput {
     // B3 (experimental.native_on_foot_ads_scope_zoom_full_detail, scope_zoom_window.h): in a version 11 answer only, the first five of these 19 words carry the scope zoom's window: the magic and a flag,
     // the narrowing M, the window's centre in the left eye's tangent plane (x, y), and how black the left eye's uncovered strip is (floats' bits). All zero when there is none; offset, size and
     // type unchanged, and the other 14 words are the retired guard's.
+    // Frame generation, Phase 1: in a version 12 answer only, word 18 (EDVR_NATIVE_FRAME_FRAMEGEN_SHADOW_WORD) is 1 while fix.frame_generation_shadow is on.
+    // Frame generation, Phase 2.3: in a version 12 answer only, word 17 (EDVR_NATIVE_FRAME_FRAMEGEN_LOCK_WORD) is 1 while fix.frame_generation is on (2.4: 2 or 3 in auto).
     uint32_t reservedTerrainGuard[19];
     // World scale (visual.world_scale, docs\world-scale.md), in a version 11 answer only: the percent the runtime moves the two eye origins Elite is told about by,
     // about their midpoint (50 to 200; 100 is Elite's own scale). Taken from the last of the retired guard's 21 words; offset, size and type unchanged. A provider
@@ -288,6 +301,9 @@ void nativeFrameSetLookYaw(float total, uint32_t gameFrame, uint32_t resetSerial
 // F33 (body align): the seated-space translation (metres) the next version 8 beginFrame hands the runtime, and a serial that moves each time the
 // frame thread takes a new value. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
 void nativeFrameSetEyeAlign(const float offsetSeated[3], uint32_t serial);
+void nativeFrameSetFrameGenShadow(bool on);   // fix.frame_generation_shadow, carried in a version 12 answer's reservedTerrainGuard[EDVR_NATIVE_FRAME_FRAMEGEN_SHADOW_WORD]
+void nativeFrameSetFrameGenLock(bool on);     // fix.frame_generation (Phase 2.3), carried in a version 12 answer's reservedTerrainGuard[EDVR_NATIVE_FRAME_FRAMEGEN_LOCK_WORD]: 1 or 0
+void nativeFrameSetFrameGenLockWord(uint32_t word);   // Phase 2.4: the word itself (framegen_gate.h kFrameGenWord*: 0 off, 1 on, 2 auto closed, 3 auto open)
 void nativeFrameSetNowPose(uint32_t mode);   // F40/F42: the live now-pose mode (0 next, 1 render, 2 render_locked), carried in version 9 output
 // F61 (TEMPORARY): the rotation calibration's seated yaw and pitch (radians, about the head), carried in version 9 output's reservedOffset[0..1].
 // Zero when fix.native_on_foot_rot_calibrate is off. Set by the d3d11 frame thread; read under the provider's lock by beginFrame.
@@ -318,10 +334,11 @@ bool nativeFrameNowPose(EdvrNativeNowPose& out);
 uint32_t nativeFrameWorldScale();
 
 // F101: what the runtime sends for each step of its version ladder (native_frame_client.h), here so the provider's rig drives the same shapes.
-// The output a version asks with: the whole struct for 8 to 11, each older version's own prefix below.
+// The output a version asks with: the whole struct for 8 to 12, each older version's own prefix below.
 inline EdvrNativeFrameOutput nativeFrameAsk(uint32_t version) {
     if (version >= EDVR_NATIVE_FRAME_VERSION_8)
-        return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput), version >= EDVR_NATIVE_FRAME_VERSION_11 ? EDVR_NATIVE_FRAME_VERSION_11 :
+        return EdvrNativeFrameOutput{sizeof(EdvrNativeFrameOutput), version >= EDVR_NATIVE_FRAME_VERSION_12 ? EDVR_NATIVE_FRAME_VERSION_12 :
+                                     version >= EDVR_NATIVE_FRAME_VERSION_11 ? EDVR_NATIVE_FRAME_VERSION_11 :
                                      version >= EDVR_NATIVE_FRAME_VERSION_10 ? EDVR_NATIVE_FRAME_VERSION_10 :
                                      version >= EDVR_NATIVE_FRAME_VERSION_9 ? EDVR_NATIVE_FRAME_VERSION_9 : EDVR_NATIVE_FRAME_VERSION_8};
     if (version >= EDVR_NATIVE_FRAME_VERSION_6) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_6, EDVR_NATIVE_FRAME_VERSION_6};
@@ -331,7 +348,7 @@ inline EdvrNativeFrameOutput nativeFrameAsk(uint32_t version) {
     if (version == EDVR_NATIVE_FRAME_VERSION_2) return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_2, EDVR_NATIVE_FRAME_VERSION_2};
     return EdvrNativeFrameOutput{EDVR_NATIVE_FRAME_OUTPUT_SIZE_1, EDVR_NATIVE_FRAME_VERSION_1};
 }
-// The input shape that rides an ask of that version: input version 3 (the whole struct) with 10 and 11, version 2 (the words through ringCount) with 7 to
+// The input shape that rides an ask of that version: input version 3 (the whole struct) with 10 to 12, version 2 (the words through ringCount) with 7 to
 // 9, version 1 (the words through valid, padded as the released struct is) below 7. Only size and version change: a provider reads no word past
 // the shape it was told.
 inline void nativeFrameInputShape(uint32_t version, EdvrNativeFrameInput& in) {

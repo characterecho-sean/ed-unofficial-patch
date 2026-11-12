@@ -453,6 +453,8 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrDepthProbeSelftest ^
     --extra-export edvrAcquireNativeMenu ^
     --extra-export edvrAcquireNativeTemporal ^
+    --extra-export edvrFrameGenNoteSlot ^
+    --extra-export edvrFrameGenTakeS ^
     --extra-export edvrAcquireNativeSharpen ^
     --extra-export edvrAcquireNativeFrame ^
     --extra-export edvrAcquireNativeTiming ^
@@ -692,6 +694,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\object_probe.cpp" ^
     "src\d3d11\pixel_probe.cpp" ^
     "src\d3d11\depth_writer_probe.cpp" ^
+    "src\d3d11\hull_layer.cpp" "src\d3d11\hull_bench.cpp" "src\d3d11\hull_rig_probe.cpp" ^
     "src\d3d11\object_record_writer_probe.cpp" "src\d3d11\object_record_writer_hook.cpp" ^
     "src\d3d11\kinematic_eval_probe.cpp" "src\d3d11\kinematic_eval_hook.cpp" ^
     "src\d3d11\store_hook.cpp" "src\d3d11\view_source.cpp" "src\d3d11\optimized_station.cpp" "src\d3d11\concourse_pane.cpp" "src\d3d11\concourse_camera_test.cpp" "src\d3d11\pad_state_probe.cpp" "src\d3d11\hmd_reset_press.cpp" ^
@@ -726,6 +729,8 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\depth_probe.cpp" ^
     "src\d3d11\luma_probe.cpp" ^
     "src\d3d11\sky_ring.cpp" ^
+    "src\d3d11\framegen_shadow.cpp" ^
+    "src\d3d11\framegen_synth.cpp" ^
     "src\d3d11\terrain_cull_cover_hook.cpp" ^
     "src\d3d11\dlaa.cpp" ^
     "src\d3d11\fsr3_engine.cpp" ^
@@ -2133,6 +2138,96 @@ if errorlevel 1 ( echo [edvr] ERROR: sky_flicker_test build failed & exit /b 1 )
 "%OBJ%\skyflickertest\sky_flicker_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_framegen_shadow_report_test
+echo [edvr] === framegen_shadow_report_test.exe ===
+REM The frame-generation shadow scorer's pure half (src\common\framegen_shadow_report.h; fix.frame_generation_shadow, TEMPORARY): the histogram binning, the
+REM percentile and share-over arithmetic, the merge, and the armed and report lines' exact text. Needs no GPU.
+if not exist "%OBJ%\framegenshadowreport" mkdir "%OBJ%\framegenshadowreport"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" ^
+    /Fo"%OBJ%\framegenshadowreport"\ /Fe"%OBJ%\framegenshadowreport\framegen_shadow_report_test.exe" ^
+    "tools\framegen_shadow_report_test\framegen_shadow_report_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: framegen_shadow_report_test build failed & exit /b 1 )
+"%OBJ%\framegenshadowreport\framegen_shadow_report_test.exe" --dry-run || exit /b 1
+"%OBJ%\framegenshadowreport\framegen_shadow_report_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_framegen_shadow_test
+echo [edvr] === framegen_shadow_test.exe ===
+REM The frame-generation shadow scorer (fix.frame_generation_shadow, TEMPORARY): the production bytecode (kFrameGenShadow*Bytecode, from tools\temporal_shader_build) run on
+REM WARP against a CPU reference built from src\common\framegen_shadow_math.h -- capture, a static scene, a far-plane rotation, a cockpit plane under a head translation, a
+REM world plane at constant and accelerating ship motion, reversed-Z far and the on-foot split -- and the module itself (framegen_shadow.cpp) driven on the same device:
+REM the key off creates nothing, the key on scores a static scene and counts each skip reason. Two mutations (a forward transform not inverted, an identity backward
+REM transform) must each break their case. Needs no real GPU.
+if not exist "%OBJ%\framegenshadow" mkdir "%OBJ%\framegenshadow"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\framegenshadow"\ /Fe"%OBJ%\framegenshadow\framegen_shadow_test.exe" ^
+    "tools\framegen_shadow_test\framegen_shadow_test.cpp" "src\d3d11\framegen_shadow.cpp" "src\d3d11\shader_swap.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib dxguid.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: framegen_shadow_test build failed & exit /b 1 )
+"%OBJ%\framegenshadow\framegen_shadow_test.exe" --dry-run || exit /b 1
+"%OBJ%\framegenshadow\framegen_shadow_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_framegen_synth_report_test
+echo [edvr] === framegen_synth_report_test.exe ===
+REM The frame-generation synthesizer's pure half (src\common\framegen_synth_report.h and framegen_synth_math.h; fix.frame_generation_shadow, TEMPORARY): the armed and report lines'
+REM exact text, the window's merge, the stats decode, the head's step from B to S (a rotation raised to the power f), the constant block and the CPU reference of a pixel's landing.
+REM Needs no GPU.
+if not exist "%OBJ%\framegensynthreport" mkdir "%OBJ%\framegensynthreport"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\common" ^
+    /Fo"%OBJ%\framegensynthreport"\ /Fe"%OBJ%\framegensynthreport\framegen_synth_report_test.exe" ^
+    "tools\framegen_synth_report_test\framegen_synth_report_test.cpp" ^
+    /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edvr] ERROR: framegen_synth_report_test build failed & exit /b 1 )
+"%OBJ%\framegensynthreport\framegen_synth_report_test.exe" --dry-run || exit /b 1
+"%OBJ%\framegensynthreport\framegen_synth_report_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_framegen_synth_test
+echo [edvr] === framegen_synth_test.exe ===
+REM The frame-generation synthesizer (fix.frame_generation_shadow, TEMPORARY): the production bytecode (kFrameGenSynth*Bytecode, from tools\temporal_shader_build) run on WARP
+REM against the CPU reference of src\common\framegen_synth_math.h -- a cockpit plane under a head translation and turn, a world plane at a constant ship screen velocity under a
+REM changing head turn, the far plane, the on-foot 1 mm split, 2:1 output -- then the guard (a near object's edge over the sky takes no near colour into a sky pixel), the
+REM background fill (a hole behind a moving near object is filled from the far side), and the module itself (framegen_synth.cpp) driven on the same device: the key off creates
+REM nothing, the key on builds the two variants in turn and scores the f = 1 one against the next frame. Mutations (f ignored, the head turn not taken out, the guard off,
+REM the fill from the nearer side, an edge pixel on its own vector, the rejection sentinel taken as a vector) must each fail their case. Phase 2.2: the head step from the runtime's slot pose against a reference from the poses alone (the pose
+REM ignored, or the step inverted, must fail), and S's transfer on a second WARP device (src\openxr\framegen_slot_transfer.h: produce, consume, busy, a 0 ms timeout, the
+REM producer texture made again, no consumer, the key off). Needs no real GPU.
+if not exist "%OBJ%\framegensynth" mkdir "%OBJ%\framegensynth"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"%GEN%" /I"src\d3d11" ^
+    /Fo"%OBJ%\framegensynth"\ /Fe"%OBJ%\framegensynth\framegen_synth_test.exe" ^
+    "tools\framegen_synth_test\framegen_synth_test.cpp" "src\d3d11\framegen_synth.cpp" "src\d3d11\shader_swap.cpp" ^
+    "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
+    "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib dxguid.lib user32.lib version.lib
+if errorlevel 1 ( echo [edvr] ERROR: framegen_synth_test build failed & exit /b 1 )
+"%OBJ%\framegensynth\framegen_synth_test.exe" --dry-run || exit /b 1
+"%OBJ%\framegensynth\framegen_synth_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_framegen_synth_bench
+echo [edvr] === framegen_synth_bench.exe ===
+REM The offline tool that runs the frame-generation synthesizer (fix.frame_generation_shadow, TEMPORARY) on the hardware GPU: --bench times every pass, --replay scores a captured
+REM fgreplay folder like the in-game f = 1 score. It compiles the production shader text (frameGenSynthShaderSource) and fills the constant block with the production helpers, so
+REM it needs no generated header. The gate runs only --self-test: the format reader and writer, the constant block against the production fill, and a synthetic capture replayed
+REM and a tiny bench on WARP (the GPU parts are skipped with a note when WARP is missing).
+if not exist "%OBJ%\framegensynthbench" mkdir "%OBJ%\framegensynthbench"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /D_CRT_SECURE_NO_WARNINGS /I"src\d3d11" ^
+    /Fo"%OBJ%\framegensynthbench"\ /Fe"%OBJ%\framegensynthbench\framegen_synth_bench.exe" ^
+    "tools\framegen_synth_bench\framegen_synth_bench.cpp" ^
+    /link /INCREMENTAL:NO d3d11.lib dxgi.lib dxguid.lib windowscodecs.lib ole32.lib uuid.lib
+if errorlevel 1 ( echo [edvr] ERROR: framegen_synth_bench build failed & exit /b 1 )
+"%OBJ%\framegensynthbench\framegen_synth_bench.exe" --self-test || exit /b 1
+exit /b 0
+
 :rig_ui_depth
 echo [edvr] === private UI depth regression ===
 REM Keep the executable away from build\d3d11.dll: these tests use system
@@ -2290,6 +2385,17 @@ if not exist "%OBJ%\nightvision" mkdir "%OBJ%\nightvision"
 "%OBJ%\nightvision\night_vision_test.exe" --self-test || exit /b 1
 exit /b 0
 
+:rig_hull_bench
+echo [edvr] === hull_bench_test (the hull variant bench's files, TEMPORARY) ===
+if not exist "%OBJ%\hullbench" mkdir "%OBJ%\hullbench"
+if exist "%OBJ%\hullbench\eyes" rmdir /s /q "%OBJ%\hullbench\eyes"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+    /Fo"%OBJ%\hullbench\\" /Fe"%OBJ%\hullbench\hull_bench_test.exe" ^
+    "tools\hull_bench_test\hull_bench_test.cpp" "src\d3d11\hull_bench.cpp" ^
+    /link /INCREMENTAL:NO || exit /b 1
+"%OBJ%\hullbench\hull_bench_test.exe" "%OBJ%\hullbench\eyes" || exit /b 1
+python tools\hull_bench_report.py "%OBJ%\hullbench\eyes\eye_010203004001" --dry-run || exit /b 1
+exit /b 0
 :rig_intro_skip
 echo [edvr] === DirectShow intro skip regression ===
 if not exist "%OBJ%\introskip" mkdir "%OBJ%\introskip"
@@ -3555,6 +3661,11 @@ python tools\run_jobs.py --jobs 4 ^
     --gate "tools\dxbc_disasm.py --self-test" ^
     --gate "tools\eye_bmp_to_png.py --self-test" ^
     --gate "tools\character_motion_check.py --self-test" ^
+    --gate "tools\hull_layer_compare.py --self-test" ^
+    --gate "tools\hull_taa_sim.py --self-test" ^
+    --gate "tools\hull_bench_report.py --self-test" ^
+    --gate "tools\hlsl_embedded_check.py --self-test" ^
+    --gate "tools\hlsl_embedded_check.py" ^
     --gate "tools\onfoot_check.py --self-test" ^
     --gate "tools\diff_eye_dump.py --self-test" ^
     --gate "tools\eye_run_fit.py --self-test" ^

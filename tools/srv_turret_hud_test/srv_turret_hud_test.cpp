@@ -2449,6 +2449,9 @@ static void constantsCases() {
     ComPtr<ID3D11Device> d2;
     ComPtr<ID3D11DeviceContext> c2;
     ck(edvr::systemD3D11CreateDevice()(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &d2, nullptr, &c2), "second device");
+    // Held while the second device's buffer is made: the cache releases the first one on the device change, and a freed
+    // buffer's address can come back for the new one, which read as "the same buffer" on about two runs in three.
+    const ComPtr<ID3D11Buffer> firstHeld(first);
     ID3D11Buffer* other = c.get(c2.Get(), p0);
     check(other && other != first && c.written() == p0, "another device: the buffer is made again for it");
     c.reset();

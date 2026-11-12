@@ -63,6 +63,12 @@
 #include "openvr_system.h"
 #include "system_publication.h"
 #include "head_locator.h"
+#include "../common/framegen_pose_report.h"
+#include "../common/framegen_slot_report.h"   // frame generation 2.2: T_S and the transfer line
+#include "../common/native_temporal.h"        // frame generation 2.2: the slot channel's structs
+#include "framegen_slot_transfer.h"
+#include "framegen_lock.h"   // frame generation 2.3: Lock 2:1, the gate and the S slot
+#include "../common/framegen_gate.h"   // frame generation 2.4: word 17's values (auto)
 #include "head_track_probe.h"   // F87h: the headset's tracking, one line a second (read only)
 #include "view_fov_note.h"   // F194: the views' field of view, said at the first located views and when it changes
 #include "pose_gap.h"
@@ -576,6 +582,51 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   uint64_t displayTimeRefusals=0;
   HeadPoseSightings poseSightings;
   PoseGapStats poseGap;
+  // Frame generation, Phase 1 (fix.frame_generation_shadow, framegen_pose_report.h): the head-pose miss for the synthetic slot's display time, measured at each real
+  // frame's second Submit on the owner thread. Idle (and empty) while the key is off or the provider is older than version 12.
+  FrameGenPoseProbe framegenPose;
+  uint64_t framegenPoseWindowUs=0;
+  bool framegenPoseWas=false;
+  // Frame generation, Phase 2.2 (framegen_slot_report.h, framegen_slot_transfer.h): the slot S is made for (T_S, its head located once a pair before the first treat and handed
+  // to the d3d11 half), and S's own transfer per eye, consumed after the pair's finish. Owner thread only; nothing exists, is located or is said while the key is off.
+  struct FramegenSlot {
+    bool looked=false,noChannelSaid=false,was=false;
+    FrameGenSlotChannel channel;
+    uint64_t sequence=0;          // the pair the slot was handed for
+    int64_t slotTime=0;           // its T_S (0: none)
+    int64_t previousT=0;          // T_A: the previous pair's T
+    FrameGenSlotTransfer eyes[2];
+    FrameGenSlotWindow window;
+    uint64_t windowUs=0;
+    uint64_t gameBytes[2]{};      // as the d3d11 half last said for each eye
+    // Phase 2.3b: each eye's answer for pair finishFor[e]: whether its S was finished as B is (kFrameGenFinish*), and the state it came with.
+    uint64_t finishFor[2]{};
+    uint32_t finish[2]{},finishState[2]{};
+    bool menuOnS=false;           // the d3d11 half has finished an S with EDVR's menu drawn on it (an answer of size 2, menu 1): it draws the menu on S, so the menu does not stop Lock
+  } framegenSlot;
+  // Frame generation, Phase 2.3 (fix.frame_generation = on, TEMPORARY; framegen_lock.h, common/framegen_lock_report.h): Lock 2:1. At the head of each WaitGetPoses the gate
+  // steps and, engaged, the S slot runs (its own wait, begin, layer and end) before the game's wait. Owner thread only. With the key off nothing here is touched, said or
+  // located, and the frame loop is today's.
+  struct FramegenLock {
+    bool was=false;                   // the key was on at the last pair boundary
+    FrameGenLockGate gate;
+    FrameGenSDelivery delivery;
+    FrameGenLockWindow window;
+    uint64_t windowUs=0,lastStepUs=0;
+    uint64_t lastPairSequence=0;      // the pair sceneFinished last saw composed fresh (0 once any other frame ends after it)
+    uint64_t deliveryNotedFor=0;      // the pair whose S delivery the boundary last noted
+    int64_t minPeriodNs=0;            // the shortest predicted period seen: the display's when its refresh rate is not known
+    bool slotRan=false;uint64_t lateBefore=0;   // the S slot ran at this boundary: the game's wait adds its misses to late_real
+    XrPosef headS{{0,0,0,1},{0,0,0}};uint64_t headFor=0;bool headValid=false;   // the head located at T_S for pair headFor (seated)
+    EyeCapture sCapture;bool sCaptureReady=false;   // S's two private textures, adopted (no copy), as the stereo renderer reads an eye pair
+    bool formatSaid=false;
+    uint64_t menuFor=0;               // Phase 2.3b: the last pair EDVR's menu was drawn into (capture(), menuTreated)
+    uint32_t unfinishedSaid=~0u;      // Phase 2.3b: the why of the last "not finished" line (~0: none said since the key went on)
+    // The Monitor page (the slot's size 3): the last closed one-second window's counts, as its line said them. lastValid false until one closes after the key went on.
+    bool lastValid=false;uint32_t lastSSlots=0,lastFromS=0,lastLateS=0,lastLateReal=0;
+    bool armedAuto=false;             // Phase 2.4: the armed line last said auto (said again when the key moves between on and auto)
+  } framegenLock;
+  float framegenPoseLastSlotDeg=-1.0f;   // the Monitor page: slot_deg's median from the pose probe's last window line (negative: none)
   // Diagnostic only (docs/linux-native-openxr-launch-centre-2026-09-22.md).
   uint64_t headLocateFailures=0,headLocateConsecutiveFailures=0;
   XrViewConfigurationView sizes[2]{};
@@ -641,6 +692,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // begun again. Provider tables deliberately retain their sequence floors,
   // so the host adds this offset to every published frame sequence.
   uint64_t frameSequenceOffset=0,lastPublishedFrameSequence=0;
+  FrameGenGameSequence framegenSequence;   // frame generation 2.3: the session sequences Lock's S slots took, left out of the game's numbering (framegen_lock.h); none: today's
   uint64_t activeFrameSequence=0;
   mutable std::atomic<unsigned> geometryQueryNotes[6][2]{};
   // Reads that handed the game a recommended size (GetRecommendedRenderTarget-
@@ -1579,6 +1631,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         case SeatIntro::Sampling: case SeatIntro::Retry: break;     // the ask stays; the next frame samples or applies again
       }
     }
+    framegenLockPairBoundary();   // frame generation 2.3 (Lock): the gate and, engaged, the S slot, before the game's wait (the key off: returns at once)
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
     timingApplicationSequence.store(timingSequence,std::memory_order_release);
@@ -1606,6 +1659,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     if(lastCompositorResult!=XR_SUCCESS&&lastCompositorResult!=XR_FRAME_DISCARDED&&lastCompositorResult!=XR_SESSION_LOSS_PENDING)
       return fail(lastCompositorResult);
     loading.sceneWaited();
+    framegenLockAfterWait();   // frame generation 2.3: the misses the S slot's wait and this one counted, while engaged (the key off: returns at once)
     Frame frame=boundary.frame();
     if(!applyFrameSequence(frame)){boundary.clear();return fail(XR_ERROR_LIMIT_REACHED);}
     if(state.terminal()){boundary.clear();return fail(XR_SESSION_LOSS_PENDING);}
@@ -1896,6 +1950,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     bool pairReady=false;
     // Not `captured`: that name is the EyeCapture member (C4458).
     const auto published=boundary.publish(eye,texture,bounds,flags,pairReady);
+    if(published==vr::VRCompositorError_None&&pairReady)measureFramegenPose();   // frame generation Phase 1: locates and a log line only, nothing the frame reads
     // frame_end_overlap scope: separate device (finishPair below then needs
     // no graphicsCalls rendezvous with Elite's thread -- capture() above,
     // reached from publish(), already ran any producer copy that did),
@@ -1942,7 +1997,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       return vr::VRCompositorError_None;
     }
     dispatchGpuEyeMarker(eye,texture,r==vr::VRCompositorError_None);
-    return finishSubmitTail(eye,r);
+    const auto tail=finishSubmitTail(eye,r);
+    if(pairSync)framegenSlotConsume();   // frame generation 2.2: after the pair's finish (nothing while the key is off)
+    return tail;
   }
   // Queued via service.submit from inside the second Submit's owner body
   // above when frame_end_overlap applies. owner_service.h's FIFO guarantees
@@ -1981,6 +2038,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     finishSubmitTail(eye,r);
     if(published&&r==vr::VRCompositorError_None)publishSubmitTimingDevice(sequence);
     lastOverlappedComposeMs=timingFrame.composeMs;
+    framegenSlotConsume();   // frame generation 2.2: after the pair's finish (nothing while the key is off)
   }
   // Needs Elite's own texture pointer and its thread still parked in this
   // rendezvous, so both submitEye (synchronous or about to defer) call this
@@ -2245,6 +2303,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     const auto* sharpenBounds=temporalOutput?&temporalBounds:bounds;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> sharpenOutput;
     vr::VRTextureBounds_t sharpenedBounds{};
+    // Frame generation's Lock (key on): B's door below finishes S and draws EDVR's menu on it from the menu's published pose, before this eye's own publish further down; the
+    // same publish is made first, so S's menu is placed by this frame's pose as B's is (eye 0 would otherwise get the previous frame's). The key off: not made, today's order.
+    if(framegenLock.was&&menu.acquired()&&frameGeometryAvailable) {
+      auto menuGeometry=frameGeometry;
+      menuGeometry.views[0]=frameContentViews[0];menuGeometry.views[1]=frameContentViews[1];
+      menu.publish(menuGeometry,poses.read().originGeneration);
+    }
     if(sharpen.acquired()) {
       const auto treatment=sharpen.treat(sequence,unsigned(eye),sharpenSource,sharpenBounds,sharpenOutput,sharpenedBounds);
       if(FAILED(treatment)) {
@@ -2347,6 +2412,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         timingInvalidate();
       workClock=workClock&&counterNow(&workEnded);
     };
+    framegenSlotBeforeTreat();   // frame generation 2.2: once a pair, the slot's pose for the synthesizer (the key off: returns at once)
     if(temporal.acquired()||sharpen.acquired()||menu.acquired()) {
       if(!graphicsCalls.invoke(treat)) {
         menu.invalidate();invalidateEyeTreatments();timingInvalidate();
@@ -2358,6 +2424,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       submitSample.treatmentMs+=elapsedMs(workBegan,workEnded);
     } else if(!submitStats.full())submitSample.sequence=0; // never publish missing clocks as zero-cost work
     if(r!=vr::VRCompositorError_None)return r;
+    framegenSlotAfterTreat(eye);   // frame generation 2.2: what the synthesizer built for the slot (nothing while the key is off)
     const vr::Texture_t processed{treated.Get(),vr::API_DirectX,texture->eColorSpace};
     D3D11_TEXTURE2D_DESC outputDesc{};treated->GetDesc(&outputDesc);
     submitSample.outputWidth[unsigned(eye)]=outputDesc.Width;
@@ -2375,6 +2442,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     else if(!graphicsCalls.invoke([&]{r=captured.capture(eye,selected,region,flags,true);})) { timingInvalidate(); return vr::VRCompositorError_InvalidTexture; }
     const auto transferClockEnd=QueryPerformanceCounter(&transferEnded);
     if(transferClock&&transferClockEnd) timingFrame.transferMs[unsigned(eye)]=elapsedMs(transferBegan,transferEnded);
+    if(menuTreated)framegenLock.menuFor=sequence;   // frame generation: the menu is in B; Lock lets go (menu_unfinished) unless the d3d11 half draws it on S (framegenSlot.menuOnS)
     if(r==vr::VRCompositorError_None&&menuTreated&&menuEyes[unsigned(eye)]++==0)
       nativeTracePrintf("native_menu,first_captured_eye=%u\n",unsigned(eye));
     if(r==vr::VRCompositorError_None && copyPixels){
@@ -2571,6 +2639,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   // our treatments, each measured where the runtime calls it. A loading frame, or the empty end of a frame the game
   // never submitted, has none of the eyes' work: its figures are zero and not the last scene frame's.
   void endFrameReturned(const EndFrameInfo& info) override {
+    if(framegenLock.was)framegenLock.lastPairSequence=0;   // frame generation 2.3: any end after a pair's own (a load, a clear, a drain) is a cut; sceneFinished sets it again for a fresh pair
     const uint64_t nowMs=GetTickCount64();
     const double periodMs=double(info.periodNs)/1000000.0;
     const bool scene=info.layers&&!info.background;
@@ -2580,7 +2649,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     // phases native_submit_phases prints, so the copy is these two and not their sum with the parts.
     const double copy=scene?transferWall.producerDispatch+submitSample.receiveMs:0.0;
     EndFrameCall call;
-    call.sequence=scene&&submitSample.sequence?submitSample.sequence:info.sequence+frameSequenceOffset;
+    call.sequence=scene&&submitSample.sequence?submitSample.sequence:framegenSequence.game(info.sequence)+frameSequenceOffset;
     call.ms=info.ms;call.periodMs=periodMs;call.nowMs=nowMs;call.shouldRender=info.shouldRender;call.layers=info.layers;
     call.background=info.background;call.turbo=info.turbo;call.overlapped=finishingOverlapped&&!info.background;
     call.result=int(info.result);
@@ -2764,6 +2833,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       previousReference==poses.read().originGeneration);
   }
   void sceneFinished(bool pixels,XrResult result) override {
+    if(framegenLock.was&&result==XR_SUCCESS&&pixels&&!frameWithheld) {   // frame generation 2.3: a fresh pair composed: the pair an S slot may follow
+      framegenLock.lastPairSequence=activeFrameSequence;
+      if(framegenLock.gate.engaged())++framegenLock.window.realSlots;
+    }
     if(result!=XR_SUCCESS){previousPairValid=false;return;}
     if(frameWithheld) {
       if(pixels) {
@@ -2887,7 +2960,344 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       double(report.weightPeak),double(report.centre[0]),double(report.centre[1]),double(report.centre[2]),double(report.centre[3]),
       double(report.pitchDeg),double(report.fieldUpDeg),double(report.fieldDownDeg),told==S_OK?"yes":told==S_FALSE?"no_export":"refused");
   }
-  // B3, the scope zoom's window (scope_zoom_state.h; the request is the provider's version 11 answer, scope_zoom_window.h): whether eye 0's told frustum is narrowed this frame. Set in
+  // Frame generation, Phase 1: the provider's version 12 answer carries fix.frame_generation_shadow in one word of the retired guard (native_frame.h); anything older reads off.
+  bool framegenShadowOn() const {
+    return features.acquired()&&featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_12&&
+      featureFrame.reservedTerrainGuard[EDVR_NATIVE_FRAME_FRAMEGEN_SHADOW_WORD]==1u;
+  }
+  // Frame generation, Phase 2.3: fix.frame_generation (Lock) in word 17 of a version 12 answer (native_frame.h); a d3d11.dll from before 2.3 leaves it zero: off. Phase 2.4: 1 on,
+  // 2 auto with the d3d11 half's gate closed, 3 auto with it open (framegen_gate.h); any of them arms Lock and runs the synthesizer and the slot.
+  uint32_t framegenLockWord() const {
+    return features.acquired()&&featureFrameKnown&&featureFrame.version>=EDVR_NATIVE_FRAME_VERSION_12?featureFrame.reservedTerrainGuard[EDVR_NATIVE_FRAME_FRAMEGEN_LOCK_WORD]:0u;
+  }
+  bool framegenLockKeyOn() const {return frameGenWordArmed(framegenLockWord());}
+  // Either key runs the synthesizer, its slot pose and S's transfer, and the pose measure (H6).
+  bool framegenSynthKeyOn() const {return framegenShadowOn()||framegenLockKeyOn();}
+  // Owner thread, at a real frame's second Submit (submitEyeAdmitted, where the pair becomes ready): t0 is now, T and P the frame's display time and period (boundary.frame()),
+  // T_S = T + P. Locates the head in the natural space (so a seat change between t0 and T_S cannot enter the miss) at T_S, at T (with its velocity) and, when the runtime gave no
+  // angular velocity, 5 ms before T; scores the earlier frames whose T_S has come with a locate at T_S. Only locates: no wait, no write to the frame, one line a second.
+  void measureFramegenPose() {
+    if(GetCurrentThreadId()!=ownerThread)return;
+    if(!framegenSynthKeyOn()) {
+      if(framegenPoseWas){framegenPose.reset();framegenPoseWas=false;framegenPoseWindowUs=0;framegenPoseLastSlotDeg=-1.0f;}
+      return;
+    }
+    framegenPoseWas=true;
+    const SeatedFrame seat=seated.frame();
+    if(!seat.space||!view)return;
+    const Frame frame=boundary.frame();
+    const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
+    XrTime now=0;HeadLocatorStage stage=HeadLocatorStage::None;
+    if(HeadLocator{}.currentTime(dispatch,instance,headClock,&stage,boundary.estimateNow(),now)!=XR_SUCCESS)return;
+    constexpr auto both=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    const auto fill=[](const XrPosef& p,FgPose& out){
+      out.pos[0]=p.position.x;out.pos[1]=p.position.y;out.pos[2]=p.position.z;
+      out.q[0]=p.orientation.x;out.q[1]=p.orientation.y;out.q[2]=p.orientation.z;out.q[3]=p.orientation.w;
+    };
+    const auto locate=[&](int64_t time,FgPose& out){
+      XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+      const XrResult r=HeadLocator{}.locateAt(dispatch,view,seat.space,XrTime(time),head);
+      if(r==XR_ERROR_TIME_INVALID)return FgLocate::Refused;
+      if(r!=XR_SUCCESS||(head.locationFlags&both)!=both)return FgLocate::Invalid;
+      fill(head.pose,out);
+      return FgLocate::Ok;
+    };
+    if(frame.predictedDisplayTime>0&&frame.predictedDisplayPeriod>0) {
+      XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+      XrSpaceLocation atT{XR_TYPE_SPACE_LOCATION};atT.next=&velocity;
+      const XrResult r=api.locateSpace(view,seat.space,frame.predictedDisplayTime,&atT);
+      if(r==XR_SUCCESS&&atT.type==XR_TYPE_SPACE_LOCATION&&(atT.locationFlags&both)==both&&detail::poseValid(atT.pose)) {
+        FgPose pose;fill(atT.pose,pose);
+        FrameGenPoseProbe::Frame f;
+        f.displayTime=frame.predictedDisplayTime;f.period=frame.predictedDisplayPeriod;f.now=now;
+        const XrVector3f& w=velocity.angularVelocity;
+        f.angularValid=(velocity.velocityFlags&XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)!=0&&std::isfinite(w.x)&&std::isfinite(w.y)&&std::isfinite(w.z);
+        if(f.angularValid){f.omega[0]=w.x;f.omega[1]=w.y;f.omega[2]=w.z;}
+        framegenPose.onFrame(f,pose,locate);
+      }
+    }
+    framegenPose.resolve(now,locate);
+    const uint64_t nowUs=frameCycleUs();
+    if(!framegenPoseWindowUs){framegenPoseWindowUs=nowUs;return;}
+    if(nowUs-framegenPoseWindowUs<1000000)return;
+    framegenPoseWindowUs=nowUs;
+    FrameGenPoseWindow window;
+    if(framegenPose.takeWindow(window)) {
+      nativeTracePuts(formatFrameGenPoseReport(window).c_str());
+      framegenPoseLastSlotDeg=window.slotFrames?window.slotDeg[0]:-1.0f;
+    }
+  }
+  // Frame generation, Phase 2.2 (framegen_slot_report.h): the key went off (or the runtime closes): the transfers let go and nothing more is handed; the d3d11 half, handed no
+  // slot, lets its producer texture go on its next build.
+  void framegenSlotOff() {
+    auto& fs=framegenSlot;
+    for(auto& t:fs.eyes)t.release();
+    fs.was=false;fs.sequence=0;fs.slotTime=0;fs.previousT=0;fs.windowUs=0;fs.window=FrameGenSlotWindow{};
+    fs.gameBytes[0]=fs.gameBytes[1]=0;
+    framegenLock.sCapture.reset();framegenLock.headFor=0;framegenLock.headValid=false;   // 2.3: the adopted S textures go with the transfers
+  }
+  // Once a pair, at its first treat (capture(), before the producer callback): T_S from this pair's T and the previous pair's (frameGenSlotTime), the head located at T_S in the
+  // frame's seated space (the space and convention of the head the temporal frame was given, render.pose), handed to the d3d11 half with whether this runtime consumes S (a
+  // separate XR device only: the transfer needs two). The key off: nothing is looked up, located or handed. Owner thread only.
+  void framegenSlotBeforeTreat() {
+    if(GetCurrentThreadId()!=ownerThread)return;
+    auto& fs=framegenSlot;
+    if(!framegenSynthKeyOn()){if(fs.was)framegenSlotOff();return;}
+    fs.was=true;
+    if(!fs.looked){fs.looked=true;fs.channel.resolve(graphicsProxy);}
+    if(!fs.channel.present()){if(!fs.noChannelSaid){fs.noChannelSaid=true;nativeTracePuts(kFrameGenSlotNoChannelFmt);}return;}
+    const auto sequence=activeFrameSequence;
+    if(!sequence||fs.sequence==sequence)return;   // the pair's second eye: one slot a pair
+    fs.sequence=sequence;
+    const Frame frame=boundary.frame();
+    const int64_t displayTime=int64_t(frame.predictedDisplayTime);
+    int64_t slotTime=0;
+    TimedHeadPose head{};bool located=false;
+    // Phase 2.3: while Lock is engaged S is made for the next display slot, T + P (frameGenLockSlotTime); otherwise 2.2's T + (T - T_A) / 2. Lock's key off: 2.2's, exactly.
+    const bool lockNow=framegenLock.was&&framegenLock.gate.engaged();
+    if(frameGenLockSlotTime(displayTime,fs.previousT,fs.previousT!=0,lockNow,int64_t(frame.predictedDisplayPeriod),slotTime))
+      located=view&&locateHeadAt(api.locateSpace,view,frameSeat(),XrTime(slotTime),true,head)==XR_SUCCESS&&head.pose.bPoseIsValid;
+    framegenLockNoteSlotHead(sequence,slotTime,located,head);
+    fs.previousT=displayTime>0?displayTime:0;
+    fs.slotTime=slotTime;
+    if(located)++fs.window.poseRuntime;else ++fs.window.poseNone;
+    auto slot=FrameGenSlotChannel::slot(sequence,displayTime,slotTime,located?&head.pose.mDeviceToAbsoluteTracking.m[0][0]:nullptr,separateGraphics(),lockNow);
+    // Size 3, the Monitor page's: copies of what the lock and the pose probe already keep, no more work than that.
+    const auto& fl=framegenLock;
+    slot.lockReason=uint32_t(fl.was?fl.gate.reason():FrameGenLockReason::KeyOff);
+    slot.lastSecond=fl.lastValid?1u:0u;
+    slot.sSlots=fl.lastSSlots;slot.fromS=fl.lastFromS;slot.lateS=fl.lastLateS;slot.lateReal=fl.lastLateReal;
+    slot.slotDegMedian=framegenPoseLastSlotDeg;
+    slot.xrBytes=fs.eyes[0].xrBytes()+fs.eyes[1].xrBytes();
+    slot.lockMode=uint32_t(frameGenWordMode(framegenLockWord()));   // size 4 (2.4): this runtime reads auto
+    fs.channel.hand(slot);
+  }
+  // After an eye's treat returned (capture()): what the d3d11 half built for this pair's slot. A produced S opens (or keeps) the eye's transfer and waits for the pair's finish.
+  void framegenSlotAfterTreat(vr::EVREye eye) {
+    auto& fs=framegenSlot;
+    if(!fs.was||!fs.channel.present()||!fs.sequence||fs.sequence!=activeFrameSequence||GetCurrentThreadId()!=ownerThread)return;
+    const unsigned e=unsigned(eye)&1u;
+    EdvrNativeFrameGenS s{};
+    if(fs.channel.answer(e,fs.sequence,s)!=S_OK)return;
+    fs.gameBytes[e]=s.gameBytes;
+    fs.finishFor[e]=fs.sequence;fs.finish[e]=s.finish;fs.finishState[e]=s.state;   // 2.3b: whether this S was finished as B is
+    if(s.size>=EDVR_NATIVE_FRAMEGEN_S_SIZE_2&&s.menu==1u)fs.menuOnS=true;
+    if(s.path==EDVR_NATIVE_FRAMEGEN_PATH_UAV)fs.window.pathUav=true;
+    else if(s.path==EDVR_NATIVE_FRAMEGEN_PATH_COPY)fs.window.pathCopy=true;
+    if(s.state==EDVR_NATIVE_FRAMEGEN_S_BUSY){++fs.window.busy;return;}
+    if(s.state!=EDVR_NATIVE_FRAMEGEN_S_PRODUCED||!separateGraphics())return;
+    ++fs.window.produced;
+    auto& t=fs.eyes[e];
+    const HRESULT opened=t.open(graphics.device(),static_cast<HANDLE>(s.sharedHandle),s.textureSerial);
+    if(opened!=S_OK){if(framegenSlotOpenFailures++<4)nativeTracePrintf("frame generation (synth) transfer failure, eye %u: the producer texture could not be opened on the XR device (0x%08lx)\n",e,(unsigned long)opened);return;}
+    t.markProduced(fs.slotTime,fs.sequence);
+  }
+  uint32_t framegenSlotOpenFailures=0;
+  // After the pair's finish (its compose and xrEndFrame are done): each produced S is taken with a zero timeout (AcquireSync(1, 0), the copy, ReleaseSync(0)); one not yet
+  // released stays pending for the next finish. When it was taken against T_S (the runtime's clock) and the consume's own time go to the window; one line a second.
+  void framegenSlotConsume() {
+    auto& fs=framegenSlot;
+    if(!fs.was||GetCurrentThreadId()!=ownerThread)return;
+    const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
+    for(auto& t:fs.eyes) {
+      if(!t.pending())continue;
+      const int64_t slotTime=t.pendingSlotTime();
+      LARGE_INTEGER began{},ended{};
+      const bool clocked=counterNow(&began);
+      const HRESULT hr=t.consume(0);
+      if(hr!=S_OK)continue;   // a timeout stays pending; a fault let the transfer go (the next produced S opens it again)
+      ++fs.window.consumed;
+      if(clocked&&counterNow(&ended))fs.window.consumeMs.push_back(float(elapsedMs(began,ended)));
+      XrTime now=0;HeadLocatorStage stage=HeadLocatorStage::None;
+      if(slotTime>0&&HeadLocator{}.currentTime(dispatch,instance,headClock,&stage,boundary.estimateNow(),now)==XR_SUCCESS) {
+        const float readyMs=float(double(int64_t(now)-slotTime)/1.0e6);
+        fs.window.readyMs.push_back(readyMs);
+        if(readyMs>0.0f)++fs.window.late;
+      }
+    }
+    fs.window.gameBytes=fs.gameBytes[0]+fs.gameBytes[1];
+    fs.window.xrBytes=fs.eyes[0].xrBytes()+fs.eyes[1].xrBytes();
+    const uint64_t nowUs=frameCycleUs();
+    if(!fs.windowUs){fs.windowUs=nowUs;return;}
+    if(nowUs-fs.windowUs<1000000)return;
+    fs.windowUs=nowUs;
+    if(fs.window.any())nativeTracePuts(formatFrameGenSlotReport(fs.window).c_str());
+    fs.window.reset();
+  }
+  // Frame generation, Phase 2.3 (Lock): the head located at T_S for pair `sequence` in capture() (framegenSlotBeforeTreat), kept for S's layer views, and handed to the pose
+  // measure (H6 at the slot) in the natural space its other locates use. Owner thread; the synthesizer's key on.
+  void framegenLockNoteSlotHead(uint64_t sequence,int64_t slotTime,bool located,const TimedHeadPose& head) {
+    auto& fl=framegenLock;
+    fl.headFor=sequence;fl.headValid=located;
+    if(!located)return;
+    fl.headS=frameGenPoseFromRigid(&head.pose.mDeviceToAbsoluteTracking.m[0][0]);
+    const LocatorDispatch dispatch{api.convertTime,api.locateSpace};
+    XrTime now=0;HeadLocatorStage stage=HeadLocatorStage::None;
+    if(slotTime>0&&HeadLocator{}.currentTime(dispatch,instance,headClock,&stage,boundary.estimateNow(),now)==XR_SUCCESS) {
+      const XrPosef natural=seatxf::toNatural(frameOrigin,fl.headS);
+      FgPose pose;
+      pose.pos[0]=natural.position.x;pose.pos[1]=natural.position.y;pose.pos[2]=natural.position.z;
+      pose.q[0]=natural.orientation.x;pose.q[1]=natural.orientation.y;pose.q[2]=natural.orientation.z;pose.q[3]=natural.orientation.w;
+      framegenPose.onSlot(slotTime,int64_t(now),pose);
+    }
+  }
+  // The key went off: an engaged Lock says its disengage, the window's last line is said, and everything starts over (the adopted S textures are let go).
+  void framegenLockOff() {
+    auto& fl=framegenLock;
+    if(fl.gate.engaged()) {
+      ++fl.window.disengages;
+      nativeTracePuts(formatFrameGenLockEdge(false,FrameGenLockReason::KeyOff,double(boundary.lastPeriodNs())/1.0e6).c_str());
+    }
+    nativeTracePuts(formatFrameGenLockReport(fl.window,FrameGenLockReason::KeyOff).c_str());
+    if(fl.window.fromB)nativeTracePuts(formatFrameGenLockReplay(fl.window).c_str());
+    fl.gate.reset();fl.delivery=FrameGenSDelivery{};fl.window.reset();
+    fl.was=false;fl.windowUs=fl.lastStepUs=0;fl.lastPairSequence=fl.deliveryNotedFor=0;fl.slotRan=false;fl.headFor=0;fl.headValid=false;
+    fl.menuFor=0;fl.unfinishedSaid=~0u;fl.armedAuto=false;
+    fl.lastValid=false;fl.lastSSlots=fl.lastFromS=fl.lastLateS=fl.lastLateReal=0;
+    fl.sCapture.reset();
+  }
+  // Frame generation, Phase 2.3 (Lock): at the head of the game's WaitGetPoses (owner thread), before any wait. The key off: returns at once, and the frame loop is today's.
+  // Otherwise: whether the pair just composed got its S (S's delivery), the conditions, the gate's step and, engaged, the S slot (frameGenLockBeforeWait); each edge and the
+  // one-second line are said here.
+  void framegenLockPairBoundary() {
+    auto& fl=framegenLock;
+    const uint32_t word=framegenLockWord();
+    const bool key=frameGenWordArmed(word);
+    if(!key&&!fl.was)return;
+    if(GetCurrentThreadId()!=ownerThread)return;
+    if(!key){framegenLockOff();return;}
+    const uint64_t nowUs=frameCycleUs();
+    const bool autoMode=frameGenWordMode(word)==FrameGenMode::Auto;
+    if(!fl.was) {
+      fl.was=true;fl.gate.reset();fl.window.reset();fl.windowUs=fl.lastStepUs=nowUs;
+      fl.armedAuto=autoMode;
+      nativeTracePuts(autoMode?kFrameGenLockArmedAutoFmt:kFrameGenLockArmedFmt);
+    } else if(autoMode!=fl.armedAuto) {   // 2.4: the key moved between on and auto (the gate and the window carry on)
+      fl.armedAuto=autoMode;
+      nativeTracePuts(autoMode?kFrameGenLockArmedAutoFmt:kFrameGenLockArmedFmt);
+    }
+    auto& fs=framegenSlot;
+    framegenSlotConsume();   // an S still pending at the pair's finish is taken now (a zero timeout) before its delivery is noted
+    if(fl.lastPairSequence&&fl.deliveryNotedFor!=fl.lastPairSequence) {
+      fl.deliveryNotedFor=fl.lastPairSequence;
+      fl.delivery.notePair(fs.eyes[0].consumedSequence()==fl.lastPairSequence&&fs.eyes[1].consumedSequence()==fl.lastPairSequence);
+    }
+    const int64_t period=int64_t(boundary.lastPeriodNs());
+    if(period>0&&(!fl.minPeriodNs||period<fl.minPeriodNs))fl.minPeriodNs=period;
+    const int64_t displayNs=instrumentDisplayHz>0?int64_t(1.0e9/instrumentDisplayHz+0.5):fl.minPeriodNs;
+    FrameGenLockConditions c;
+    c.keyOn=true;
+    c.channel=fs.channel.present();
+    c.separate=separateGraphics();
+    c.projection=fl.lastPairSequence!=0&&fl.lastPairSequence==activeFrameSequence&&!state.frameOpen()&&!frameWithheld;
+    c.replay=featureFrameKnown&&featureFrame.resubmitEnabled&&previousPairValid&&previousSpace==frameSpace&&previousReference==poses.read().originGeneration;
+    // EDVR's menu is drawn into B by this runtime and into S by the d3d11 half (native_menu.h nativeMenuFrameGenDraw; a menu it cannot draw leaves that S unfinished, why=menu).
+    // A d3d11.dll that has never said it draws it (one from before) lets Lock go while the menu is in B (menu_unfinished). An S left unfinished is not shown: Lock lets go,
+    // named. The why of an unfinished S is said once per change.
+    c.noMenu=fl.menuFor==0||fl.menuFor!=fl.lastPairSequence||fs.menuOnS;
+    {
+      uint32_t why=0;bool unfinished=false;
+      for(unsigned e=0;e<2&&fl.lastPairSequence;++e){uint32_t w=0;if(fs.finishFor[e]==fl.lastPairSequence&&frameGenSUnfinished(fs.finishState[e],fs.finish[e],w)){unfinished=true;why=w;}}
+      c.sFinished=!unfinished;
+      if(unfinished&&why!=fl.unfinishedSaid){fl.unfinishedSaid=why;char line[200];std::snprintf(line,sizeof(line),kFrameGenLockUnfinishedFmt,frameGenFinishName(why));nativeTracePuts(line);}
+    }
+    c.sDelivering=fl.delivery.delivering();
+    c.notDeferred=!(featureFrameKnown&&featureFrame.deferredPacing)&&!boundary.deferred();
+    c.periodDisplay=frameGenLockPeriodIsDisplay(period,displayNs);
+    c.finishDone=!pendingFrameEndFinish;
+    c.admitted=frameGenWordAdmits(word);   // 2.4: on, or auto with the d3d11 half's performance gate open (auto_gate otherwise)
+    if(fl.gate.engaged())fl.window.engagedSeconds+=double(nowUs-fl.lastStepUs)/1.0e6;
+    fl.lastStepUs=nowUs;
+    fl.slotRan=false;
+    const FrameGenLockPair p=frameGenLockBeforeWait(boundary,fl.gate,c,nowUs);
+    framegenSequence.noteSlot(p.slot);   // a slot that began took a session sequence: the game's next frame is still numbered one on from B
+    if(p.step.edge) {
+      if(!p.step.engaged)++fl.window.disengages;
+      nativeTracePuts(formatFrameGenLockEdge(p.step.engaged,p.step.reason,double(period)/1.0e6).c_str());
+    }
+    if(p.slotRan) {
+      fl.slotRan=p.slotResult==XR_SUCCESS;fl.lateBefore=p.slot.lateBefore;
+      ++fl.window.sSlots;
+      fl.window.waitMs.push_back(float(p.slot.waitMs));
+      if(p.slot.period>0)fl.window.periodMs.push_back(float(double(p.slot.period)/1.0e6));
+    }
+    if(p.failEdge) {
+      ++fl.window.disengages;
+      nativeTracePuts(formatFrameGenLockEdge(false,FrameGenLockReason::SlotFailed,double(period)/1.0e6).c_str());
+      if(framegenLockSlotFailures++<8)nativeTracePrintf("frame generation lock: the S slot returned %d (boundary %s)\n",int(p.slotResult),boundary.failed()?"failed":"standing");
+    }
+    if(nowUs-fl.windowUs>=1000000) {
+      fl.windowUs=nowUs;
+      nativeTracePuts(formatFrameGenLockReport(fl.window,fl.gate.reason()).c_str());
+      if(fl.window.fromB)nativeTracePuts(formatFrameGenLockReplay(fl.window).c_str());
+      fl.lastValid=true;fl.lastSSlots=fl.window.sSlots;fl.lastFromS=fl.window.fromS;fl.lastLateS=fl.window.lateS;fl.lastLateReal=fl.window.lateReal;
+      fl.window.reset();
+    }
+  }
+  uint32_t framegenLockSlotFailures=0;
+  // After the game's own wait returned (waitPoses): the misses the boundary counted across the S slot's wait and this one are late_real.
+  void framegenLockAfterWait() {
+    auto& fl=framegenLock;
+    if(!fl.slotRan)return;
+    fl.slotRan=false;
+    fl.window.lateReal+=uint32_t(boundary.lateFrames()-fl.lateBefore);
+  }
+  // FrameSink: the S slot's layer (FrameBoundary::syntheticSlot, owner thread, between its xrBeginFrame and xrEndFrame). S when both eyes' S of the pair just composed are in
+  // and posed: S's private textures (adopted, no copy) with S's views (B's views carried by the head's step B -> S, B's fov) and B's placement, space and origin. Otherwise B
+  // again, exactly as a withheld frame replays it (previousPair, B's views), counted late_s. The slot is never left empty while a pair is kept.
+  XrResult composeSlot(XrCompositionLayerProjection& layer) override {
+    auto& fl=framegenLock;auto& fs=framegenSlot;
+    if(!fl.was||!previousPairValid)return XR_ERROR_FUNCTION_UNSUPPORTED;
+    framegenSlotConsume();   // an S not yet taken at the pair's finish: the slot's wait gave it more time (a zero timeout still)
+    const uint64_t pair=fl.lastPairSequence;
+    const uint64_t consumed[2]={fs.eyes[0].consumedSequence(),fs.eyes[1].consumedSequence()};
+    bool shown=true,formatOk=true;
+    // Phase 2.3b: only an S finished as B is (B's sharpening, B's UI layer) is shown; an older d3d11.dll's S, never finished, is not.
+    for(unsigned e=0;e<2;++e)if(fs.finishFor[e]!=pair||fs.finish[e]!=kFrameGenFinishDone)shown=false;
+    for(auto& e:fs.eyes) {
+      ID3D11Texture2D* s=e.privateTexture();
+      D3D11_TEXTURE2D_DESC d{};if(s)s->GetDesc(&d);
+      if(!s||(d.Format!=DXGI_FORMAT_R8G8B8A8_TYPELESS&&d.Format!=DXGI_FORMAT_B8G8R8A8_TYPELESS)) {
+        if(s&&!fl.formatSaid){fl.formatSaid=true;char line[200];std::snprintf(line,sizeof(line),kFrameGenLockFormatFmt,unsigned(d.Format));nativeTracePuts(line);}
+        shown=false;formatOk=false;
+      }
+    }
+    const bool ready=frameGenSReady(pair,consumed,fl.headFor,fl.headValid,previousHeadValid,shown);
+    const float fade=comfortFade();
+    const float leftShare=leftEyeShare();
+    StereoHiddenArea hidden{};std::shared_ptr<const NativeHiddenMasks> masks;
+    if(leftShare>0.f) {
+      masks=geometry.read().hiddenMasks;
+      if(masks){const auto& m=masks->eyes[1];hidden={m.vertices.data(),uint32_t(m.vertices.size()),m.indices.data(),uint32_t(m.indices.size()),masks->revision};}
+    }
+    StereoViewCircle circleArg;
+    circleArg.on=circleNow.on;
+    std::memcpy(circleArg.tc,circleNow.tc,sizeof(circleArg.tc));
+    if(ready) {
+      if(!fl.sCaptureReady)fl.sCaptureReady=fl.sCapture.initialize(graphics.device())==S_OK;
+      bool adopted=fl.sCaptureReady;
+      for(unsigned e=0;e<2&&adopted;++e) {
+        const auto eye=vr::EVREye(e);
+        adopted=fl.sCapture.adopt(eye,fs.eyes[e].privateTexture(),previousPair.bounds(eye),previousPair.colorSpace(eye))==S_OK;
+      }
+      if(adopted) {
+        const XrView sViews[2]={frameGenSlotView(previousViews[0],previousHeadPose,fl.headS),frameGenSlotView(previousViews[1],previousHeadPose,fl.headS)};
+        const XrResult r=stereo.renderCaptured(sViews,previousSpace,fl.sCapture,layer,nullptr,nullptr,previousPlacement,fade,&fl.headS,leftShare,&hidden,zoomStripNow,previousZoomed,
+                                               &previousOrigin,&circleArg);
+        if(r==XR_SUCCESS)++fl.window.fromS;
+        return r;
+      }
+    }
+    ++fl.window.fromB;++fl.window.lateS;
+    {   // the flight 11 instrument: why this slot replays B (Count: everything was ready, so adopting or rendering S failed)
+      FrameGenSEyeFacts facts[2];
+      for(unsigned e=0;e<2;++e){facts[e].answerFor=fs.finishFor[e];facts[e].state=fs.finishState[e];facts[e].finish=fs.finish[e];facts[e].pending=fs.eyes[e].pendingSequence();facts[e].consumed=consumed[e];}
+      uint64_t had=0;
+      fl.window.noteReplay(frameGenReplayWhy(pair,facts,fl.headFor,fl.headValid,previousHeadValid,formatOk,had),pair,had);
+    }
+    return stereo.renderCaptured(previousViews,previousSpace,previousPair,layer,nullptr,nullptr,previousPlacement,fade,previousHeadValid?&previousHeadPose:nullptr,leftShare,&hidden,
+                                 zoomStripNow,previousZoomed,&previousOrigin,&circleArg);
+  }  // B3, the scope zoom's window (scope_zoom_state.h; the request is the provider's version 11 answer, scope_zoom_window.h): whether eye 0's told frustum is narrowed this frame. Set in
   // WaitGetPoses where the trim sets the frame's frusta; the located views the layer lies on, the raw getter's answer, the temporal pass's announcements and the hidden-area mesh stay
   // true (the callers). A press of it is traced when it opens (state=on) and when it ends (scope_zoom_press), and at the end told to the d3d11 half (edvrNoteNativeScopeZoom).
   bool applyScopeZoom(GeometryInput& game,RawFov& preRaw,RawFov (&toldRaw)[2]) {
@@ -4142,8 +4552,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     tracedLifecycle=lifecycle;
   }
   bool applyFrameSequence(Frame& frame) {
-    if(!frame.sequence||frameSequenceOffset>(std::numeric_limits<uint64_t>::max)()-frame.sequence)return false;
-    frame.sequence+=frameSequenceOffset;activeFrameSequence=frame.sequence;
+    const uint64_t game=framegenSequence.game(frame.sequence);   // no S slot has run: the session's own sequence, as always
+    if(!frame.sequence||frameSequenceOffset>(std::numeric_limits<uint64_t>::max)()-game)return false;
+    frame.sequence=game+frameSequenceOffset;activeFrameSequence=frame.sequence;
     if(frame.sequence>lastPublishedFrameSequence)lastPublishedFrameSequence=frame.sequence;
     return true;
   }
@@ -4160,7 +4571,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     clearOverlapHandoff();
     if(GetCurrentThreadId()!=ownerThread||state.running()||state.terminal()||!session)return false;
     if(lastPublishedFrameSequence==(std::numeric_limits<uint64_t>::max)())return false;
-    frameSequenceOffset=lastPublishedFrameSequence;
+    frameSequenceOffset=lastPublishedFrameSequence;framegenSequence.reset();   // the session's count starts over, and with it the S slots' share of it
     if(!invalidateOrigin("session_restart"))return false;
     frameGeometryAvailable=false;frameGeometry={};previousPairValid=false;
     activeFrameSequence=0;
@@ -4259,6 +4670,8 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       ShutdownTrace drainStage("host_owned_graphics_drain",tracing);
       const auto drained=stereo.drain();drainStage.end(drained==XR_SUCCESS);
       if(drained!=XR_SUCCESS)return clean=false;
+      framegenSlotOff();   // frame generation 2.2: S's transfers hold only XR-device objects and an opened handle; no producer callback
+      framegenLock.sCapture.shutdown();framegenLock.sCaptureReady=false;   // frame generation 2.3: the adopted S textures (references only)
       const HRESULT eyesRetired=captured.shutdownShared();
       const HRESULT previousRetired=previousPair.shutdownShared();
       const HRESULT skyRetired=skybox.shutdownShared();

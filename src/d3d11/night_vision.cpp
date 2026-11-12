@@ -31,6 +31,10 @@ struct State {
     ID3D11ClassInstance* classes[256]{};
     UINT count=0;
     bool failed[4]{},noted[4]{},engaged=false,realisticDraw=false;
+    // The hull layer's re-issue (nightVisionReissueBegin): set when nightVisionBegin engaged on the draw just issued,
+    // with the variant and appearance it used; cleared at every nightVisionBegin and consumed by the re-issue.
+    bool reissueReady=false,reissueRealistic=false;
+    unsigned reissueMode=0;
 } state;
 bool exteriorMask(ID3D11DeviceContext* ctx,UINT w,UINT h){
     Ptr<ID3D11DepthStencilState> stencil;UINT reference;ctx->OMGetDepthStencilState(&stencil,&reference);if(!stencil)return false;
@@ -104,6 +108,7 @@ bool nightVisionMatches(char kind,uint32_t count,uint32_t instances){
 }
 void nightVisionBegin(ID3D11DeviceContext* ctx){
     const unsigned mode=variant();
+    state.reissueReady=false;   // a declined draw is re-issued as the game drew it
     if(!ctx || !mode || state.failed[mode] || state.engaged || ctx->GetType()!=D3D11_DEVICE_CONTEXT_IMMEDIATE)return;
     // No readbacks or scene copies. Reject a
     // changed resource contract before compiling/binding the replacement.
@@ -191,6 +196,7 @@ void nightVisionBegin(ID3D11DeviceContext* ctx){
     }
     state.count=256;ctx->PSGetShader(&state.saved,state.classes,&state.count);
     ctx->PSSetShader(state.shader[mode].Get(),nullptr,0);state.engaged=true;state.realisticDraw=enabled;
+    state.reissueReady=true;state.reissueMode=mode;state.reissueRealistic=enabled;
     if(!state.noted[mode]){state.noted[mode]=true;Log::get().note("night vision: engaged at %ux%u; pulse stability %s, appearance %s; original state restored after each matched draw.",w,h,pulseEnabled?"on":"off",enabled?"experimental realistic":"stock (no exterior-mask dispatch)");}
 }
 void nightVisionEnd(ID3D11DeviceContext* ctx){
@@ -201,6 +207,40 @@ void nightVisionEnd(ID3D11DeviceContext* ctx){
         ctx->OMSetBlendState(state.savedBlend.Get(),state.blendFactors,state.sampleMask);state.savedBlend.Reset();
     }
     ctx->PSSetShader(state.saved.Get(),state.classes,state.count);state.saved.Reset();
+    for(UINT i=0;i<state.count;++i){state.classes[i]->Release();state.classes[i]=nullptr;}
+    state.count=0;state.engaged=false;
+}
+// The same bindings as nightVisionBegin's, with the objects it made for the game's issue of this very draw (the exterior
+// mask is that eye's, classified from the game's stencil just before), through the raw entries: the hull layer's re-issue
+// runs inside its internal scope, and the binding shadow keeps describing the game's state.
+bool nightVisionReissueBegin(ID3D11DeviceContext* ctx){
+    const bool ready=state.reissueReady;state.reissueReady=false;
+    const unsigned mode=state.reissueMode;
+    if(!ctx || !ready || state.engaged || mode>3 || !state.shader[mode])return false;
+    const bool realistic=state.reissueRealistic;
+    if(realistic && (!state.blend || !state.control || !state.exteriorView))return false;
+    if(realistic){
+        FLOAT factors[4];UINT mask;ctx->OMGetBlendState(&state.savedBlend,factors,&mask);
+        for(UINT i=0;i<4;++i)state.blendFactors[i]=factors[i];state.sampleMask=mask;
+        ctx->PSGetConstantBuffers(3,1,&state.savedControl);
+        ctx->PSGetShaderResources(5,1,&state.savedExterior);
+        vScreenPSSetConstantBuffersRaw(ctx,3,1,state.control.GetAddressOf());
+        vScreenPSSetShaderResourcesRaw(ctx,5,1,state.exteriorView.GetAddressOf());
+        vScreenOMSetBlendStateRaw(ctx,state.blend.Get(),factors,mask);
+    }
+    state.count=256;ctx->PSGetShader(&state.saved,state.classes,&state.count);
+    vScreenPSSetShaderRaw(ctx,state.shader[mode].Get(),nullptr,0);
+    state.engaged=true;state.realisticDraw=realistic;
+    return true;
+}
+void nightVisionReissueEnd(ID3D11DeviceContext* ctx){
+    if(!state.engaged || !ctx)return;
+    if(state.realisticDraw){
+        vScreenPSSetConstantBuffersRaw(ctx,3,1,state.savedControl.GetAddressOf());state.savedControl.Reset();
+        vScreenPSSetShaderResourcesRaw(ctx,5,1,state.savedExterior.GetAddressOf());state.savedExterior.Reset();
+        vScreenOMSetBlendStateRaw(ctx,state.savedBlend.Get(),state.blendFactors,state.sampleMask);state.savedBlend.Reset();
+    }
+    vScreenPSSetShaderRaw(ctx,state.saved.Get(),state.classes,state.count);state.saved.Reset();
     for(UINT i=0;i<state.count;++i){state.classes[i]->Release();state.classes[i]=nullptr;}
     state.count=0;state.engaged=false;
 }

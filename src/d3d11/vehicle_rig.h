@@ -39,4 +39,18 @@ void vehicleRigFrameWindow(VehicleFrameWindow* out);
 using VehicleRigCaptureFn = void (*)(uint64_t frame, const float* eye) noexcept;
 inline std::atomic<VehicleRigCaptureFn> g_vehicleRigCaptureTap{nullptr};
 
+// The own vehicle's record arrays as the last refresh read them, for the hull layer's rig probe (hull_rig_probe.cpp; diag.hull_layer,
+// TEMPORARY): [lo, hi) of the ship rig's (index 0, vrig::kShip) and the cockpit rig's (1) records, stride 0x2F0; lo == hi == 0 when that rig is
+// not tracked or did not read. Written by the refresh (one at a time); job threads read them on every emit. A change writes hi = 0 first and the
+// new hi last, so a reader that loads hi before lo sees an empty or a whole range in the steady state (a pair torn by a change can admit one
+// emit's records wrongly; the probe is a diagnostic). gen moves on every change.
+struct VehicleRigOwnArrays {
+    std::atomic<uint64_t> lo[2];
+    std::atomic<uint64_t> hi[2];
+    std::atomic<uint32_t> gen;
+};
+inline VehicleRigOwnArrays g_vehicleRigOwn;   // static storage: zero before any refresh
+// The names and record counts behind g_vehicleRigOwn at its generation `*gen` (render thread; a copy under a lock). names[role], counts[role].
+void vehicleRigOwnDescribe(char (*names)[48], uint64_t* counts, uint32_t* gen);
+
 }  // namespace edvr

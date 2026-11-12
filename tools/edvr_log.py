@@ -290,6 +290,18 @@ value and Elite read its eye transform at that value afterwards, NEVER APPLIED w
 The desktop window (visual.desktop_window) is the other rule whose lines carry no build tag: the graphics log's "desktop window:" lines. It says OK when a 10 s line (or the line
 that ends an activation) shows a Present drawn, NEVER APPLIED when a "desktop window: setting" line named a mode other than game and no line shows one, and nothing at all when
 the setting is game or absent.
+The frame generation shadow (fix.frame_generation_shadow, TEMPORARY, Phase 1 of the frame-generation design) is another: the graphics log's "frame generation (shadow):" lines, an
+armed line once and a report line every second. It says OK when a report line is in the window, NEVER APPLIED when the armed line is there and no report line is, and nothing
+at all in a log with neither (the key off).
+The frame generation synthesizer (Phase 2.1, the same key) is the next rule, "frame generation synth": the graphics log's "frame generation (synth):" lines, an armed line once and
+a report line every second. It says OK when a report line shows frames built, NEVER APPLIED when the shadow scorer is armed (or reporting) and no synth line follows, when the synth
+armed and never reported, or when it reported only calls that built nothing (frames=0/0), and nothing at all in a log with neither it nor the scorer (the key off).
+Lock (fix.frame_generation = on, Phase 2.3) is "frame generation lock": the graphics log's untagged key line and the runtime log's "frame generation lock:" lines (armed, each engage
+and disengage with its reason, one line a second). It says OK when Lock engaged, PARTIAL when late_s or late_real passes 5% of the S slots, NEVER APPLIED when the key is on and the
+runtime log (read) has no lock line, when it armed and never reported, or when it reported and never engaged (the reasons it gave are said), and nothing at all with the key off.
+With fix.frame_generation = auto (Phase 2.4) the same rule reads the performance gate's "frame generation gate:" lines first (the graphics log, untagged): NEVER APPLIED with no gate
+line, or when the runtime cannot read auto (its once-a-session line); OK, saying so, when the gate ran and never admitted Lock (its reasons and the H1 margin are said); otherwise
+Lock is judged as above with the gate's summary in front.
 The SRV turret view (experimental.srv_turret_camera_back, experimental.srv_turret_hud_forward, experimental.srv_turret_radar_forward, experimental.srv_turret_panels_back, experimental.srv_turret_radar_back, experimental.srv_turret_hud_gap, experimental.srv_turret_hud_depth, experimental.srv_turret_hud_scissor) is the third: the graphics log's "srv turret ..." lines. The settings lines and the vehicle latch's lines
 ("srv turret: the vehicle is the Scorpion|not the Scorpion (event X)", written by the journal watcher) are kept whatever --since says; the last vehicle line is said in the detail, and
 vehicle lines alone are not the rule's lines (nothing is said for them). The pass acts in the Scorpion only: when the turret view bit is on in an SRV the journal does not call the Scorpion
@@ -10615,6 +10627,215 @@ H_DESKTOP_STOP = r"desktop window: stopped \((?P<reason>.*)\); drawn=(?P<drawn>\
 H_DESKTOP_ACTIVE = r"desktop window: active #(?P<n>\d+)"   # F173: the window took the eye images (an activation): evidence that 3D was on
 H_DESKTOP_DECLINED = r"desktop window: not drawing -- (?P<why>.*)$"   # F173: the draw declined, and why
 H_DESKTOP_OTHER = r"desktop window: (?!setting |10 s: |stopped \()"
+# The hull layer, Step 1 v2 (diag.hull_layer, TEMPORARY; src\d3d11\hull_layer.cpp, docs\research-own-hull-layer-2026-11-08.md): lines of the graphics log with no build tag, read
+# the frame generation shadow's way. The key line is state (said at each change, kept whatever --since says); the 30 s report, the dump, auto dump and unknown pair lines are events.
+H_HULL = "hull layer"
+H_HULL_LABEL = "hull layer: "
+H_HULL_KEY = r"hull layer: diag\.hull_layer=(?P<mode>\w+) \(TEMPORARY"
+H_HULL_REPORT = (r"hull layer: state=(?P<state>[\w-]+) frames=(?P<frames>\d+) eye_frames=(?P<eye_frames>\d+) seeds=(?P<seeds>\d+) no_seed=(?P<no_seed>\d+) "
+                 r"no_slot=(?P<no_slot>\d+) refused=(?P<refused>\d+) own=(?P<own_lo>\d+)/(?P<own_mid>\d+)/(?P<own_hi>\d+) readbacks=(?P<readbacks>\d+) "
+                 r"filtered_px=(?P<f_lo>\d+)/(?P<f_mid>\d+)/(?P<f_hi>\d+) (?:culled_draws=(?P<culled>\d+) filter_draws=(?P<filter_draws>\d+) )?hull_draws=(?P<lo>\d+)/(?P<mid>\d+)/(?P<hi>\d+) reissued=(?P<reissued>\d+) "
+                 r"no_slot_draws=(?P<no_slot_draws>\d+) clears=(?P<clears>\d+) filters=(?P<filters>\d+) "
+                 r"subst=copy:(?P<s_copy>\d+),mask:(?P<s_mask>\d+),light:(?P<s_light>\d+) light_draws=(?P<l_lo>\d+)/(?P<l_mid>\d+)/(?P<l_hi>\d+) "
+                 r"no_counterpart=copy:(?P<n_copy>\d+),mask:(?P<n_mask>\d+),light:(?P<n_light>\d+) unknown_light_pairs=(?P<unknown>\d+) "
+                 r"ended=copy:(?P<e_copy>\d+),shell:(?P<e_shell>\d+),light:(?P<e_light>\d+),frame:(?P<e_frame>\d+) terrain_frames=(?P<terrain>\d+) "
+                 r"auto_dumps=(?P<auto>\d+)(?: busy=(?P<busy>\d+) offscreen=(?P<offscreen>\d+) null_rt1=(?P<null_rt1>\d+))?"
+                 r"(?: night_vision=(?P<nv>\d+)/(?P<nv_edvr>\d+))?")
+H_HULL_DUMP = (r"hull layer: dump (?P<stamp>\S+) eye (?P<eye>\d) frame (?P<frame>\d+): HullHdr (?P<w>\d+)x(?P<h>\d+) format (?P<fmt>\d+) (?P<hull>[\w ]+), "
+               r"GameHdrLit (?P<game>[\w ]+), HullDepth (?P<depth>[\w ]+); own=(?P<own>-?\d+) filtered_px=(?P<filtered>-?\d+) "
+               r"seed=(?P<seed_read>-?\d+)/(?P<seed_inst>-?\d+) hull_draws=(?P<hull_draws>\d+) light_draws=(?P<light_draws>\d+)")
+H_HULL_NOTHING = r"hull layer: dump (?P<stamp>\S+) frame (?P<frame>\d+): nothing captured"
+H_HULL_AUTO = r"hull layer: auto dump armed \(reason: (?P<why>[^)]*)\)"
+H_HULL_UNKNOWN = r"hull layer: unknown lighting pair vs (?P<vs>[0-9A-F]{16}) ps (?P<ps>[0-9A-F]{16})"
+# Separate mode (diag.hull_layer = separate, Step 2): the main pass's 30 s line, after the report line.
+H_HULL_MAIN = (r"hull layer: main pass: own_draws=(?P<own>\d+) decal_draws=(?P<decals>\d+) no_variant_draws=(?P<no_variant>\d+) "
+               r"fallback_frames=(?P<fallback>\d+) decals_reissued=(?P<reissued>\d+) decal_no_slot=(?P<no_slot>\d+)")
+# Separate mode, Step 3: the composite's 30 s line, after the main pass line.
+H_HULL_COMPOSITE = (r"hull layer: composite: separate_frames=(?P<sep>\d+) composited_eyes=(?P<comp>\d+) ready_eyes=(?P<ready>\d+) "
+                    r"fallback=framegen:(?P<fb_fg>\d+),outside:(?P<fb_out>\d+),mask_pending:(?P<fb_pend>\d+),mask_large:(?P<fb_large>\d+),"
+                    r"streak:(?P<fb_streak>\d+) failed=seed:(?P<f_seed>\d+),lit:(?P<f_lit>\d+),tone:(?P<f_tone>\d+),composite:(?P<f_comp>\d+) "
+                    r"declined=stale:(?P<d_stale>\d+),size:(?P<d_size>\d+),gpu:(?P<d_gpu>\d+) toned=(?P<toned>\d+) tone_declined=(?P<tone_declined>\d+) "
+                    r"history_resets=(?P<resets>\d+) matched_by_index=(?P<by_index>\d+) own_max=(?P<own_max>\d+) "
+                    r"(?:site=after_ui_resolve:(?P<site_after>\d+),upscaler_out:(?P<site_up>\d+) )?aa=(?P<aa>\w+) "
+                    r"gpu_ms=tone:(?P<tone_ms>-?[\d.]+),composite:(?P<comp_ms>-?[\d.]+)")
+# The AO chain on the private G-buffer: its 30 s line, after the report line (both modes; a build before it has none).
+H_HULL_AO = (r"hull layer: ao: eye_frames=(?P<eye_frames>\d+) full=(?P<full>\d+) dispatches=(?P<dispatches>\d+) per_eye_frame=(?P<per>[\d.]+) "
+             r"applied=(?P<applied>\d+) missed=deinterleave:(?P<m0>\d+),hbao:(?P<m1>\d+),interleave:(?P<m2>\d+),apply:(?P<m3>\d+) no_eye=(?P<no_eye>\d+)")
+# Dump v2 (docs "Dump v2"): the stage times' 30 s line (both modes, after the ao line), and the dump's lighting-window and TAA-sequence lines.
+H_HULL_GPU = (r"hull layer: gpu_ms gbuffer=(?P<g_gbuf>-?[\d.]+) mask_filter=(?P<g_mask>-?[\d.]+) screen=(?P<g_screen>-?[\d.]+) light=(?P<g_light>-?[\d.]+) "
+              r"tone=(?P<g_tone>-?[\d.]+) taa=(?P<g_taa>-?[\d.]+) total=(?P<g_total>-?[\d.]+) timed_frames=(?P<timed>\d+) "
+              r"items=gbuffer:(?P<i_gbuf>[\d.]+),mask_filter:(?P<i_mask>[\d.]+),screen:(?P<i_screen>[\d.]+),light:(?P<i_light>[\d.]+),tone:(?P<i_tone>[\d.]+),"
+              r"taa:(?P<i_taa>[\d.]+) cpu_ms=gbuffer:(?P<c_gbuf>[\d.]+),mask_filter:(?P<c_mask>[\d.]+),screen:(?P<c_screen>[\d.]+),light:(?P<c_light>[\d.]+),"
+              r"tone:(?P<c_tone>[\d.]+),taa:(?P<c_taa>[\d.]+),total:(?P<c_total>[\d.]+) overflow=(?P<overflow>\d+) busy=(?P<busy>\d+) disjoint=(?P<disjoint>\d+)")
+H_HULL_LIGHTS = (r"hull layer: dump (?P<stamp>\S+): HullLights (?P<status>[\w ]+): (?P<draws>\d+) draws in the eyes' lighting windows \((?P<known>\d+) known "
+                 r"lighting, (?P<reissued>\d+) re-issued, (?P<unknown>\d+) unknown writing the HDR, (?P<stencil>\d+) stencil-only\)")
+H_HULL_SEQ = (r"hull layer: dump (?P<stamp>\S+): HullSeq (?P<written>\d+) of (?P<wanted>\d+) frames written \(eye 0 from frame (?P<frame>\d+), "
+              r"(?P<mb>[\d.]+) MB\), history (?P<hist>[^;]+); end: (?P<end>[^(]+?) \(")
+# The rig seed (docs "Rig seed", 2026-11-10): the own mask's seed source, its 30 s line after the report line (a build before it has none).
+H_HULL_SEED = (r"hull layer: own seed: rig=(?P<rig>\d+) draw=(?P<draw>\d+) hold_resets=(?P<resets>\d+) rig_slots=(?P<s_lo>\d+)/(?P<s_mid>\d+)/(?P<s_hi>\d+) "
+               r"radius=(?P<r_lo>\d+)/(?P<r_mid>\d+)/(?P<r_hi>\d+) reach=(?P<h_lo>\d+)/(?P<h_mid>\d+)/(?P<h_hi>\d+)")
+# The rest of its lines (the dump armed, a private copy made or dropped, a cap or a create failure said once, an unknown key value, the seed's facts and
+# refusals, the shaders): matched, not judged.
+H_HULL_OTHER = (r"hull layer: (?:dump \S+ armed|private copy (?:made|of a)|\d+ private (?:copies|views) held|a \d+x\d+ format \d+ target is multisampled|"
+                r"the private copy of|a private view|diag\.hull_layer=\S+ is not off or dump|no-slot-target:|a seed was refused|the seed reads the pool|"
+                r"the \w+ shader|the seed, filter and count shaders|the passes' states|\d+ unknown lighting pairs said|a stats readback|" +
+                r"diag\.hull_layer=\S+ is not off, dump or separate|separate mode hides the own ship|own-discard variant (?:made|declined)|"
+                r"a \w+ draw in the window got no own-discard variant|dump \S+ eye \d: GameGbuf0|"
+                # Step 3 (separate): the mode's note, its fallbacks said once, the tonemap re-issue's and the composite's facts and refusals.
+                r"separate mode (?:takes the own ship out|falls back)|tonemap re-issue declined|composite declined for eye|"
+                r"the tone cover and composite shaders|the composite's sampler|(?:tone|composite) targets made|dump \S+ eye \d: HullTone|"
+                # Dump v2: separate mode's reference frame, and a dump that could not start its TAA sequence.
+                r"dump \S+ eye \d: reference frame|dump \S+: no HullSeq|" +
+                # Station fixes: the keep-own VS made or declined, a re-issue that could not take it, the busy governor's entry and exit,
+                # the slot target's private copy dropped, a stage draw not at the eye's render size.
+                r"keep-own vertex shader (?:made|declined)|a \w+ re-issue could not take the keep-own|busy(?: over)?:|"
+                r"the private copy of eye \d's slot target dropped|a [\w ]+ stage draw into a)")
+# The hull layer's rig probe (diag.hull_layer, TEMPORARY; src\d3d11\hull_rig_probe.cpp, docs "Rig probe"): a diagnostic with a row of its own. Its lines start
+# "hull layer: rig_probe" and health_scan routes them here before the hull layer's rule sees them. Ran is the armed line (state, kept whatever --since says);
+# applied is a comparison line with state=ok.
+H_HULL_PROBE = "hull layer rig probe"
+H_HULL_PROBE_LABEL = "hull layer: rig_probe"
+H_HULL_PROBE_ARMED = r"hull layer: rig_probe (?P<to>armed|off)\b"
+H_HULL_PROBE_LINE = (r"hull layer: rig_probe frame=(?P<frame>\d+) present=(?P<present>\d+) eye=(?P<eye>-?\d+) target=(?P<ship>\S+?)/(?P<cockpit>\S+) "
+                     r"ship_recs=(?P<ship_recs>\d+) cockpit_recs=(?P<cockpit_recs>\d+) own_emits=(?P<emits_s>\d+),(?P<emits_c>\d+) "
+                     r"appending=(?P<app_s>\d+),(?P<app_c>\d+) claimed=(?P<claimed_s>\d+),(?P<claimed_c>\d+) copier_hits=(?P<hits_s>\d+),(?P<hits_c>\d+) "
+                     r"merges_moved=(?P<moved>\d+) spliced=(?P<spliced>\d+) merge_failed=(?P<merge_failed>\d+) unwound=(?P<unwound>\d+) "
+                     r"unconsumed=(?P<unconsumed>\d+) stale=(?P<stale>\d+) pose_mismatch=(?P<pose_mismatch>\d+) locate_failed=(?P<lf_s>\d+),(?P<lf_c>\d+) "
+                     r"hits_no_pool=(?P<hits_no_pool>\d+) emit_calls=(?P<emit_calls>\d+) copier_calls=(?P<copier_calls>\d+) copier_refused=(?P<refused>\d+) "
+                     r"copier_no_pool=(?P<copier_no_pool>\d+) maps=(?P<m_discard>\d+),(?P<m_noov>\d+),(?P<m_other>\d+) pool=(?P<pool>\w+) records=(?P<records>\d+) "
+                     r"written=(?P<written>-?\d+) cpu=(?P<cpu>-?\d+) cpu_fresh=(?P<fresh>-?\d+) cpu_retained=(?P<retained>-?\d+) gpu=(?P<gpu>-?\d+) "
+                     r"both=(?P<both>-?\d+) cpu_only=(?P<cpu_only>-?\d+) gpu_only=(?P<gpu_only>-?\d+) gpu_only_written=(?P<go_written>-?\d+) "
+                     r"gpu_only_held=(?P<go_held>-?\d+) state=(?P<state>\w+)")
+H_HULL_PROBE_TARGET = (r"hull layer: rig_probe target ship=\"(?P<ship>[^\"]*)\" ship_recs=(?P<ship_recs>\d+) cockpit=\"(?P<cockpit>[^\"]*)\" "
+                       r"cockpit_recs=(?P<cockpit_recs>\d+)")
+H_HULL_PROBE_GAP = r"hull layer: rig_probe own emits (?P<what>stopped|resumed)\b"
+H_HULL_PROBE_DUMP = r"hull layer: rig_probe dump (?P<stamp>\S+): HullRigProbe (?P<status>written|write failed)"
+H_HULL_PROBE_OTHER = r"hull layer: rig_probe: a staging buffer"
+# The hull variant bench (hotkey.hull_bench, TEMPORARY; src\d3d11\hull_layer.cpp, docs "Variant bench"): a row of its own from the "hull layer: bench"
+# lines, routed before the hull layer's rule. Ran is the armed line (a press the bench took); applied is the done line with a variant ok.
+H_HULL_BENCH = "hull layer bench"
+H_HULL_BENCH_LABEL = "hull layer: bench"
+H_HULL_BENCH_ARMED = r"hull layer: bench (?P<stamp>\S+) armed \(hotkey\.hull_bench, TEMPORARY.*?(?P<variants>\d+) variants, (?P<built>\d+) built"
+H_HULL_BENCH_REFUSED = r"hull layer: bench refused: (?P<why>.+?) \(hotkey\.hull_bench, TEMPORARY\)"
+H_HULL_BENCH_RECT = (r"hull layer: bench (?P<stamp>\S+) rect: render (?P<rx>\d+),(?P<ry>\d+) (?P<rw>\d+)x(?P<rh>\d+) -> output (?P<ox>\d+),(?P<oy>\d+) "
+                     r"(?P<ow>\d+)x(?P<oh>\d+) \(eye (?P<ew>\d+)x(?P<eh>\d+) -> (?P<eow>\d+)x(?P<eoh>\d+), aligned to (?P<align>\d+) render px\)")
+H_HULL_BENCH_VARIANT = (r"hull layer: bench (?P<stamp>\S+) variant (?P<id>\w+): (?P<status>\w+) frames=(?P<frames>\d+) warm=(?P<warm>\d+) "
+                        r"fallback=(?P<fallback>\d+) restarts=(?P<restarts>\d+) layer_ms=(?P<layer>-?[\d.]+) hull_dlss_ms=(?P<hull>-?[\d.]+) "
+                        r"main_dlss_ms=(?P<main>-?[\d.]+) frame_ms=(?P<frame>-?[\d.]+) cpu_ms=(?P<cpu>-?[\d.]+) mb_own=(?P<own>-?[\d.]+) "
+                        r"mb_ngx=(?P<ngx>-?[\d.]+) mb_dxgi=(?P<dxgi>-?[\d.]+) final=(?P<final>\d+) reason=(?P<reason>.*)$")
+H_HULL_BENCH_DONE = (r"hull layer: bench (?P<stamp>\S+) done: ok=(?P<ok>\d+) refused=(?P<refused>\d+) aborted=(?P<aborted>\d+) files=(?P<files>\d+) "
+                     r"failed=(?P<failed>\d+) stage_fails=(?P<stage_fails>\d+) mb=(?P<mb>[\d.]+) evicted=(?P<evicted>\d+) manifest=(?P<manifest>\w+)")
+H_HULL_BENCH_ABORTED = (r"hull layer: bench (?P<stamp>\S+) aborted: (?P<why>.+?); ok=(?P<ok>\d+) refused=(?P<refused>\d+) aborted=(?P<aborted>\d+) "
+                        r"files=(?P<files>\d+) failed=(?P<failed>\d+)")
+H_HULL_BENCH_OTHER = r"hull layer: bench(?: \S+: (?:press ignored|cancel pressed|\w+ eye \d feature made)|: the \w+ shader did not compile)"
+# Frame generation, Phase 1 (fix.frame_generation_shadow, TEMPORARY; src\common\framegen_shadow_report.h): two lines of the graphics log with no build tag, read the way the desktop
+# window's are. The armed line is said once per change to on (so health_scan keeps it whatever --since says); the report line every second.
+H_FRAMEGEN = "frame generation shadow"
+H_FRAMEGEN_LABEL = "frame generation (shadow):"
+# The head-pose miss (src\common\framegen_pose_report.h kFrameGenPoseReportFmt, written by the OpenXR runtime): a line of the runtime log, which carries no build tag and a UTC clock, so
+# health_scan_runtime reads it, as it reads the world scale's, and --since/--until do not cut it.
+H_FRAMEGEN_POSE_LABEL = "frame generation (shadow) pose:"
+_HFGP_TRIPLE = r"(?P<{n}0>[\d.]+)/(?P<{n}1>[\d.]+)/(?P<{n}2>[\d.]+)"
+H_FRAMEGEN_POSE = (r"frame generation \(shadow\) pose: frames=(?P<frames>\d+) lead_ms=(?P<lead>-?[\d.]+) runtime_mm=" + _HFGP_TRIPLE.format(n="rmm") + " runtime_deg=" +
+                   _HFGP_TRIPLE.format(n="rdeg") + " velocity_mm=" + _HFGP_TRIPLE.format(n="vmm") + " velocity_deg=" + _HFGP_TRIPLE.format(n="vdeg") +
+                   r" vel_src=(?P<sxr>\d+)/(?P<spair>\d+)/(?P<snone>\d+) expired=(?P<expired>\d+) refused=(?P<refused>\d+) unpredicted=(?P<unpredicted>\d+)"
+                   # Phase 2.3, H6 at the slot (optional: a line from before it ends at unpredicted): the slot poses scored, their miss and their lead.
+                   r"(?: slot=(?P<slot>\d+) slot_mm=" + _HFGP_TRIPLE.format(n="smm") + " slot_deg=" + _HFGP_TRIPLE.format(n="sdeg") + r" slot_lead_ms=(?P<slead>-?[\d.]+))?$")
+H_FRAMEGEN_RUNTIME_READ = "_framegen runtime log read"   # a pseudo-entry of the scan's rows (as H_CARRIED is): the runtime log was read, so a missing pose line can be judged
+H_FRAMEGEN_ARMED = r"frame generation \(shadow\): armed, quarter (?P<qw>\d+)x(?P<qh>\d+) per eye, classes far cockpit world"
+# The VRAM line (src\common\framegen_shadow_report.h kFrameGenShadowVramFmt), said once per eye when its resources are made: the bytes by group (the groups are read as one
+# field, so a group added or taken away does not drift the line), the eye's total and twice it. State, like the armed line.
+_HFG_GROUPS = r"[a-z]+=\d+(?: [a-z]+=\d+)*"
+H_FRAMEGEN_VRAM = (r"frame generation \(shadow\): eye (?P<eye>\d+) VRAM (?P<bytes>\d+) B \((?P<mib>[\d.]+) MiB\): (?P<groups>" + _HFG_GROUPS +
+                   r"); two eyes (?P<two>\d+) B \((?P<two_mib>[\d.]+) MiB\)$")
+_HFG_CLASS = r" {n}=(?P<{n}_share>[\d.]+)%,(?P<{n}_mean>\d+),(?P<{n}_p50>\d+),(?P<{n}_p95>\d+),(?P<{n}_o02>[\d.]+)%,(?P<{n}_o05>[\d.]+)%\|id:(?P<{n}_idmean>\d+),(?P<{n}_idp95>\d+)"
+# The jump set (camera_jump frames) with the three class fields under the group prefix j_, then the CPU motion facts (a number, or "-" when nothing was sampled), then the second
+# kernel's mv set (the DLSS vector's landing, prefix m_). All of it is optional: a line from before these fields ends at rig_mm, one from before the second kernel at rig_dt_mm.
+# The lines of the builds before 2026-11-07 carried an oracle set (prefix o_) before the jump set, and a bdepth set (prefix b_) with the disagreement of the two landings after
+# the mv set: both are read so those logs still parse, and judged no further. Their extrapolation line ("frame generation (shadow) extrapolation: ...") carries none of the
+# rule's labels and is passed over.
+_HFG_SET_CLASS = _HFG_CLASS.replace("(?P<{n}_", "(?P<{p}{n}_")
+_HFG_NUM = r"(?:[\d.]+|-)"
+H_FRAMEGEN_REPORT = (r"frame generation \(shadow\): frames=(?P<frames>\d+) skipped=(?P<s0>\d+)/(?P<s1>\d+)/(?P<s2>\d+)/(?P<s3>\d+)/(?P<s4>\d+)"
+                     + "".join(_HFG_CLASS.format(n=n) for n in ("far", "cockpit", "world")) +
+                     r" holes=(?P<holes>[\d.]+)% gpu_ms=(?:(?P<gpu_med>[\d.]+)/(?P<gpu_max>[\d.]+)\(n=(?P<gpu_n>[1-9]\d*)\)|-\(n=0\)) rig_deg=(?P<deg_med>[\d.]+)/(?P<deg_max>[\d.]+) rig_mm=(?P<mm_med>[\d.]+)/(?P<mm_max>[\d.]+)"
+                     r"(?:(?: oracle=(?P<oracle_n>\d+)" + "".join(_HFG_SET_CLASS.format(n=n, p="o_") for n in ("far", "cockpit", "world")) + r")?"
+                     r" jump=(?P<jump_n>\d+)" + "".join(_HFG_SET_CLASS.format(n=n, p="j_") for n in ("far", "cockpit", "world")) +
+                     r" motion_mm=(?P<motion_med>{N})/(?P<motion_max>{N}) mag_ratio=(?P<mag5>{N})/(?P<mag50>{N})/(?P<mag95>{N})"
+                     r" dt_ratio=(?P<dtr5>{N})/(?P<dtr50>{N})/(?P<dtr95>{N}) dt_ms=(?P<dtms_med>{N})/(?P<dtms_max>{N}) rig_dt_mm=(?P<rigdt_med>{N})/(?P<rigdt_max>{N})"
+                     r"(?: mv=(?P<mv_n>\d+)" + "".join(_HFG_SET_CLASS.format(n=n, p="m_") for n in ("far", "cockpit", "world")) +
+                     r"(?: bdepth=(?P<bd_n>\d+)" + "".join(_HFG_SET_CLASS.format(n=n, p="b_") for n in ("far", "cockpit", "world")) +
+                     r" mvdis_world_px=(?P<dw50>{N})/(?P<dw95>{N}) mvdis_cockpit_px=(?P<dc50>{N})/(?P<dc95>{N}))?)?)?$").replace("{N}", _HFG_NUM)
+# Frame generation, Phase 2.1 (the synthesizer, the same key; src\common\framegen_synth_report.h): its armed line (once per key-on, said when the first eye's textures are made) and its
+# one-second line, graphics-log lines with no build tag, read the way the scorer's are. The report is frames=<f=0.5 built>/<f=1 built> scored=<f=1 frames scored against the next real
+# frame> skipped=<calls that built nothing> gpu_ms=<f=0.5 median/max(n=)>/<f=1 ...> holes=<filled>%/<left>% guard=<%> clamp=<%>, then the scorer's three class fields (the f = 1 S against the
+# next frame), then ` turned:` and the same three fields with S turned by the residual head rotation (the compositor's step) before it is scored, rot_res_deg=<median>/<max> of that residual
+# and out=<%> of the cells outside S. clamp, orphan (after clamp), the fill's kinds (fill_reproj=<%> fill_stretch=<%> of the filled, after clamp) and the turned part are optional: a log from before them
+# still parses.
+H_FRAMEGEN_SYNTH = "frame generation synth"
+H_FRAMEGEN_SYNTH_LABEL = "frame generation (synth):"
+H_FRAMEGEN_SYNTH_ARMED = (r"frame generation \(synth\): armed, render (?P<rw>\d+)x(?P<rh>\d+) output (?P<ow>\d+)x(?P<oh>\d+) per eye, S format (?P<fmt>\d+), "
+                          r"f=0.5 built on the even frames and f=1 scored against the next real frame \(nothing is shown\)$")
+_HFGS_GPU = r"(?:(?P<{p}_med>[\d.]+)/(?P<{p}_max>[\d.]+)\(n=(?P<{p}_n>[1-9]\d*)\)|-\(n=0\))"
+# The synthesizer's VRAM line (framegen_synth_report.h kFrameGenSynthVramFmt): the eye's groups, the shared scratch's, and two eyes with the scratch. State, like the armed line.
+H_FRAMEGEN_SYNTH_VRAM = (r"frame generation \(synth\): eye (?P<eye>\d+) VRAM (?P<bytes>\d+) B \((?P<mib>[\d.]+) MiB\): (?P<groups>" + _HFG_GROUPS +
+                         r"); shared scratch (?P<scratch>\d+) B \((?P<scratch_mib>[\d.]+) MiB\): (?P<sgroups>" + _HFG_GROUPS +
+                         r"); two eyes and the scratch (?P<two>\d+) B \((?P<two_mib>[\d.]+) MiB\)$")
+H_FRAMEGEN_SYNTH_REPORT = (r"frame generation \(synth\): frames=(?P<f05>\d+)/(?P<f1>\d+) scored=(?P<scored>\d+) skipped=(?P<skipped>\d+) gpu_ms=" + _HFGS_GPU.format(p="g05") + "/" +
+                           _HFGS_GPU.format(p="g1") + r" holes=(?P<filled>[\d.]+)%/(?P<left>[\d.]+)% guard=(?P<guard>[\d.]+)%(?: clamp=(?P<clamp>[\d.]+)%(?: orphan=(?P<orphan>[\d.]+)%)?)?" +
+                           # 2026-11-08: orphan=<%> after clamp (a key and no read offer, made a hole); a line from before it goes from clamp= to what follows.
+                           # 2026-11-07 (kFrameGenSynthFillTailFmt): the fill's kinds as shares of the filled pixels; a line from before them goes from clamp= to the class fields.
+                           r"(?: fill_reproj=(?P<fill_reproj>[\d.]+)% fill_stretch=(?P<fill_stretch>[\d.]+)%)?" +
+                           "".join(_HFG_CLASS.format(n=n) for n in ("far", "cockpit", "world")) +
+                           r"(?: turned:" + "".join(_HFG_SET_CLASS.format(n=n, p="t_") for n in ("far", "cockpit", "world")) +
+                           r" rot_res_deg=(?P<rot_med>[\d.]+|-)/(?P<rot_max>[\d.]+|-) out=(?P<t_out>[\d.]+)%)?"
+                           r"(?: pose=(?P<pose_rt>\d+)/(?P<pose_fb>\d+) s=(?P<spath>[a-z]+) busy=(?P<sbusy>\d+)"
+                           # Phase 2.3b (kFrameGenSynthFinishTailFmt), in a window that finished an S or left one unfinished: finish=<finished>/<unfinished> finish_ms= why=
+                           r"(?: finish=(?P<fin>\d+)/(?P<unfin>\d+) finish_ms=" + _HFGS_GPU.format(p="gfin") + r" why=(?P<fin_why>[a-z_0-9]+))?)?$")
+# Frame generation, Phase 2.2 (src\common\framegen_slot_report.h, written by the OpenXR runtime): S's transfer once a second, produced=<S handed over> consumed=<copied to the runtime's
+# private texture> s_busy=<held back, the last one unconsumed> s_late=<consumed after T_S> ready_ms=<consume time less T_S, median/max> consume_ms=<median/max> pose=<pairs handed a
+# located slot pose>/<handed none> path=<uav|copy|none|mixed> vram_game_mib= vram_xr_mib=; and a line said once when the d3d11 half has no slot channel (an older d3d11.dll). Lines
+# of the runtime log, read the way the pose line is (health_scan_runtime), into the synth rule's rows. The synth report's own Phase 2.2 tail (pose=<on the slot pose>/<on the
+# extrapolation> s=<private|uav|copy|mixed|none> busy=) is optional above: a log from before it still parses, and is not held to a transfer line.
+H_FRAMEGEN_SLOT_LABEL = "frame generation (synth) transfer:"
+H_FRAMEGEN_SLOT = (r"frame generation \(synth\) transfer: produced=(?P<produced>\d+) consumed=(?P<consumed>\d+) s_busy=(?P<busy>\d+) s_late=(?P<late>\d+) "
+                   r"ready_ms=(?P<ready_med>-?[\d.]+|-)/(?P<ready_max>-?[\d.]+|-) consume_ms=(?P<cons_med>[\d.]+|-)/(?P<cons_max>[\d.]+|-) "
+                   r"pose=(?P<pose_rt>\d+)/(?P<pose_none>\d+) path=(?P<path>uav|copy|none|mixed) vram_game_mib=(?P<vgame>[\d.]+) vram_xr_mib=(?P<vxr>[\d.]+)$")
+H_FRAMEGEN_SLOT_NOCHANNEL = r"frame generation \(synth\) transfer: the d3d11 half has no slot channel \(edvrFrameGenNoteSlot missing: an older d3d11\.dll\)"
+# Frame generation, Phase 2.3 (fix.frame_generation = on, TEMPORARY; src\common\framegen_lock_report.h, written by the OpenXR runtime): Lock 2:1. The runtime log says armed once at the
+# key, each engage and disengage with its reason, and once a second engaged=<s> slots=<real>/<S> late_real= late_s= s_from=<S>/<B replayed> wait_ms= period_ms= disengages= reason=.
+# The graphics log says the key (src\d3d11\temporal_pass.cpp, untagged, state) when it is first read and when it changes. The rule reads both, the runtime's the way the pose line is read.
+H_FRAMEGEN_LOCK = "frame generation lock"
+H_FRAMEGEN_LOCK_LABEL = "frame generation lock:"
+H_FRAMEGEN_LOCK_KEY_LABEL = "frame generation: fix.frame_generation="
+H_FRAMEGEN_LOCK_KEY = r"frame generation: fix\.frame_generation=(?P<key>on|auto|off) \("
+H_FRAMEGEN_LOCK_ARMED = r"frame generation lock: armed \(fix\.frame_generation = (?P<mode>on|auto)"
+# Frame generation, Phase 2.4 (fix.frame_generation = auto; src\common\framegen_gate.h, written by the d3d11 half): the performance gate's lines in the graphics log, untagged events
+# (cut by the window): once a second while auto or on, each edge in auto, and once a session when the runtime cannot read auto. The H1 evidence (budget_ms, margin_ms).
+H_FRAMEGEN_GATE_LABEL = "frame generation gate:"
+_HFGG_N = r"(?:[\d.]+|-)"
+H_FRAMEGEN_GATE_REPORT = (r"frame generation gate: state=(?P<state>off|waiting|engaged) reason=(?P<reason>[a-z_]+) mode=(?P<mode>auto|on) real_fps=(?P<fps>" + _HFGG_N + r")/(?P<hz>"
+                          + _HFGG_N + r") period_ms=(?P<pp>" + _HFGG_N + r")/(?P<pd>" + _HFGG_N + r") gpu_ms=(?P<gmed>" + _HFGG_N + r")/(?P<gmax>" + _HFGG_N + r") cpu_ms=(?P<cmed>"
+                          + _HFGG_N + r")/(?P<cmax>" + _HFGG_N + r") synth_ms=(?P<synth>" + _HFGG_N + r") budget_ms=(?P<budget>" + _HFGG_N + r") margin_ms=(?P<margin>-?[\d.]+|-) "
+                          r"late_real=(?P<late>\d+)/(?P<pairs>\d+) context=(?P<context>[a-z_]+) cut=(?P<cut>[a-z_]+) lock=(?P<lock>[a-z_]+)$")
+H_FRAMEGEN_GATE_ENGAGE = r"frame generation gate: engage reason=held_2s margin_ms=(?P<margin>-?[\d.]+)$"
+H_FRAMEGEN_GATE_DISENGAGE = r"frame generation gate: disengage reason=(?P<reason>[a-z_]+) cut=(?P<cut>[a-z_]+)$"
+H_FRAMEGEN_GATE_OLD = r"frame generation gate: auto needs this release's openvr_api\.dll \(the runtime handed no frame generation slot that knows auto in (?P<secs>\d+) s of VR frames\)"
+H_FRAMEGEN_GATE_KINDS = ("gate", "gate_engage", "gate_disengage", "gate_old")
+H_FRAMEGEN_LOCK_ENGAGE = r"frame generation lock: engage reason=(?P<reason>[a-z_0-9]+) period_ms=(?P<period>[\d.]+)$"
+H_FRAMEGEN_LOCK_DISENGAGE = r"frame generation lock: disengage reason=(?P<reason>[a-z_]+) period_ms=(?P<period>[\d.]+)(?P<note> \(Lock stands aside for deferred pacing in 2\.3\))?$"
+H_FRAMEGEN_LOCK_REPORT = (r"frame generation lock: engaged=(?P<engaged>[\d.]+) slots=(?P<real>\d+)/(?P<s>\d+) late_real=(?P<late_real>\d+) late_s=(?P<late_s>\d+) "
+                          r"s_from=(?P<from_s>\d+)/(?P<from_b>\d+) wait_ms=(?P<wait_med>[\d.]+|-)/(?P<wait_max>[\d.]+|-) period_ms=(?P<period>[\d.]+|-) "
+                          r"disengages=(?P<disengages>\d+) reason=(?P<reason>[a-z_]+)$")
+H_FRAMEGEN_LOCK_FORMAT = r"frame generation lock: S's format (?P<fmt>\d+) cannot be shown"
+# Phase 2.3b (kFrameGenLockUnfinishedFmt): an S was left unfinished (not finished like B), said when the why changes; Lock lets go with reason s_unfinished.
+H_FRAMEGEN_LOCK_UNFINISHED = r"frame generation lock: S is not finished like B \(why=(?P<why>[a-z_0-9]+)\); the S slot does not show it$"
+# The flight 11 instrument (kFrameGenLockReplayFmt): after a one-second line with B replayed, why each S slot replayed it, counted. Optional: logs before it lack the line.
+H_FRAMEGEN_LOCK_REPLAY_WHY = ("not_built", "kept", "busy", "unfinished", "not_consumed", "seq_mismatch", "no_pose", "format", "adopt")
+H_FRAMEGEN_LOCK_REPLAYED = (r"frame generation lock: replayed B: not_built=(?P<not_built>\d+) kept=(?P<kept>\d+) busy=(?P<busy>\d+) unfinished=(?P<unfinished>\d+) "
+                            r"not_consumed=(?P<not_consumed>\d+) seq_mismatch=(?P<seq_mismatch>\d+) \(asked (?P<asked>\d+) had (?P<had>\d+)\) no_pose=(?P<no_pose>\d+) "
+                            r"format=(?P<format>\d+) adopt=(?P<adopt>\d+)$")
+H_FRAMEGEN_LOCK_LATE_SHARE = 0.05   # late_s or late_real over this share of the S slots is PARTIAL
 # The SRV turret view (issue 140; src\d3d11\srv_turret.cpp, the vehicle latch's line in journal_watch.cpp, and the geometry shader's creation line in shader_swap.cpp, shaderSwapCreateGs,
 # called with who "srv turret hud"): lines of the graphics log with no build tag, read the way the desktop window's are. The settings and vehicle lines are state, so health_scan keeps
 # every one whatever --since says; the rest are events and are cut by the window. Every kind of line the DLL writes has a pattern of its own, so a labelled line that none matches is
@@ -10683,7 +10904,7 @@ H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
 # Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
 # line, and its report stays as it was.
-HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD, H_DESKTOP, H_SRV_TURRET))   # world scale writes nothing while the value stays 100; the desktop window nothing while the setting is game; the SRV turret view nothing in a log with no VR profile
+HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD, H_DESKTOP, H_SRV_TURRET, H_FRAMEGEN, H_FRAMEGEN_SYNTH, H_FRAMEGEN_LOCK, H_HULL, H_HULL_PROBE, H_HULL_BENCH))   # the frame generation shadow is off by default and says nothing then; world scale writes nothing while the value stays 100; the desktop window nothing while the setting is game; the SRV turret view nothing in a log with no VR profile
 
 # ---- F125: summary windows (the on-foot log diet) ----
 # By default an on-foot summary line covers a window of 10 s, 1 s with log.on_foot_detail = on, and 1 to 10 s when a window is flushed early (a held-item change,
@@ -17282,6 +17503,455 @@ def _hj_desktop_window(rows, ctx):
     return ("OK", text)
 
 
+def _hj_hull_layer(rows, ctx=None):
+    """The hull layer, Step 1 v2 (diag.hull_layer, TEMPORARY; src\\d3d11\\hull_layer.cpp): ran is the key line naming dump, applied is a 30 s report line with seeds, an
+    own-mask readback and lighting substituted. OK when the window's reports seeded the own mask, read it back and substituted lighting draws; PARTIAL when it seeded
+    but no readback came back (mask-pending) or no lighting draw got its private counterpart; NEVER APPLIED when the key is on and no report follows (the layer never
+    reported), or the reports say it seeded nothing (the last line's state says why); None with no line, or the key off and no report."""
+    keys = rows.get("key", [])
+    reports = rows.get("report", [])
+    dumps = rows.get("dump", [])
+    nothing = rows.get("nothing", [])
+    autos = rows.get("auto", [])
+    unknown = rows.get("unknown", [])
+    on = bool(keys) and keys[-1]["mode"] != "off"
+    if not reports and not dumps and not nothing and not on:
+        return None
+    if not reports:
+        return ("NEVER APPLIED", "diag.hull_layer=%s but no 'hull layer: state=' line follows in the window: the layer never reported (no 30 s window closed, or its "
+                                 "boundary path is dead)" % (keys[-1]["mode"] if keys else "?"))
+    total = {k: sum(int(r[k]) for r in reports) for k in ("frames", "eye_frames", "seeds", "no_seed", "no_slot", "refused", "readbacks", "reissued", "no_slot_draws",
+                                                          "filters", "s_copy", "s_mask", "s_light", "n_copy", "n_mask", "n_light", "unknown", "auto")}
+    last = reports[-1]
+    text = ("%d report line(s): %d frame(s), %d eye-frame(s) with the cockpit shell, seeded %d (no seed %d, no slot target %d, refused %d), own records %s/%s/%s "
+            "(min/median/max, the last line; an Anaconda is 54) from %d readback(s), filtered px %s/%s/%s, hull draws an eye %s/%s/%s, %d re-issue(s) (%d without "
+            "the slot), %d filter pass(es); substituted copy %d, mask %d, light %d; light draws an eye %s/%s/%s; no counterpart in copy %d, mask %d, light %d "
+            "frame(s); %d unknown lighting pair(s); %d auto dump(s)"
+            % (len(reports), total["frames"], total["eye_frames"], total["seeds"], total["no_seed"], total["no_slot"], total["refused"], last["own_lo"],
+               last["own_mid"], last["own_hi"], total["readbacks"], last["f_lo"], last["f_mid"], last["f_hi"], last["lo"], last["mid"], last["hi"],
+               total["reissued"], total["no_slot_draws"], total["filters"], total["s_copy"], total["s_mask"], total["s_light"], last["l_lo"], last["l_mid"],
+               last["l_hi"], total["n_copy"], total["n_mask"], total["n_light"], max(total["unknown"], len(unknown)), max(total["auto"], len(autos))))
+    if dumps:
+        text += "; dump %s: %s" % (dumps[-1]["stamp"], ", ".join("eye %s HullHdr %s GameHdrLit %s HullDepth %s (own %s, filtered %s px)"
+                                                                % (d["eye"], d["hull"], d["game"], d["depth"], d["own"], d["filtered"])
+                                                                for d in dumps if d["stamp"] == dumps[-1]["stamp"]))
+    if nothing:
+        text += "; %d dump(s) captured nothing" % len(nothing)
+    # Station fixes: the keep-own VS's culled re-issues against those that needed the filter, and the busy governor's frames. A build
+    # before them has none of these fields.
+    if any(r["culled"] is not None for r in reports):
+        culled = sum(int(r["culled"] or 0) for r in reports)
+        need = sum(int(r["filter_draws"] or 0) for r in reports)
+        text += "; %d re-issue(s) culled to the own ship in the vertex shader, %d needed the neighbour filter" % (culled, need)
+    if any(r["busy"] is not None for r in reports):
+        busy = sum(int(r["busy"] or 0) for r in reports)
+        text += "; asleep (busy) %d frame(s), %d offscreen stage draw(s) declined, %d lighting re-issue(s) without the scratch R16" % (
+            busy, sum(int(r["offscreen"] or 0) for r in reports), sum(int(r["null_rt1"] or 0) for r in reports))
+    # Night vision's draw re-issued into the private HDR, and how many of those ran with EDVR's night-vision state (a build before
+    # 2026-11-10 has no field; N/0 means re-issued as the game's own: night vision's fix off or declined).
+    if any(r["nv"] is not None for r in reports):
+        text += "; night vision re-issued %d time(s), %d with EDVR's night-vision state" % (
+            sum(int(r["nv"] or 0) for r in reports), sum(int(r["nv_edvr"] or 0) for r in reports))
+    if total["seeds"] == 0 and last["state"] == "busy":
+        return ("PARTIAL", text + ": the busy governor slept the whole window (too many hull-family draws an eye: a station or a crowd); the game drew "
+                                  "the ship")
+    if total["seeds"] == 0:
+        why = {"no-eye-pass": "no hull-family G-buffer draw and no cockpit shell", "no-shell": "hull-family G-buffer draws but no cockpit shell",
+               "no-seed": "the eye passes drew the cockpit shell but no hull-family draw followed", "no-slot-target":
+               "the seed draw had no slot target at render target 6 (engine motion's patched shaders, part of fix.temporal_aa)", "no-shader": "the layer's shaders did not compile",
+               "seed-refused": "every seed was refused (the 'a seed was refused' line says why)"}.get(last["state"], "state %s" % last["state"])
+        return ("NEVER APPLIED", text + ": it ran and seeded nothing (%s)" % why)
+    if total["readbacks"] == 0:
+        return ("PARTIAL", text + ": seeded, but no own-mask readback came back (mask-pending)")
+    if total["s_light"] == 0:
+        return ("PARTIAL", text + ": seeded and filtered, but no lighting draw got its private counterpart")
+    # The AO chain on the private G-buffer (both modes). A build before it has no 'ao' line and is not judged on it.
+    aos = rows.get("ao", [])
+    ao_broken = False
+    if aos:
+        a = {k: sum(int(r[k]) for r in aos) for k in ("eye_frames", "full", "dispatches", "applied", "m0", "m1", "m2", "m3", "no_eye")}
+        ran = a["dispatches"] + a["m0"] + a["m1"] + a["m2"] + a["m3"] + a["no_eye"]
+        text += ("; AO: %d of %d lit eye-frame(s) with the whole chain and apply re-issued, %d step dispatch(es) (%.2f an eye-frame, 3 when every step ran), "
+                 "%d apply draw(s); missed deinterleave %d, hbao %d, interleave %d, apply %d; %d chain dispatch(es) with no eye"
+                 % (a["full"], a["eye_frames"], a["dispatches"], a["dispatches"] / a["eye_frames"] if a["eye_frames"] else 0.0, a["applied"], a["m0"], a["m1"],
+                    a["m2"], a["m3"], a["no_eye"]))
+        if ran == 0:
+            text += " (the game ran no AO chain: its ambient occlusion setting may be off)"
+        ao_broken = ran > 0 and a["full"] == 0
+    # Dump v2: the stage times (the last line), the dump's lighting windows and TAA sequence. Said, not judged.
+    gpus = rows.get("gpu", [])
+    if gpus:
+        # Every line of the window: the median of the lines' medians by stage (a line with none timed, -1, left out), and the timestamp
+        # pairs the timed frames had no room for (overflow > 0: the stages after the cap are missing and the times read low).
+        def _med(key, src):
+            vals = sorted(float(r[key]) for r in src if float(r[key]) >= 0.0)
+            return "%.3f" % vals[(len(vals) - 1) // 2] if vals else "-"
+        timed = [r for r in gpus if int(r["timed"]) > 0]
+        overflow = sum(int(r["overflow"]) for r in gpus)
+        text += ("; GPU ms a timed frame (median of %d line(s) with %d timed frame(s)): gbuffer %s, mask/filter %s, screen %s, light %s, tone %s, taa %s, "
+                 "total %s; CPU ms a frame %s; overflow=%d"
+                 % (len(timed), sum(int(r["timed"]) for r in gpus), _med("g_gbuf", timed), _med("g_mask", timed), _med("g_screen", timed),
+                    _med("g_light", timed), _med("g_tone", timed), _med("g_taa", timed), _med("g_total", timed), _med("c_total", gpus), overflow))
+        if overflow:
+            text += " (WARNING: timed frames ran out of timestamp pairs; the later stages are missing and gpu_ms reads low)"
+    for l in rows.get("lights", []):
+        text += ("; dump %s lighting windows: %s draw(s), %s re-issued, %s unknown writing the HDR, %s stencil-only (HullLights %s)"
+                 % (l["stamp"], l["draws"], l["reissued"], l["unknown"], l["stencil"], l["status"]))
+    for s in rows.get("seq", []):
+        text += "; dump %s TAA sequence: %s of %s frame(s), %s MB, history %s, end %s" % (s["stamp"], s["written"], s["wanted"], s["mb"], s["hist"], s["end"])
+    # Separate mode (Step 2): the own ship out of the main pass. OK only when main-pass draws took the own discard.
+    mains = rows.get("main", [])
+    if keys and keys[-1]["mode"] == "separate":
+        if not mains:
+            return ("PARTIAL", text + ": separate mode, but no 'hull layer: main pass:' line follows (the main-pass report is dead)")
+        m = {k: sum(int(r[k]) for r in mains) for k in ("own", "decals", "no_variant", "fallback", "reissued", "no_slot")}
+        text += ("; main pass (separate): the own discard on %d hull and %d decal draw(s), %d window draw(s) without it, %d eye-frame(s) fell back "
+                 "(no mask), %d own decal(s) re-issued (%d without the slot)"
+                 % (m["own"], m["decals"], m["no_variant"], m["fallback"], m["reissued"], m["no_slot"]))
+        # Step 3: the hull put back after the upscaler. OK only when eye-frames were composited.
+        comps = rows.get("composite", [])
+        if not comps:
+            return ("PARTIAL", text + ": separate mode, but no 'hull layer: composite:' line follows (a build before Step 3, or the composite's report is dead)")
+        c = {k: sum(int(r[k]) for r in comps) for k in ("sep", "comp", "ready", "fb_fg", "fb_out", "fb_pend", "fb_large", "fb_streak", "f_seed", "f_lit",
+                                                         "f_tone", "f_comp", "d_stale", "d_size", "d_gpu", "toned", "tone_declined", "by_index")}
+        lc = comps[-1]
+        text += ("; composite (separate): %d eye-frame(s) composited, %d made ready on fallback frames; %d frame(s) with the discard on, fell back for "
+                 "frame generation %d, outside the eye pass %d, mask pending %d, mask large %d (own max %s), a recent miss %d; misses seed %d, lit %d, "
+                 "tone %d, composite %d; declined stale %d, size %d, gpu %d; %d tonemap re-issue(s) (%d declined), %d eye(s) matched by index; AA %s, "
+                 "GPU tone %s ms, composite %s ms a call (last line)"
+                 % (c["comp"], c["ready"], c["sep"], c["fb_fg"], c["fb_out"], c["fb_pend"], c["fb_large"], max(int(r["own_max"]) for r in comps),
+                    c["fb_streak"], c["f_seed"], c["f_lit"], c["f_tone"], c["f_comp"], c["d_stale"], c["d_size"], c["d_gpu"], c["toned"], c["tone_declined"],
+                    c["by_index"], lc["aa"], lc["tone_ms"], lc["comp_ms"]))
+        if m["own"] == 0:
+            return ("PARTIAL", text + ": separate mode, but no main-pass hull draw took the own discard (the ship was never taken out)")
+        if c["comp"] == 0:
+            return ("PARTIAL", text + ": separate mode, but no eye-frame was composited (the ship was taken out and never put back; the misses and fallbacks "
+                                      "say why)")
+    if ao_broken:
+        return ("PARTIAL", text + ": the game's AO chain ran, but no eye-frame had it re-issued in full on the private G-buffer (the hull has no AO; the "
+                                  "missed counts say at which step)")
+    # The rig seed: where the own mask grew from. A build before it has no 'own seed' line and is not judged on it.
+    seeds = rows.get("seed", [])
+    if seeds:
+        rig = sum(int(r["rig"]) for r in seeds)
+        draw = sum(int(r["draw"]) for r in seeds)
+        ls = seeds[-1]
+        text += ("; own seed: %d eye-frame(s) from the rig probe's own slots, %d from the seed draw (fallback), %d hold restart(s); last line: slots "
+                 "%s/%s/%s, radius %s/%s/%s m, reach %s/%s/%s m"
+                 % (rig, draw, sum(int(r["resets"]) for r in seeds), ls["s_lo"], ls["s_mid"], ls["s_hi"], ls["r_lo"], ls["r_mid"], ls["r_hi"],
+                    ls["h_lo"], ls["h_mid"], ls["h_hi"]))
+        if rig == 0 and draw > 0:
+            return ("PARTIAL", text + ": every own mask grew from the seed draw, the fallback that took the wrong object in 14 of 45 dumps; the rig probe "
+                                      "gave no own slot (its row says why)")
+    return ("OK", text)
+
+
+def _hj_hull_rig_probe(rows, ctx=None):
+    """The hull layer's rig probe (diag.hull_layer, TEMPORARY; src\\d3d11\\hull_rig_probe.cpp): ran is the armed line, applied is a comparison line with state=ok.
+    OK when a comparison read the GPU mask against a known pool and the copier set own bits (copier_hits > 0); PARTIAL when comparisons came but none was ok
+    (the states say why: no_target, no_emits, no_seed, no_pool, readback_late), or ok with no copier hit (the chain breaks between the emit and the copier); NEVER
+    APPLIED when armed (the last armed/off line says armed) and no comparison line follows; None with no line, or the last line saying off and no comparison."""
+    armed = rows.get("armed", [])
+    lines = rows.get("line", [])
+    on = bool(armed) and armed[-1]["to"] == "armed"
+    if not lines and not on:
+        return None
+    if not lines:
+        return ("NEVER APPLIED", "the rig probe was armed but no 'hull layer: rig_probe frame=' line follows in the window (no 30 s window closed, or its "
+                                 "frame-end path is dead)")
+    n = lambda k: sum(int(r[k]) for r in lines)
+    states = {}
+    for r in lines:
+        states[r["state"]] = states.get(r["state"], 0) + 1
+    text = ("%d comparison line(s) (%s); emit calls %d, own emits ship %d cockpit %d (appending %d/%d), claimed %d/%d, copier hits %d/%d, merges moved %d "
+            "(spliced %d, failed %d), unconsumed %d, stale %d, pose mismatch %d"
+            % (len(lines), ", ".join("%s %d" % (k, v) for k, v in sorted(states.items())), n("emit_calls"), n("emits_s"), n("emits_c"), n("app_s"),
+               n("app_c"), n("claimed_s"), n("claimed_c"), n("hits_s"), n("hits_c"), n("moved"), n("spliced"), n("merge_failed"), n("unconsumed"),
+               n("stale"), n("pose_mismatch")))
+    targets = rows.get("target", [])
+    if targets:
+        t = targets[-1]
+        text += "; target %s (%s records) / %s (%s)" % (t["ship"], t["ship_recs"], t["cockpit"], t["cockpit_recs"])
+    gaps = rows.get("gap", [])
+    if gaps:
+        text += "; own emits stopped %d time(s)" % sum(1 for g in gaps if g["what"] == "stopped")
+    for d in rows.get("dump", []):
+        text += "; dump %s HullRigProbe %s" % (d["stamp"], d["status"])
+    ok = [r for r in lines if r["state"] == "ok"]
+    if not ok:
+        return ("PARTIAL", text + ": no comparison was ok (the last state %s)" % lines[-1]["state"])
+    last = ok[-1]
+    text += ("; last ok (frame %s, pool %s, %s records): cpu %s (fresh %s, retained %s), gpu %s, both %s, cpu only %s, gpu only %s (written this frame %s, held %s)"
+             % (last["frame"], last["pool"], last["records"], last["cpu"], last["fresh"], last["retained"], last["gpu"], last["both"], last["cpu_only"],
+                last["gpu_only"], last["go_written"], last["go_held"]))
+    if sum(int(r["hits_s"]) + int(r["hits_c"]) for r in ok) == 0:
+        return ("PARTIAL", text + ": compared, but the copier never copied a claimed item (the chain breaks between the emit and the copier)")
+    return ("OK", text)
+
+
+def _hj_hull_bench(rows, ctx=None):
+    """The hull variant bench (hotkey.hull_bench, TEMPORARY; src\\d3d11\\hull_layer.cpp): ran is the armed line, applied is the done line. OK when the last
+    bench finished with a variant ok and every capture and the manifest written; PARTIAL when it aborted (the reason), finished with no variant ok or a write
+    failed, or the presses were all refused (the reason); NEVER APPLIED when armed and no done or aborted line follows (its drain never ended); None with no
+    line."""
+    armed, refused = rows.get("armed", []), rows.get("refused", [])
+    ends = rows.get("done", []) + rows.get("aborted", [])
+    ends.sort(key=lambda r: r["_t"] if r["_t"] is not None else -1.0)
+    if not armed and not refused and not ends:
+        return None
+    if not armed and not ends:
+        return ("PARTIAL", "%d press(es), all refused (the last: %s)" % (len(refused), refused[-1]["why"]))
+    if not ends:
+        return ("NEVER APPLIED", "bench %s was armed but no 'hull layer: bench ... done' or 'aborted' line follows (its drain never finished, or the game "
+                                 "closed first)" % armed[-1]["stamp"])
+    last = ends[-1]
+    variants = [v for v in rows.get("variant", []) if v["stamp"] == last["stamp"]]
+    text = "%d bench(es) armed, %d refused; bench %s: %s ok, %s refused, %s aborted, %s files, %s failed" % (
+        len(armed), len(refused), last["stamp"], last["ok"], last["refused"], last["aborted"], last["files"], last["failed"])
+    rects = [r for r in rows.get("rect", []) if r["stamp"] == last["stamp"]]
+    if rects:
+        r = rects[-1]
+        text += "; rect output %s,%s %sx%s" % (r["ox"], r["oy"], r["ow"], r["oh"])
+    if variants:
+        text += "; " + ", ".join("%s %s%s" % (v["id"], v["status"], "" if v["status"] == "ok" else " (%s)" % v["reason"]) for v in variants)
+    if "why" in last:
+        return ("PARTIAL", text + "; ABORTED: %s" % last["why"])
+    if int(last["ok"]) == 0:
+        return ("PARTIAL", text + ": no variant was captured")
+    if int(last["failed"]) > 0 or last.get("manifest") != "written":
+        return ("PARTIAL", text + ": a capture or the manifest was not written")
+    return ("OK", text)
+
+
+def _hj_framegen_shadow(rows, ctx=None):
+    """Frame generation, Phase 1 (fix.frame_generation_shadow, TEMPORARY): ran is the armed line (the first treated eye with the key on), applied is a report line (the
+    scorer's one-second line). OK when at least one report line is in the window; NEVER APPLIED when the armed line is there and no report line is (the scorer armed and
+    never reported: no trained-engine eye after it, or the report path is dead); None (nothing said) when neither is there, which is the key off."""
+    armed = rows.get("armed", [])
+    reports = rows.get("report", [])
+    poses = rows.get("pose", [])
+    if not armed and not reports and not poses:
+        return None
+    if not reports and not armed:
+        return ("PARTIAL", "%d pose line(s) in the runtime log but no scorer line in the graphics log (the graphics log of another flight, or the scorer's lines are cut)" % len(poses))
+    if not reports:
+        return ("NEVER APPLIED", "the key was on (armed, quarter %sx%s per eye) but no 'frame generation (shadow): frames=' report line follows in the window: the scorer "
+                                 "never reported (no trained-engine VR eye ran after it armed, or the report path is dead)" % (armed[-1]["qw"], armed[-1]["qh"]))
+    frames = sum(int(r["frames"]) for r in reports)
+    skipped = sum(int(r["s%d" % i]) for r in reports for i in range(5))
+    text = "%d report line(s), %d frame(s) scored, %d skipped" % (len(reports), frames, skipped)
+    if armed:
+        text += "; armed at quarter %sx%s per eye" % (armed[-1]["qw"], armed[-1]["qh"])
+    else:
+        text += "; the armed line is before the window"
+    vram = rows.get("vram", [])
+    if vram:
+        text += "; VRAM %s MiB for two eyes (%s; the last VRAM line)" % (vram[-1]["two_mib"], vram[-1]["groups"])
+    if not frames:
+        text += "; no frame was scored (every frame skipped)"
+    # The jump set and the second kernel (lines that carry them: older lines do not): the world class's p95 error of the prediction against the DLSS vector's landing (the mv set,
+    # the ceiling the vectors give a warp), and the camera_jump frames scored apart.
+    withJump = [r for r in reports if r.get("jump_n") is not None]
+    if withJump:
+        text += "; %d jump frame(s) scored apart" % sum(int(r["jump_n"]) for r in withJump)
+    withMv = [r for r in reports if r.get("m_world_p95") is not None and int(r.get("mv_n") or 0) > 0]
+    if withMv:
+        text += ("; world p95 %.0f predicted vs %.0f mv milli-luma (mean of %d line(s))" %
+                 (sum(int(r["world_p95"]) for r in withMv) / len(withMv), sum(int(r["m_world_p95"]) for r in withMv) / len(withMv), len(withMv)))
+    if poses:
+        scored = sum(int(r["frames"]) for r in poses)
+        text += ("; pose: %d line(s), %d frame(s) scored, runtime miss max %.2f mm / %.3f deg, velocity miss max %.2f mm / %.3f deg, lead median %s ms (last line), %d refused, %d expired, "
+                 "%d unpredicted" % (len(poses), scored, max(float(r["rmm2"]) for r in poses), max(float(r["rdeg2"]) for r in poses), max(float(r["vmm2"]) for r in poses),
+                                     max(float(r["vdeg2"]) for r in poses), poses[-1]["lead"], sum(int(r["refused"]) for r in poses), sum(int(r["expired"]) for r in poses),
+                                     sum(int(r["unpredicted"]) for r in poses)))
+        slotted = [r for r in poses if r.get("slot") is not None and int(r["slot"]) > 0]
+        if slotted:   # Phase 2.3, H6 at the slot
+            text += "; slot pose: %d scored, miss max %.2f mm / %.3f deg, lead median %s ms (last line)" % (
+                sum(int(r["slot"]) for r in slotted), max(float(r["smm2"]) for r in slotted), max(float(r["sdeg2"]) for r in slotted), slotted[-1]["slead"])
+    elif armed and _hrows(ctx or {}, H_FRAMEGEN_RUNTIME_READ, "read"):
+        return ("NEVER APPLIED", "the scorer reported (%d line(s)) but the runtime log has no 'frame generation (shadow) pose:' line: the head-pose measure never ran (the runtime or the "
+                                 "d3d11.dll is older than the version 12 frame answer, or the measure is dead)" % len(reports))
+    elif armed:
+        text += "; the runtime log was not read, so the pose measure is not judged"
+    return ("OK", text)
+
+
+def _hj_framegen_synth(rows, ctx=None):
+    """Frame generation, Phase 2.1 (the synthesizer, riding fix.frame_generation_shadow): ran is the shadow scorer's armed (or report) line, applied is a synth report line with
+    frames built. NEVER APPLIED when the scorer is armed and no synth line follows, when the synth armed and never reported, or when it reported only calls that built nothing
+    (frames=0/0: it was called and no depth copy or vectors reached it); None (nothing said) when neither the scorer nor the synth left a line, which is the key off."""
+    armed = rows.get("armed", [])
+    reports = rows.get("report", [])
+    shadow = (ctx or {}).get(H_FRAMEGEN, {})
+    shadow_on = bool(shadow.get("armed")) or bool(shadow.get("report"))
+    if not armed and not reports:
+        if not shadow_on:
+            return None
+        return ("NEVER APPLIED", "the shadow scorer is armed or reporting (fix.frame_generation_shadow on) but there is no 'frame generation (synth):' line at all: the synthesizer never ran "
+                                 "(the d3d11.dll is older than Phase 2.1, it stood down before its first line, or its report path is dead)")
+    if not reports:
+        return ("NEVER APPLIED", "the synthesizer armed (render %sx%s, output %sx%s per eye) but no 'frame generation (synth): frames=' report line follows in the window: it built nothing "
+                                 "that reached a report" % (armed[-1]["rw"], armed[-1]["rh"], armed[-1]["ow"], armed[-1]["oh"]))
+    built = [(int(r["f05"]), int(r["f1"])) for r in reports]
+    n05, n1 = sum(b[0] for b in built), sum(b[1] for b in built)
+    scored, skipped = sum(int(r["scored"]) for r in reports), sum(int(r["skipped"]) for r in reports)
+    if n05 + n1 == 0:
+        return ("NEVER APPLIED", "the synthesizer was called (%d call(s) in %d report line(s)) and built no frame: no depth copy or DLSS vectors reached it" % (skipped, len(reports)))
+    text = "%d report line(s), %d frame(s) built at f=0.5 and %d at f=1, %d scored against the next real frame, %d call(s) built nothing" % (len(reports), n05, n1, scored, skipped)
+    if armed:
+        text += "; armed at render %sx%s, output %sx%s per eye" % (armed[-1]["rw"], armed[-1]["rh"], armed[-1]["ow"], armed[-1]["oh"])
+    else:
+        text += "; the armed line is before the window"
+    vram = rows.get("vram", [])
+    if vram:
+        text += "; VRAM %s MiB for two eyes and the scratch (eye %s; scratch %s; the last VRAM line)" % (vram[-1]["two_mib"], vram[-1]["groups"], vram[-1]["sgroups"])
+    text += "; holes filled %.2f%% / left %.2f%% of the render pixels (mean), guard %.2f%%" % tuple(sum(float(r[k]) for r in reports) / len(reports) for k in ("filled", "left", "guard"))
+    orphans = [float(r["orphan"]) for r in reports if r.get("orphan") is not None and float(r["orphan"]) > 0.0]
+    if orphans:   # a key with no read offer (fgSynSrc's landing against fgSynSplat's), made a hole and filled: 0 on every replay so far
+        text += "; orphan reads made holes in %d line(s), max %.3f%%" % (len(orphans), max(orphans))
+    withScore = [r for r in reports if int(r["scored"]) > 0]
+    if withScore:
+        text += "; f=1 S against the next frame: p95 error far %s / cockpit %s / world %s milli-luma, no warp %s / %s / %s (mean of %d line(s))" % (
+            tuple(sum(int(r[c + "_p95"]) for r in withScore) // len(withScore) for c in ("far", "cockpit", "world")) +
+            tuple(sum(int(r[c + "_idp95"]) for r in withScore) // len(withScore) for c in ("far", "cockpit", "world")) + (len(withScore),))
+        turned = [r for r in withScore if r.get("t_far_p95") is not None]
+        if turned:
+            # The compositor's step: S turned by what remains of the head's rotation (true against the one S was built for) before it is scored; raw is the unturned score above.
+            rots = [(float(r["rot_med"]), float(r["rot_max"])) for r in turned if r.get("rot_med") not in (None, "-")]
+            text += "; turned by the residual head rotation: world p95 %d (raw %d) / cockpit %d (raw %d) / far %d (raw %d) milli-luma" % tuple(
+                v for c in ("world", "cockpit", "far")
+                for v in (sum(int(r["t_" + c + "_p95"]) for r in turned) // len(turned), sum(int(r[c + "_p95"]) for r in turned) // len(turned)))
+            if rots:
+                text += ", residual %.3f deg median (max %.3f)" % (sum(m for m, _ in rots) / len(rots), max(x for _, x in rots))
+    # Phase 2.2: a report with the slot tail is a d3d11.dll that takes the runtime's slot and hands S over, so the runtime's transfer line must be there (when its log was read). A
+    # report without the tail is an older d3d11.dll, and is not held to it.
+    slotted = [r for r in reports if r.get("pose_rt") is not None]
+    if slotted:
+        paths = sorted(set(r["spath"] for r in slotted))
+        text += "; f=0.5 S head: %d on the runtime's slot pose, %d on the extrapolation; S written %s; %d busy" % (
+            sum(int(r["pose_rt"]) for r in slotted), sum(int(r["pose_fb"]) for r in slotted), "/".join(paths), sum(int(r["sbusy"]) for r in slotted))
+    # Phase 2.3b: S finished as B is at B's door (its sharpening, its UI layer by the head's step), or left unfinished (not handed over) and why.
+    finishing = [r for r in reports if r.get("fin") is not None]
+    if finishing:
+        fms = [float(r["gfin_med"]) for r in finishing if r.get("gfin_med")]
+        text += "; S finished like B %d / unfinished %d (last why: %s), finish %s ms an eye (median of the lines' medians)" % (
+            sum(int(r["fin"]) for r in finishing), sum(int(r["unfin"]) for r in finishing), finishing[-1]["fin_why"],
+            "%.3f" % sorted(fms)[len(fms) // 2] if fms else "-")
+    transfers = rows.get("transfer", [])
+    if transfers:
+        produced, consumed = sum(int(r["produced"]) for r in transfers), sum(int(r["consumed"]) for r in transfers)
+        if produced > 0 and consumed == 0:
+            return ("NEVER APPLIED", "the runtime's transfer lines say %d S produced and none consumed (%d line(s)): the consume after the pair's finish never took one (the keyed mutex "
+                                     "never reached key 1 on its side, or the consume is dead)" % (produced, len(transfers)))
+        last = transfers[-1]
+        text += ("; transfer: %d line(s), %d produced / %d consumed, %d busy, %d late, ready %s ms against T_S (median, last line), consume %s ms, path %s, slot pose %d located / %d none, "
+                 "VRAM game %s / XR %s MiB (last line)" % (len(transfers), produced, consumed, sum(int(r["busy"]) for r in transfers), sum(int(r["late"]) for r in transfers),
+                                                          last["ready_med"], last["cons_med"], "/".join(sorted(set(r["path"] for r in transfers))),
+                                                          sum(int(r["pose_rt"]) for r in transfers), sum(int(r["pose_none"]) for r in transfers), last["vgame"], last["vxr"]))
+    elif slotted and _hrows(ctx or {}, H_FRAMEGEN_RUNTIME_READ, "read"):
+        if rows.get("nochannel"):
+            return ("NEVER APPLIED", "the synthesizer reported with the slot fields (%d line(s)) but the runtime says the d3d11 half has no slot channel: the runtime log is from "
+                                     "another d3d11.dll than this graphics log's" % len(slotted))
+        return ("NEVER APPLIED", "the synthesizer reported with the slot fields (%d line(s)) but the runtime log has no 'frame generation (synth) transfer:' line: no slot was handed "
+                                 "and nothing crossed (an older openvr_api.dll, or the transfer's line is dead)" % len(slotted))
+    elif slotted:
+        text += "; the runtime log was not read, so the transfer is not judged"
+    return ("OK", text)
+
+
+def _hj_framegen_lock(rows, ctx=None):
+    """Frame generation, Phase 2.3 (fix.frame_generation = on, TEMPORARY): Lock 2:1 in the runtime. ran is the key (the graphics log's key line saying on, or the runtime's armed
+    or report line), applied is a report line with engaged time or an engage edge. NEVER APPLIED when the key is on and the runtime log (read) has no lock line at all, when it
+    armed and never reported, or when it reported and never engaged (the reasons it gave are said); PARTIAL when late_s or late_real passes 5% of the slots; None (nothing said)
+    with the key off and no lock line."""
+    keys = rows.get("key", [])
+    armed, reports = rows.get("armed", []), rows.get("report", [])
+    engages, disengages = rows.get("engage", []), rows.get("disengage", [])
+    gates, gate_old = rows.get("gate", []), rows.get("gate_old", [])
+    gate_engages, gate_disengages = rows.get("gate_engage", []), rows.get("gate_disengage", [])
+    key_on = bool(keys) and keys[-1]["key"] in ("on", "auto")
+    key_auto = (bool(keys) and keys[-1]["key"] == "auto") or any(g["mode"] == "auto" for g in gates)
+    runtime_read = bool(_hrows(ctx or {}, H_FRAMEGEN_RUNTIME_READ, "read"))
+    if not key_on and not armed and not reports and not engages and not disengages and not gates and not gate_old:
+        return None
+    # Phase 2.4, auto: the performance gate (the graphics log) is judged first. Its one-second line names the state and the reason, so a gate that never admitted Lock is told
+    # from one that never ran (no line: NEVER APPLIED) and from an older runtime (its line: NEVER APPLIED, named).
+    gate_text = ""
+    if key_auto:
+        if gate_old:
+            return ("NEVER APPLIED", "fix.frame_generation is auto but the runtime cannot read it (an openvr_api.dll older than 2.4: no slot that knows auto in %s s of VR "
+                                     "frames); frame generation stayed off" % gate_old[-1]["secs"])
+        if not gates:
+            return ("NEVER APPLIED", "fix.frame_generation is auto but there is no 'frame generation gate:' line: the performance gate never ran (the d3d11.dll is older than 2.4, "
+                                     "or its once-a-second line is dead)")
+        auto_lines = [g for g in gates if g["mode"] == "auto"]
+        engaged_lines = [g for g in auto_lines if g["state"] == "engaged"]
+        waiting = {}
+        for g in auto_lines:
+            if g["state"] != "engaged":
+                waiting[g["reason"]] = waiting.get(g["reason"], 0) + 1
+        for d in gate_disengages:
+            waiting[d["reason"]] = waiting.get(d["reason"], 0) + 1
+        why_gate = ", ".join("%s %d" % kv for kv in sorted(waiting.items(), key=lambda kv: -kv[1])) or "none"
+        margins = sorted(float(g["margin"]) for g in auto_lines if g["margin"] != "-")
+        budgets = [g["budget"] for g in auto_lines if g["budget"] != "-"]
+        contexts = sorted(set(g["context"] for g in auto_lines))
+        h1 = ("H1 margin median %.2f ms (min %.2f) against a budget of %s ms" % (margins[len(margins) // 2], margins[0], budgets[-1])) if margins and budgets else "H1 not measured"
+        gate_text = ("gate: %d line(s) in auto, engaged in %d, %d engage / %d disengage edge(s); reasons when waiting (lines/edges): %s; %s; context %s"
+                     % (len(auto_lines), len(engaged_lines), len(gate_engages), len(gate_disengages), why_gate, h1, "/".join(contexts) or "-"))
+        if not engaged_lines and not gate_engages:
+            return ("OK", "the gate ran and never admitted Lock (frame generation stayed off by its decision): " + gate_text)
+    if not armed and not reports and not engages and not disengages:
+        if gate_text:
+            if not runtime_read:
+                return ("OK", gate_text + "; the runtime log was not read, so Lock is not judged")
+            return ("NEVER APPLIED", gate_text + "; but the runtime log has no 'frame generation lock:' line: the runtime never read the key (an openvr_api.dll older than 2.3)")
+        if not runtime_read:
+            return ("OK", "fix.frame_generation is on (the graphics log); the runtime log was not read, so Lock is not judged")
+        return ("NEVER APPLIED", "fix.frame_generation is on (the graphics log) but the runtime log has no 'frame generation lock:' line: the runtime never read the key (an "
+                                 "openvr_api.dll older than 2.3, or a frame answer older than version 12)")
+    if not reports:
+        return ("NEVER APPLIED", "the runtime armed Lock (%d armed line(s), %d engage edge(s)) but no 'frame generation lock: engaged=' line follows: its one-second line is dead"
+                % (len(armed), len(engages)))
+    engaged = sum(float(r["engaged"]) for r in reports)
+    real, s = sum(int(r["real"]) for r in reports), sum(int(r["s"]) for r in reports)
+    late_real, late_s = sum(int(r["late_real"]) for r in reports), sum(int(r["late_s"]) for r in reports)
+    from_s, from_b = sum(int(r["from_s"]) for r in reports), sum(int(r["from_b"]) for r in reports)
+    reasons = {}
+    for r in reports:
+        if r["reason"] != "none":
+            reasons[r["reason"]] = reasons.get(r["reason"], 0) + 1
+    for d in disengages:
+        reasons[d["reason"]] = reasons.get(d["reason"], 0) + 1
+    why = ", ".join("%s %d" % kv for kv in sorted(reasons.items(), key=lambda kv: -kv[1])) or "none given"
+    if engaged <= 0.0 and not engages:
+        return ("NEVER APPLIED", ("%s; but " % gate_text if gate_text else "") +
+                "Lock never engaged: %d lock line(s), engaged 0.00 s, no engage edge; the reasons it gave (lines/edges): %s" % (len(reports), why))
+    text = (("%s; " % gate_text if gate_text else "") + "%d lock line(s), engaged %.2f s, %d engage / %d disengage edge(s); %d real pair(s) and %d S slot(s) while engaged, S shown %d / B replayed %d, late_s %d, late_real %d; "
+            "wait %s ms median (last line), period %s ms; reasons when off: %s" % (len(reports), engaged, len(engages), len(disengages), real, s, from_s, from_b, late_s, late_real,
+                                                                               reports[-1]["wait_med"], reports[-1]["period"], why))
+    if any(d.get("note") for d in disengages):
+        text += "; Lock stood aside for deferred pacing"
+    if rows.get("format"):
+        text += "; S's format %s cannot be shown (every S slot replays B)" % rows["format"][-1]["fmt"]
+    if rows.get("unfinished"):
+        text += "; S left unfinished (not shown), why: %s" % "/".join(sorted(set(r["why"] for r in rows["unfinished"])))
+    if rows.get("replayed"):
+        # The flight 11 instrument: why the S slots replayed B, summed over the flight (lines from before it carry no such line: nothing is said).
+        sums = [(k, sum(int(r[k]) for r in rows["replayed"])) for k in H_FRAMEGEN_LOCK_REPLAY_WHY]
+        text += "; B replayed because: %s" % (", ".join("%s %d" % kv for kv in sorted((kv for kv in sums if kv[1]), key=lambda kv: -kv[1])) or "none counted")
+        mism = [r for r in rows["replayed"] if int(r["seq_mismatch"])]
+        if mism:
+            text += " (last seq_mismatch asked %s had %s)" % (mism[-1]["asked"], mism[-1]["had"])
+    over = []
+    if s and late_s > H_FRAMEGEN_LOCK_LATE_SHARE * s:
+        over.append("late_s %d of %d S slots (%.1f%%)" % (late_s, s, 100.0 * late_s / s))
+    if s and late_real > H_FRAMEGEN_LOCK_LATE_SHARE * s:
+        over.append("late_real %d against %d S slots (%.1f%%)" % (late_real, s, 100.0 * late_real / s))
+    if over:
+        return ("PARTIAL", text + "; over %d%%: %s" % (int(100 * H_FRAMEGEN_LOCK_LATE_SHARE), "; ".join(over)))
+    return ("OK", text)
+
 SRV_TURRET_REFUSE_NAMES = ("no-eye", "game-gs", "topology", "not-ready", "no-geometry")   # the order of the 10 s line's refused[...] counts (srv_turret_math.h refuseName)
 SRV_TURRET_HUD_MIN_SECS = 12.0   # the turret view this long with no 10 s line and no first draw: the HUD half never ran (a 10 s line is due within 10 s of the view going on, and the first draw within a frame)
 SRV_TURRET_BOUND_MIN = 0.9       # the share of the 10 s lines' HUD draws that must go through the shader
@@ -18521,6 +19191,72 @@ HEALTH_RULES = (
         ("declined", H_DESKTOP_DECLINED),
         ("_", H_DESKTOP_OTHER),
     ), _hj_desktop_window),
+    # Frame generation, Phase 1 (TEMPORARY): the armed line and the one-second report, graphics-log lines with no build tag, read the desktop window's way.
+    _hrule(H_FRAMEGEN, (), (H_FRAMEGEN_LABEL,), (
+        ("armed", H_FRAMEGEN_ARMED),
+        ("vram", H_FRAMEGEN_VRAM),
+        ("report", H_FRAMEGEN_REPORT),
+        ("pose", H_FRAMEGEN_POSE),
+    ), _hj_framegen_shadow),
+    # Frame generation, Phase 2.1 (TEMPORARY): the synthesizer's armed line and one-second report, read the scorer's way; it judges against the scorer's rows (the key is the same).
+    _hrule(H_FRAMEGEN_SYNTH, (), (H_FRAMEGEN_SYNTH_LABEL,), (
+        ("armed", H_FRAMEGEN_SYNTH_ARMED),
+        ("vram", H_FRAMEGEN_SYNTH_VRAM),
+        ("report", H_FRAMEGEN_SYNTH_REPORT),
+        ("transfer", H_FRAMEGEN_SLOT),
+        ("nochannel", H_FRAMEGEN_SLOT_NOCHANNEL),
+    ), _hj_framegen_synth),
+    # Frame generation, Phase 2.3 (TEMPORARY): Lock. The key line is the graphics log's (untagged, state); the rest are the runtime log's (health_scan_runtime).
+    _hrule(H_FRAMEGEN_LOCK, (), (H_FRAMEGEN_LOCK_KEY_LABEL,), (
+        ("key", H_FRAMEGEN_LOCK_KEY),
+        ("armed", H_FRAMEGEN_LOCK_ARMED),
+        ("engage", H_FRAMEGEN_LOCK_ENGAGE),
+        ("disengage", H_FRAMEGEN_LOCK_DISENGAGE),
+        ("report", H_FRAMEGEN_LOCK_REPORT),
+        ("format", H_FRAMEGEN_LOCK_FORMAT),
+        ("unfinished", H_FRAMEGEN_LOCK_UNFINISHED),
+        ("replayed", H_FRAMEGEN_LOCK_REPLAYED),
+        ("gate", H_FRAMEGEN_GATE_REPORT),
+        ("gate_engage", H_FRAMEGEN_GATE_ENGAGE),
+        ("gate_disengage", H_FRAMEGEN_GATE_DISENGAGE),
+        ("gate_old", H_FRAMEGEN_GATE_OLD),
+    ), _hj_framegen_lock),
+    # The hull layer, Step 1 v2 (diag.hull_layer, TEMPORARY): the key, the 30 s report, the dump, auto dump and unknown pair lines, graphics-log lines with no build tag.
+    _hrule(H_HULL, (), (H_HULL_LABEL,), (
+        ("key", H_HULL_KEY),
+        ("report", H_HULL_REPORT),
+        ("dump", H_HULL_DUMP),
+        ("nothing", H_HULL_NOTHING),
+        ("auto", H_HULL_AUTO),
+        ("unknown", H_HULL_UNKNOWN),
+        ("main", H_HULL_MAIN),
+        ("composite", H_HULL_COMPOSITE),
+        ("ao", H_HULL_AO),
+        ("gpu", H_HULL_GPU),
+        ("lights", H_HULL_LIGHTS),
+        ("seq", H_HULL_SEQ),
+        ("seed", H_HULL_SEED),
+        ("_", H_HULL_OTHER),
+    ), _hj_hull_layer),
+    # The hull layer's rig probe (diag.hull_layer, TEMPORARY): its own row, from the "hull layer: rig_probe" lines health_scan routes here.
+    _hrule(H_HULL_PROBE, (), (H_HULL_PROBE_LABEL,), (
+        ("armed", H_HULL_PROBE_ARMED),
+        ("line", H_HULL_PROBE_LINE),
+        ("target", H_HULL_PROBE_TARGET),
+        ("gap", H_HULL_PROBE_GAP),
+        ("dump", H_HULL_PROBE_DUMP),
+        ("_", H_HULL_PROBE_OTHER),
+    ), _hj_hull_rig_probe),
+    # The hull variant bench (hotkey.hull_bench, TEMPORARY): its own row, from the "hull layer: bench" lines health_scan routes here.
+    _hrule(H_HULL_BENCH, (), (H_HULL_BENCH_LABEL,), (
+        ("armed", H_HULL_BENCH_ARMED),
+        ("refused", H_HULL_BENCH_REFUSED),
+        ("rect", H_HULL_BENCH_RECT),
+        ("variant", H_HULL_BENCH_VARIANT),
+        ("done", H_HULL_BENCH_DONE),
+        ("aborted", H_HULL_BENCH_ABORTED),
+        ("_", H_HULL_BENCH_OTHER),
+    ), _hj_hull_bench),
     # The SRV turret view (issue 140): lines of the graphics log that carry no build tag (health_scan reads them, as it reads the desktop window's, before it drops the untagged lines).
     _hrule(H_SRV_TURRET, (), H_SRV_TURRET_LABELS, (
         ("setting", H_SRV_TURRET_SETTING),
@@ -18592,8 +19328,62 @@ def health_scan(text, since=None, until=None):
         ("head containment (F119)", re.compile(r"head containment \(F119\): report context: reference (?P<reference>\d+) \((?P<known>known|not read)\), epoch (?P<epoch>\d+), (?P<context>steady|mixed rest)$")),
     )
     desktop = next(r for r in HEALTH_RULES if r.name == H_DESKTOP)
-    turret = next(r for r in HEALTH_RULES if r.name == H_SRV_TURRET)
+    framegen = next(r for r in HEALTH_RULES if r.name == H_FRAMEGEN)
+    synth = next(r for r in HEALTH_RULES if r.name == H_FRAMEGEN_SYNTH)
+    lock = next(r for r in HEALTH_RULES if r.name == H_FRAMEGEN_LOCK)
+    turret =next(r for r in HEALTH_RULES if r.name == H_SRV_TURRET)
+    hull = next(r for r in HEALTH_RULES if r.name == H_HULL)
+    probe = next(r for r in HEALTH_RULES if r.name == H_HULL_PROBE)
+    bench = next(r for r in HEALTH_RULES if r.name == H_HULL_BENCH)
     for raw in text.splitlines():
+        if H_HULL_BENCH_LABEL in raw:
+            # The hull variant bench: untagged like the layer's lines, its own row; every line is an event, cut by the window.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            for kind, rx in bench.kinds:
+                g = rx.search(body)
+                if g:
+                    if kind != "_" and _health_in_window(tod, since, until):
+                        rows[H_HULL_BENCH].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_HULL_BENCH]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
+        if H_HULL_PROBE_LABEL in raw:
+            # The hull layer's rig probe: untagged like the layer's lines, its own row. The armed line is state, kept whatever --since says.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            for kind, rx in probe.kinds:
+                g = rx.search(body)
+                if g:
+                    if kind != "_" and (kind in ("armed", "target") or _health_in_window(tod, since, until)):
+                        rows[H_HULL_PROBE].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_HULL_PROBE]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
+        if H_HULL_LABEL in raw:
+            # The hull layer's lines carry no build tag. The key line is state, kept whatever --since says; the rest are events and are cut by the window.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            for kind, rx in hull.kinds:
+                g = rx.search(body)
+                if g:
+                    if kind != "_" and (kind == "key" or _health_in_window(tod, since, until)):
+                        rows[H_HULL].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_HULL]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
         if "srv turret" in raw and any(label in raw for label in H_SRV_TURRET_LABELS):
             # The SRV turret view's lines carry no build tag either. The settings and vehicle lines are state, so every one is kept; the rest are events and are cut by the window.
             sm = HEALTH_STAMP_RE.match(raw)
@@ -18607,6 +19397,65 @@ def health_scan(text, since=None, until=None):
                     break
             else:
                 u = unparsed[H_SRV_TURRET]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
+        if H_FRAMEGEN_LOCK_KEY_LABEL in raw:
+            # Frame generation 2.3: Lock's key line (no build tag): state, kept whatever --since says.
+            g = re.compile(H_FRAMEGEN_LOCK_KEY).search(raw)
+            if g:
+                rows[H_FRAMEGEN_LOCK].setdefault("key", []).append(dict(g.groupdict(), _t=None))
+            else:
+                u = unparsed[H_FRAMEGEN_LOCK]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
+        if H_FRAMEGEN_GATE_LABEL in raw:
+            # Frame generation 2.4: the performance gate's lines (no build tag): events, cut by the window.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            gate_kinds = dict(lock.kinds)
+            for kind in H_FRAMEGEN_GATE_KINDS:
+                g = gate_kinds[kind].search(body)
+                if g:
+                    if _health_in_window(tod, since, until):
+                        rows[H_FRAMEGEN_LOCK].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_FRAMEGEN_LOCK]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
+        if H_FRAMEGEN_SYNTH_LABEL in raw:
+            # The synthesizer's lines carry no build tag either. The armed and VRAM lines are state, kept whatever --since says; the report lines are events and are cut by the window.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            for kind, rx in synth.kinds:
+                g = rx.search(body)
+                if g:
+                    if kind in ("armed", "vram") or _health_in_window(tod, since, until):
+                        rows[H_FRAMEGEN_SYNTH].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_FRAMEGEN_SYNTH]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
+        if H_FRAMEGEN_LABEL in raw:
+            # The frame generation shadow's lines carry no build tag. The armed and VRAM lines are state, so they are kept whatever --since says; the report lines are events and are cut by the window.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            for kind, rx in framegen.kinds:
+                g = rx.search(body)
+                if g:
+                    if kind in ("armed", "vram") or _health_in_window(tod, since, until):
+                        rows[H_FRAMEGEN].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_FRAMEGEN]
                 u[0] += 1
                 u[1] = u[1] or raw.strip()[:160]
             continue
@@ -18717,7 +19566,44 @@ def health_scan_runtime(scan, text):
     label and matches neither pattern is counted as unparsed, as health_scan counts the graphics log's."""
     rule = next(r for r in HEALTH_RULES if r.name == H_WORLD)
     rows = scan["rows"][H_WORLD]
+    pose_rx = dict(next(r for r in HEALTH_RULES if r.name == H_FRAMEGEN).kinds)["pose"]
+    synth_kinds = dict(next(r for r in HEALTH_RULES if r.name == H_FRAMEGEN_SYNTH).kinds)
+    scan["rows"][H_FRAMEGEN_RUNTIME_READ] = {"read": [{}]}
+    lock_kinds = dict(next(r for r in HEALTH_RULES if r.name == H_FRAMEGEN_LOCK).kinds)
     for order, raw in enumerate(text.splitlines()):
+        if H_FRAMEGEN_LOCK_LABEL in raw:
+            # Frame generation 2.3: Lock's lines (armed, an edge, the one-second line, the format note; 2.3b: the unfinished S's why).
+            for kind in ("report", "engage", "disengage", "armed", "format", "unfinished", "replayed"):
+                g = lock_kinds[kind].search(raw)
+                if g:
+                    scan["rows"][H_FRAMEGEN_LOCK].setdefault(kind, []).append(dict(g.groupdict(), _order=order, _t=None))
+                    break
+            else:
+                u = scan["unparsed"][H_FRAMEGEN_LOCK]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
+        if H_FRAMEGEN_SLOT_LABEL in raw:
+            # Frame generation 2.2: S's transfer line, or the line that says the d3d11 half has no slot channel.
+            for kind in ("transfer", "nochannel"):
+                g = synth_kinds[kind].search(raw)
+                if g:
+                    scan["rows"][H_FRAMEGEN_SYNTH].setdefault(kind, []).append(dict(g.groupdict(), _order=order, _t=None))
+                    break
+            else:
+                u = scan["unparsed"][H_FRAMEGEN_SYNTH]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
+        if H_FRAMEGEN_POSE_LABEL in raw:
+            g = pose_rx.search(raw)
+            if g:
+                scan["rows"][H_FRAMEGEN].setdefault("pose", []).append(dict(g.groupdict(), _order=order, _t=None))
+            else:
+                u = scan["unparsed"][H_FRAMEGEN]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
         if H_WORLD_LABEL not in raw:
             continue
         for kind, rx in rule.kinds:
@@ -25819,6 +26705,559 @@ def self_test_health():
         check("desktop window: a declined draw and no Present drawn is NEVER APPLIED", dw_ok + [dw_setting("left_eye"), RD(dwcpp, "desktop window: not drawing -- %s", "no eye image yet")], 3, [("NEVER APPLIED", DW)])
         check("desktop window: a 10 s line inside --since is counted", dw_ok + [(1, dw_setting("left_eye")), (70, dw_sec())], 0, [("OK", DW)], extra=["--since", "10:01:00"])
 
+        # ---- the frame generation shadow: the armed and report lines, rendered from the C format strings in src\common\framegen_shadow_report.h ----
+        fgsrc = read_text(os.path.join(repo_root(), "src", "common", "framegen_shadow_report.h"))
+
+        def RF(needle, *vals):
+            key = "fg:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(fgsrc, needle)
+            if fmts[key] is None:
+                raise AssertionError("frame generation shadow: no log format holds %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def fg_armed(qw=612, qh=699):
+            return RF("armed, quarter %ux%u", qw, qh)
+
+        def fg_report(frames=60, skipped=(1, 2, 3, 4, 5), timed=True, sets=False, jump=4, probe=False, mv_p95=33, old=False, oracle_p95=20, bd_p95=12, dis="2.18"):
+            """sets: the jump set and the motion facts after rig_mm; probe: the mv set after them. old: the line of the builds before 2026-11-07, whose oracle set (before the jump
+            set), bdepth set and disagreement (after the mv set) are literal here, their formats gone from the header."""
+            cls = "".join(RF(" %s=%.1f%%,%u", n, 10.0, 12, 8, 40, 5.5, 1.5, 9, 30) for n in ("far", "cockpit", "world"))
+            gpu = RF("%.2f/%.2f(n=%u)", 0.85, 1.2, 3) if timed else health_c_format(fgsrc, "-(n=0)")
+            line = RF("frames=%u skipped=%u/", frames, *skipped) + cls + RF(" holes=%.1f%% gpu_ms=%s", 3.5, gpu, 0.012, 0.034, 0.4, 1.25)
+            if sets:   # the jump set and the CPU motion facts, appended after rig_mm; "-" for the facts of an idle window
+                jcls = "".join(RF(" %s=%.1f%%,%u", n, 10.0, 12, 8, 40, 5.5, 1.5, 9, 30) for n in ("far", "cockpit", "world"))
+                if old:
+                    line += " oracle=29" + "".join(RF(" %s=%.1f%%,%u", n, 10.0, 12, 8, oracle_p95, 5.5, 1.5, 9, 30) for n in ("far", "cockpit", "world"))
+                line += RF(" jump=%u", jump) + jcls
+                line += RF(" motion_mm=%s/%s mag_ratio=%s/%s/%s dt_ratio=%s/%s/%s dt_ms=%s/%s rig_dt_mm=%s/%s", "12.3", "80.0", "0.50", "1.00", "2.00", "0.50", "1.00", "2.00",
+                           "-", "-", "0.40", "1.25")
+                if probe:   # the second kernel's mv set, appended after rig_dt_mm
+                    mcls = "".join(RF(" %s=%.1f%%,%u", n, 10.0, 12, 8, mv_p95, 5.5, 1.5, 9, 30) for n in ("far", "cockpit", "world"))
+                    line += RF(" mv=%u", 29) + mcls
+                    if old:
+                        bcls = "".join(RF(" %s=%.1f%%,%u", n, 10.0, 12, 8, bd_p95, 5.5, 1.5, 9, 30) for n in ("far", "cockpit", "world"))
+                        line += " bdepth=29" + bcls + " mvdis_world_px=%s/4.36 mvdis_cockpit_px=-/-" % dis
+            return line
+
+        def fg_vram(eye=0, groups="captures=5177520 keys=1725840 stats=11960"):
+            """The scorer's VRAM line, rendered from the C format string: the groups are one %s."""
+            return RF("frame generation (shadow): eye %u VRAM %llu B", eye, 6915320, 6.6, groups, 13830640, 13.2)
+
+        def fg_extrap_old():
+            """The extrapolation line of the builds before 2026-11-07, literal: it carries none of the rule's labels and is passed over."""
+            return "frame generation (shadow) extrapolation: ex2d=29 far=10.0%,12,8,33,5.5%,1.5%|id:9,30 cockpit=10.0%,12,8,33,5.5%,1.5%|id:9,30 world=10.0%,12,8,33,5.5%,1.5%|id:9,30 ex2dh=29 far=10.0%,12,8,12,5.5%,1.5%|id:9,30 cockpit=10.0%,12,8,12,5.5%,1.5%|id:9,30 world=10.0%,12,8,12,5.5%,1.5%|id:9,30 rowsoff_world=25.0% rowsoff_cockpit=-"
+
+        # The synthesizer's armed and one-second lines (Phase 2.1), rendered from the C format strings in src\common\framegen_synth_report.h.
+        fgssrc = read_text(os.path.join(repo_root(), "src", "common", "framegen_synth_report.h"))
+
+        def RS(needle, *vals):
+            key = "fgs:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(fgssrc, needle)
+            if fmts[key] is None:
+                raise AssertionError("frame generation synth: no log format holds %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def fg_synth_armed(rw=612, rh=699, ow=1224, oh=1398, fmt=10):
+            return RS("frame generation (synth): armed, render %ux%u", rw, rh, ow, oh, fmt)
+
+        def fg_synth_vram(eye=0):
+            return RS("frame generation (synth): eye %u VRAM %llu B", eye, 53364996, 50.9, "s=49038336 luma=862920 class=3451680 stats=12060", 58616136, 55.9,
+                      "key=27584064 read=27584064 holes=3448008", 165346128, 157.7)
+
+        def fg_synth_report(f05=40, f1=39, scored=38, skipped=2, timed=True, p95=20, filled=0.25, left=0.01, guard=1.5, turned=True, tp95=7, rot=(0.4, 1.2), clamp=0.0, slot=None, finish=None, fill=None,
+                            orphan=0.0):
+            cls = "".join(RF(" %s=%.1f%%,%u", n, 10.0, 12, 8, p95, 5.5, 1.5, 9, 30) for n in ("far", "cockpit", "world"))
+            gpu = RF("%.2f/%.2f(n=%u)", 0.31, 0.8, 40) if timed else health_c_format(fgsrc, "-(n=0)")
+            tail = RS(" gpu_ms=%s/%s holes=%.2f%%/%.2f%% guard=%.2f%% clamp=%.3f%%", gpu, gpu, filled, left, guard, clamp, orphan or 0.0)
+            if orphan is None:   # a line from before the orphan field (2026-11-08)
+                tail = re.sub(r" orphan=[\d.]+%$", "", tail)
+            line = RS("frame generation (synth): frames=%u/%u scored=%u skipped=%u", f05, f1, scored, skipped) + tail + (
+                RS(" fill_reproj=%.1f%% fill_stretch=%.1f%%", *fill) if fill is not None else "") + cls
+            if turned:
+                tcls = "".join(RF(" %s=%.1f%%,%u", n, 10.0, 12, 8, tp95, 5.5, 1.5, 9, 30) for n in ("far", "cockpit", "world"))
+                line += RS(" turned:") + tcls + RS(" rot_res_deg=%s/%s out=%.2f%%", "%.3f" % rot[0], "%.3f" % rot[1], 3.5)
+            if slot is not None:   # Phase 2.2: (on the slot pose, on the extrapolation, where S was written, busy)
+                line += RS(" pose=%u/%u s=%s busy=%u", *slot)
+            if finish is not None:   # Phase 2.3b: (finished, unfinished, why)
+                line += RS(" finish=%u/%u finish_ms=%s why=%s", finish[0], finish[1], RF("%.2f/%.2f(n=%u)", 0.21, 0.4, 80), finish[2])
+            return line
+
+        # fg_off is a log with the key off; fg_ok is one with the key on, whose scorer lines the synthesizer's lines must accompany (its rule judges against them).
+        FG, FGS, fg_off = H_FRAMEGEN, H_FRAMEGEN_SYNTH, [f90_part()]
+        fg_ok = fg_off + [fg_synth_armed(), fg_synth_report()]
+        check("frame generation shadow: no line at all, nothing said (the key off)", fg_off, 0, [("OK", F90S)], lacks=["frame generation", "NEVER APPLIED"])
+        check("frame generation shadow: armed and reporting is OK", fg_ok + [fg_armed(), fg_report(), fg_report(frames=58)], 0, [("OK", FG)],
+              has=["2 report line(s), 118 frame(s) scored, 30 skipped; armed at quarter 612x699 per eye"], lacks=["UNPARSED"])
+        check("frame generation shadow: the VRAM line is read as state and the OK summary says the two-eye figure and the groups",
+              fg_ok + [(1, fg_armed()), (1, fg_vram()), (1, fg_vram(eye=1)), (70, fg_report()), (70, fg_synth_report())], 0, [("OK", FG)],
+              has=["VRAM 13.2 MiB for two eyes (captures=5177520 keys=1725840 stats=11960; the last VRAM line)"], lacks=["UNPARSED"], extra=["--since", "10:01:00"])
+        check("frame generation shadow: a VRAM line whose groups changed still parses (the groups are one field)",
+              fg_ok + [fg_armed(), fg_vram(groups="captures=6291456 vectors=33554432 keys=12582912 stats=31900"), fg_report()], 0, [("OK", FG)],
+              has=["VRAM 13.2 MiB for two eyes (captures=6291456 vectors=33554432 keys=12582912 stats=31900"], lacks=["UNPARSED"])
+        check("frame generation shadow: a line with the jump set and the motion facts is OK and says the jump frames scored apart",
+              fg_ok + [fg_armed(), fg_report(sets=True), fg_report(sets=True, jump=2)], 0, [("OK", FG)],
+              has=["2 report line(s), 120 frame(s) scored", "6 jump frame(s) scored apart"], lacks=["UNPARSED", "oracle"])
+        check("frame generation shadow: a line with the mv set is OK and says the world p95 predicted against the vectors' landing",
+              fg_ok + [fg_armed(), fg_report(sets=True, probe=True), fg_report(sets=True, probe=True, mv_p95=31)], 0, [("OK", FG)],
+              has=["world p95 40 predicted vs 32 mv milli-luma (mean of 2 line(s))"], lacks=["UNPARSED", "bdepth", "oracle"])
+        check("frame generation shadow: a line of the builds before 2026-11-07 (the oracle set, the bdepth set and the disagreement) still parses and is read for what stays",
+              fg_ok + [fg_armed(), fg_report(sets=True, probe=True, old=True), fg_report(sets=True, probe=True, old=True, mv_p95=31)], 0, [("OK", FG)],
+              has=["2 report line(s), 120 frame(s) scored", "8 jump frame(s) scored apart", "world p95 40 predicted vs 32 mv milli-luma (mean of 2 line(s))"], lacks=["UNPARSED", "bdepth", "oracle"])
+        check("frame generation shadow: an extrapolation line of the builds before 2026-11-07 is passed over, neither read nor counted as unparsed",
+              fg_ok + [fg_armed(), fg_report(), fg_extrap_old()], 0, [("OK", FG)], lacks=["extrapolation", "UNPARSED", "the rule's patterns do not match"])
+        check("frame generation shadow: a line from before the mv set still parses and has no such part", fg_ok + [fg_armed(), fg_report(sets=True)], 0, [("OK", FG)],
+              lacks=["vs 32 mv", "UNPARSED"])
+        check("frame generation shadow: a drifted mv part is UNPARSED, not a report", fg_ok + [fg_armed(), fg_report(sets=True, probe=True).replace(" mv=", " vm=")], 3, [("NEVER APPLIED", FG)],
+              has=["line(s) the rule's patterns do not match"])
+        check("frame generation shadow: a line from before the jump fields has no jump part in its summary", fg_ok + [fg_armed(), fg_report()], 0, [("OK", FG)],
+              lacks=["jump frame", "UNPARSED"])
+        check("frame generation shadow: a drifted jump part is UNPARSED, not a report", fg_ok + [fg_armed(), fg_report(sets=True).replace(" jump=", " leap=")], 3, [("NEVER APPLIED", FG)],
+              has=["line(s) the rule's patterns do not match"])
+        check("frame generation shadow: armed and no report line is NEVER APPLIED", fg_ok + [fg_armed()], 3, [("NEVER APPLIED", FG)],
+              has=["the key was on (armed, quarter 612x699 per eye) but no 'frame generation (shadow): frames=' report line follows", "exit 3"])
+        check("frame generation shadow: the armed line before --since still counts as armed", fg_ok + [(1, fg_armed()), (70, fg_report()), (70, fg_synth_report())], 0, [("OK", FG)],
+              has=["1 report line(s), 60 frame(s) scored"], extra=["--since", "10:01:00"])
+        check("frame generation shadow: a report line without the armed line is OK, and says so", fg_ok + [fg_report()], 0, [("OK", FG)], has=["the armed line is before the window"])
+        check("frame generation shadow: a drifted report line is UNPARSED, not a report", fg_ok + [fg_armed(), fg_report().replace("holes=", "gaps=")], 3, [("NEVER APPLIED", FG)],
+              has=["line(s) the rule's patterns do not match"])
+        # The head-pose miss: the runtime log's line, rendered from the C format string in src\common\framegen_pose_report.h
+        fgpsrc = read_text(os.path.join(repo_root(), "src", "common", "framegen_pose_report.h"))
+
+        def fg_pose(frames=4, refused=0):
+            key = "fgp:pose"
+            if key not in fmts:
+                fmts[key] = health_c_format(fgpsrc, "frame generation (shadow) pose: frames=%u")
+            if fmts[key] is None:
+                raise AssertionError("frame generation shadow: no pose log format: the --health rule that reads it is out of date")
+            return health_render(fmts[key], (frames, 14.1, 4.11, 4.11, 4.11, 0.471, 0.471, 0.471, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3, 0, 1, 0, refused, 0))
+
+        fg_all = fg_ok + [fg_armed(), fg_report()]
+        check("frame generation shadow: armed, reporting and a pose line in the runtime log is OK", fg_all, 0, [("OK", FG)], lacks=["UNPARSED"],
+              has=["pose: 1 line(s), 4 frame(s) scored, runtime miss max 4.11 mm / 0.471 deg, velocity miss max 0.00 mm / 0.000 deg, lead median 14.1 ms (last line), 0 refused, 0 expired, 0 unpredicted"],
+              extra=["--runtime-file", runtime([fg_pose()])])
+        check("frame generation shadow: armed, reporting and no pose line in the runtime log is NEVER APPLIED", fg_all, 3, [("NEVER APPLIED", FG)],
+              has=["the runtime log has no 'frame generation (shadow) pose:' line", "exit 3"], extra=["--runtime-file", runtime(["native_frame: unrelated runtime line"])])
+        check("frame generation shadow: no runtime log read leaves the pose part unjudged, and says so", fg_all, 0, [("OK", FG)], has=["the runtime log was not read, so the pose measure is not judged"])
+        check("frame generation shadow: a drifted pose line is not a pose line", fg_all, 3, [("NEVER APPLIED", FG)],
+              has=["line(s) the rule's patterns do not match"], extra=["--runtime-file", runtime([fg_pose().replace("refused=", "denied=")])])
+        check("frame generation shadow: no scorer line and no pose line, nothing said (the key off)", fg_off, 0, [("OK", F90S)], lacks=["frame generation", "NEVER APPLIED"],
+              extra=["--runtime-file", runtime(["native_frame: unrelated runtime line"])])
+
+        # The synthesizer's own rule: the scorer armed or reporting and a synth line beside it is OK; the scorer without one, or a synth that never built a frame, is NEVER APPLIED.
+        check("frame generation synth: armed and reporting beside the scorer is OK and says the frames, the scores and the shares",
+              fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(), fg_synth_report(f05=41, f1=40, scored=39, p95=24)], 0, [("OK", FGS)],
+              has=["2 report line(s), 81 frame(s) built at f=0.5 and 79 at f=1, 77 scored against the next real frame, 4 call(s) built nothing; armed at render 612x699, output 1224x1398 per eye",
+                   "holes filled 0.25% / left 0.01% of the render pixels (mean), guard 1.50%", "p95 error far 22 / cockpit 22 / world 22 milli-luma, no warp 30 / 30 / 30 (mean of 2 line(s))"], lacks=["UNPARSED"])
+        check("frame generation synth: the VRAM line is read as state and the OK summary says the figure for two eyes and the scratch",
+              fg_off + [(1, fg_armed()), (1, fg_synth_armed()), (1, fg_synth_vram()), (70, fg_report()), (70, fg_synth_report())], 0, [("OK", FGS)],
+              has=["VRAM 157.7 MiB for two eyes and the scratch (eye s=49038336 luma=862920 class=3451680 stats=12060; scratch key=27584064 read=27584064 holes=3448008; the last VRAM line)"],
+              lacks=["UNPARSED"], extra=["--since", "10:01:00"])
+        check("frame generation synth: a report line with no gpu timing (\"-(n=0)\") and no scored frame is OK", fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(timed=False, scored=0)], 0, [("OK", FGS)],
+              has=["1 report line(s)", "0 scored"], lacks=["UNPARSED", "f=1 S against the next frame"])
+        check("frame generation synth: the turned score is read and the OK summary sets the world p95 raw against turned",
+              fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(p95=96, tp95=7, rot=(0.4, 1.2)), fg_synth_report(p95=100, tp95=9, rot=(0.6, 2.0))], 0, [("OK", FGS)],
+              has=["turned by the residual head rotation: world p95 8 (raw 98) / cockpit 8 (raw 98) / far 8 (raw 98) milli-luma, residual 0.500 deg median (max 2.000)"], lacks=["UNPARSED"])
+        check("frame generation synth: a report line from before the turned fields (and the clamp) is read as it was and says nothing of a turn",
+              fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(turned=False)], 0, [("OK", FGS)], lacks=["UNPARSED", "turned by the residual"])
+        check("frame generation synth: a report line with the fill's kinds (fill_reproj, fill_stretch) parses beside one from before them",
+              fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(fill=(81.5, 12.0), slot=(45, 0, "uav", 0)), fg_synth_report(slot=(45, 0, "uav", 0))], 0, [("OK", FGS)],
+              lacks=["UNPARSED"])
+        check("frame generation synth: a report line without the orphan field (before 2026-11-08) parses beside one with it, and no orphan is said",
+              fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(orphan=None, fill=(81.5, 12.0)), fg_synth_report(orphan=None), fg_synth_report()], 0, [("OK", FGS)],
+              lacks=["UNPARSED", "orphan"])
+        check("frame generation synth: an orphan share is read and the OK summary says it",
+              fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(orphan=0.012, fill=(81.5, 12.0)), fg_synth_report()], 0, [("OK", FGS)],
+              has=["orphan reads made holes in 1 line(s), max 0.012%"], lacks=["UNPARSED"])
+        check("frame generation synth: the scorer armed and reporting and no synth line at all is NEVER APPLIED", fg_off + [fg_armed(), fg_report()], 3, [("NEVER APPLIED", FGS)],
+              has=["the shadow scorer is armed or reporting (fix.frame_generation_shadow on) but there is no 'frame generation (synth):' line at all", "exit 3"])
+        check("frame generation synth: armed and no report line is NEVER APPLIED", fg_off + [fg_armed(), fg_report(), fg_synth_armed()], 3, [("NEVER APPLIED", FGS)],
+              has=["the synthesizer armed (render 612x699, output 1224x1398 per eye) but no 'frame generation (synth): frames=' report line follows"])
+        check("frame generation synth: a report of calls that built nothing (frames=0/0) is NEVER APPLIED", fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(f05=0, f1=0, scored=0, skipped=7, timed=False)], 3,
+              [("NEVER APPLIED", FGS)], has=["the synthesizer was called (7 call(s) in 1 report line(s)) and built no frame"])
+        check("frame generation synth: a drifted report line is counted as unparsed, not read as a report", fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report().replace("guard=", "grd=")], 3,
+              [("NEVER APPLIED", FGS)], has=["+1 line(s) the rule's patterns do not match"])
+        check("frame generation synth: a drifted armed line is counted as unparsed beside the report it precedes", fg_off + [fg_armed(), fg_report(), fg_synth_armed().replace("per eye", "a eye"), fg_synth_report()], 0,
+              [("OK", FGS)], has=["1 report line(s)", "the armed line is before the window", "+1 line(s) the rule's patterns do not match"])
+        check("frame generation synth: the armed line before --since still counts as armed", fg_off + [(1, fg_armed()), (1, fg_synth_armed()), (70, fg_report()), (70, fg_synth_report())], 0, [("OK", FGS)],
+              has=["1 report line(s)", "armed at render 612x699"], extra=["--since", "10:01:00"])
+        check("frame generation synth: a synth line with no scorer line is OK (the scorer's rule says nothing)", fg_off + [fg_synth_armed(), fg_synth_report()], 0, [("OK", FGS)], lacks=["UNPARSED"])
+        check("frame generation synth: no synth line and no scorer line, nothing said (the key off)", fg_off, 0, [("OK", F90S)], lacks=["frame generation synth", "NEVER APPLIED"])
+        # Phase 2.2: S's transfer, the runtime log's line (src\common\framegen_slot_report.h), judged beside a synth report that carries the slot fields.
+        fgtsrc = read_text(os.path.join(repo_root(), "src", "common", "framegen_slot_report.h"))
+
+        def RT(needle, *vals):
+            key = "fgt:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(fgtsrc, needle)
+            if fmts[key] is None:
+                raise AssertionError("frame generation synth: no transfer log format holds %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def fg_transfer(produced=45, consumed=45, busy=0, late=0, ready=("-9.12", "-7.50"), path="uav"):
+            return RT("frame generation (synth) transfer: produced=%u", produced, consumed, busy, late, ready[0], ready[1], "0.04", "0.09", 45, 0, path, 93.5, 93.5)
+
+        fg_slotted = fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(slot=(45, 0, "uav", 0))]
+        check("frame generation synth: a slotted report with the runtime's transfer line is OK and says both halves",
+              fg_slotted, 0, [("OK", FGS)], lacks=["UNPARSED"], extra=["--runtime-file", runtime([fg_pose(), fg_transfer(), fg_transfer(late=1, ready=("-9.00", "0.50"))])],
+              has=["f=0.5 S head: 45 on the runtime's slot pose, 0 on the extrapolation; S written uav; 0 busy",
+                   "transfer: 2 line(s), 90 produced / 90 consumed, 0 busy, 1 late, ready -9.00 ms against T_S (median, last line), consume 0.04 ms, path uav, slot pose 90 located / 0 none, "
+                   "VRAM game 93.5 / XR 93.5 MiB (last line)"])
+        check("frame generation synth: S produced and never consumed is NEVER APPLIED", fg_slotted, 3, [("NEVER APPLIED", FGS)],
+              extra=["--runtime-file", runtime([fg_pose(), fg_transfer(consumed=0, ready=("-", "-"))])], has=["the runtime's transfer lines say 45 S produced and none consumed (1 line(s))", "exit 3"])
+        check("frame generation synth: a slotted report and no transfer line in the runtime log is NEVER APPLIED", fg_slotted, 3, [("NEVER APPLIED", FGS)],
+              extra=["--runtime-file", runtime([fg_pose(), "native_frame: unrelated runtime line"])], has=["but the runtime log has no 'frame generation (synth) transfer:' line", "exit 3"])
+        check("frame generation synth: a runtime that says the d3d11 half has no slot channel, beside a slotted report, is NEVER APPLIED (two builds)", fg_slotted, 3, [("NEVER APPLIED", FGS)],
+              extra=["--runtime-file", runtime([fg_pose(), RT("frame generation (synth) transfer: the d3d11 half has no slot channel")])], has=["the runtime says the d3d11 half has no slot channel"])
+        check("frame generation synth: no runtime log read leaves the transfer unjudged, and says so", fg_slotted, 0, [("OK", FGS)], has=["the runtime log was not read, so the transfer is not judged"])
+        check("frame generation synth: a report from before the slot fields is not held to a transfer line", fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report()], 0, [("OK", FGS)],
+              extra=["--runtime-file", runtime([fg_pose(), "native_frame: unrelated runtime line"])], lacks=["transfer", "UNPARSED", "slot pose"])
+        check("frame generation synth: a drifted transfer line is counted as unparsed and is no transfer line", fg_slotted, 3, [("NEVER APPLIED", FGS)],
+              extra=["--runtime-file", runtime([fg_pose(), fg_transfer().replace("s_late=", "late=")])], has=["line(s) the rule's patterns do not match"])
+        check("frame generation synth: an extrapolated window (no slot pose: an older runtime) on the private path reads as such", fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(slot=(0, 45, "private", 0))], 0,
+              [("OK", FGS)], has=["f=0.5 S head: 0 on the runtime's slot pose, 45 on the extrapolation; S written private"], lacks=["UNPARSED"])
+        # Phase 2.3b: the finish's tail on the synth line (S finished like B at B's door, or left unfinished and why).
+        check("frame generation synth: a report with the finish tail is read and says finished / unfinished, the last why and the finish's time",
+              fg_off + [fg_armed(), fg_report(), fg_synth_armed(), fg_synth_report(slot=(45, 0, "uav", 0), finish=(88, 2, "scope")), fg_synth_report(slot=(45, 0, "uav", 0), finish=(90, 0, "finished"))],
+              0, [("OK", FGS)], lacks=["UNPARSED"], has=["S finished like B 178 / unfinished 2 (last why: finished), finish 0.210 ms an eye"])
+        check("frame generation synth: a drifted finish tail is counted as unparsed", fg_off + [fg_armed(), fg_report(), fg_synth_armed(),
+              fg_synth_report(slot=(45, 0, "uav", 0), finish=(90, 0, "finished")).replace(" why=", " because=")], 3, [("NEVER APPLIED", FGS)], has=["line(s) the rule's patterns do not match"])
+
+        # Phase 2.3: Lock (src\common\framegen_lock_report.h, the runtime log's lines) and its key (src\d3d11\temporal_pass.cpp, the graphics log's untagged line).
+        flsrc = read_text(os.path.join(repo_root(), "src", "common", "framegen_lock_report.h"))
+        tpsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "temporal_pass.cpp"))
+
+        def RL(src, needle, *vals):
+            key = "fl:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(src, needle)
+            if fmts[key] is None:
+                raise AssertionError("frame generation lock: no log format holds %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def fl_key(on=True):
+            return RL(tpsrc, "frame generation: fix.frame_generation=%s", "on" if on else "off", "Lock 2:1 forced" if on else "no Lock")
+
+        def fl_armed():
+            return RL(flsrc, "frame generation lock: armed")
+
+        def fl_engage():
+            return RL(flsrc, "frame generation lock: engage reason=", 11.11)
+
+        def fl_disengage(reason="no_projection", note=""):
+            return RL(flsrc, "frame generation lock: disengage reason=", reason, 11.11, note)
+
+        def fl_report(engaged=1.0, real=45, s=45, late_real=0, late_s=0, from_s=45, from_b=0, disengages=0, reason="none"):
+            return RL(flsrc, "frame generation lock: engaged=%.2f", engaged, real, s, late_real, late_s, from_s, from_b, "9.40", "10.20", "11.11", disengages, reason)
+
+        FL = H_FRAMEGEN_LOCK
+        fl_gfx = fg_off + [fl_key()]
+        check("frame generation lock: the key on, armed, engaged and reporting is OK and says the slots", fl_gfx, 0, [("OK", FL)], lacks=["UNPARSED"],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report(engaged=0.5, real=22, s=22, from_s=22), fl_report(late_s=1, from_s=44, from_b=1)])],
+              has=["2 lock line(s), engaged 1.50 s, 1 engage / 0 disengage edge(s); 67 real pair(s) and 67 S slot(s) while engaged, S shown 66 / B replayed 1, late_s 1, late_real 0"])
+        check("frame generation lock: the key on and no lock line in the runtime log is NEVER APPLIED", fl_gfx, 3, [("NEVER APPLIED", FL)],
+              extra=["--runtime-file", runtime(["native_frame: unrelated runtime line"])], has=["but the runtime log has no 'frame generation lock:' line", "exit 3"])
+        check("frame generation lock: the key on and no runtime log read leaves Lock unjudged, and says so", fl_gfx, 0, [("OK", FL)],
+              has=["the runtime log was not read, so Lock is not judged"])
+        check("frame generation lock: lock lines that never engaged are NEVER APPLIED and say why", fl_gfx, 3, [("NEVER APPLIED", FL)],
+              extra=["--runtime-file", runtime([fl_armed(), fl_report(engaged=0.0, real=0, s=0, from_s=0, reason="no_s"), fl_report(engaged=0.0, real=0, s=0, from_s=0, reason="dwell")])],
+              has=["Lock never engaged: 2 lock line(s), engaged 0.00 s, no engage edge; the reasons it gave (lines/edges): no_s 1, dwell 1"])
+        check("frame generation lock: armed and no one-second line is NEVER APPLIED", fl_gfx, 3, [("NEVER APPLIED", FL)],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage()])], has=["no 'frame generation lock: engaged=' line follows"])
+        check("frame generation lock: late_s over 5% of the S slots is PARTIAL", fl_gfx, 0, [("PARTIAL", FL)],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report(late_s=4, from_s=41, from_b=4)])], has=["over 5%: late_s 4 of 45 S slots (8.9%)"])
+        check("frame generation lock: late_real over 5% of the S slots is PARTIAL", fl_gfx, 0, [("PARTIAL", FL)],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report(late_real=3)])], has=["late_real 3 against 45 S slots (6.7%)"])
+        check("frame generation lock: a disengage for deferred pacing says Lock stood aside", fl_gfx, 0, [("OK", FL)], lacks=["UNPARSED"],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report(), fl_disengage("deferred_pacing", " (Lock stands aside for deferred pacing in 2.3)"),
+                                                fl_report(engaged=0.2, real=9, s=9, from_s=9, disengages=1, reason="deferred_pacing")])],
+              has=["1 engage / 1 disengage edge(s)", "reasons when off: deferred_pacing 2", "Lock stood aside for deferred pacing"])
+        check("frame generation lock: an unfinished S's line is read, and the menu and s_unfinished disengages are named", fl_gfx, 0, [("OK", FL)], lacks=["UNPARSED"],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report(), RL(flsrc, "frame generation lock: S is not finished like B", "layer_only"), fl_disengage("s_unfinished"),
+                                                fl_report(engaged=0.3, real=13, s=13, from_s=13, disengages=1, reason="s_unfinished"), fl_disengage("menu")])],
+              has=["reasons when off: s_unfinished 2, menu 1", "S left unfinished (not shown), why: layer_only"])
+        # EDVR's menu on S: a menu that cannot be drawn on one S leaves it unfinished (why=menu, s_unfinished); a d3d11.dll that does not draw it says menu_unfinished.
+        check("frame generation lock: the menu's reasons (an S unfinished why=menu, menu_unfinished) are read and named", fl_gfx, 0, [("OK", FL)], lacks=["UNPARSED"],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report(), RL(flsrc, "frame generation lock: S is not finished like B", "menu"), fl_disengage("s_unfinished"),
+                                                fl_report(engaged=0.3, real=13, s=13, from_s=13, disengages=1, reason="s_unfinished"), fl_disengage("menu_unfinished"),
+                                                fl_report(engaged=0.0, real=0, s=0, from_s=0, reason="menu_unfinished")])],
+              has=["reasons when off: s_unfinished 2, menu_unfinished 2", "S left unfinished (not shown), why: menu"])
+        # A halved period no longer stops Lock engaging; engaged and halved for over 1 s it lets go (period_halved) and backs off 3 s, the one-second lines saying it.
+        check("frame generation lock: a period_halved disengage and its backoff are read and named", fl_gfx, 0, [("OK", FL)], lacks=["UNPARSED"],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report(), fl_disengage("period_halved"),
+                                                fl_report(engaged=0.5, real=11, s=11, from_s=11, disengages=1, reason="period_halved"),
+                                                fl_report(engaged=0.0, real=0, s=0, from_s=0, reason="period_halved")])],
+              has=["1 engage / 1 disengage edge(s)", "reasons when off: period_halved 3"])
+        check("frame generation lock: the replay reasons line is read and summed (flight 11's instrument)", fl_gfx, 0, [("OK", FL)], lacks=["UNPARSED"],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report(late_s=2, from_s=43, from_b=2),
+                                                RL(flsrc, "frame generation lock: replayed B:", 1, 0, 0, 0, 0, 1, 15, 14, 0, 0, 0),
+                                                fl_report(late_s=1, from_s=44, from_b=1), RL(flsrc, "frame generation lock: replayed B:", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)])],
+              has=["B replayed because: not_built 2, seq_mismatch 1 (last seq_mismatch asked 15 had 14)"])
+        check("frame generation lock: a drifted lock line is counted as unparsed", fl_gfx, 3, [("NEVER APPLIED", FL)],
+              extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report().replace("late_s=", "lates=")])], has=["line(s) the rule's patterns do not match"])
+        check("frame generation lock: the key off, no lock line, nothing said", fg_off + [fl_key(on=False)], 0, [("OK", F90S)], lacks=["frame generation lock", "NEVER APPLIED"],
+              extra=["--runtime-file", runtime(["native_frame: unrelated runtime line"])])
+        check("frame generation lock: no key line and no lock line, nothing said", fg_off, 0, [("OK", F90S)], lacks=["frame generation lock"])
+        # Phase 2.4: auto and the performance gate (src\common\framegen_gate.h, the graphics log's untagged lines).
+        fgsrc = read_text(os.path.join(repo_root(), "src", "common", "framegen_gate.h"))
+
+        def fl_key_auto():
+            return RL(tpsrc, "frame generation: fix.frame_generation=%s", "auto", "Lock 2:1 only while the performance gate admits it")
+
+        def fl_gate(state="waiting", reason="full_rate", mode="auto", margin="5.69", context="vehicle", cut="none", lock="auto_gate"):
+            return RL(fgsrc, "frame generation gate: state=", state, reason, mode, "60.00", "90.00", "11.11", "11.11", "12.00", "14.00", "9.00", "10.50", "1.20", "18.89", margin,
+                      0, 0, context, cut, lock)
+
+        fl_auto = fg_off + [fl_key_auto()]
+        check("frame generation gate: auto, gate lines that never engage are OK and name the gate's reasons and the H1 margin", fl_auto + [fl_gate(), fl_gate(reason="on_foot",
+              context="on_foot"), fl_gate(reason="dwell")], 0, [("OK", FL)], lacks=["UNPARSED", "NEVER APPLIED"],
+              has=["the gate ran and never admitted Lock", "reasons when waiting (lines/edges): full_rate 1, on_foot 1, dwell 1", "H1 margin median 5.69 ms (min 5.69) against a budget of 18.89 ms",
+                   "context on_foot/vehicle"])
+        check("frame generation gate: auto and no gate line is NEVER APPLIED", fl_auto, 3, [("NEVER APPLIED", FL)], has=["there is no 'frame generation gate:' line"])
+        check("frame generation gate: auto with an older runtime says so (NEVER APPLIED)", fl_auto + [fl_gate(reason="no_runtime", lock="unknown"),
+              RL(fgsrc, "frame generation gate: auto needs", 10)], 3, [("NEVER APPLIED", FL)], lacks=["UNPARSED"], has=["the runtime cannot read it", "in 10 s of VR frames"])
+        check("frame generation gate: the gate engaged and Lock engaged is OK and says both", fl_auto + [fl_gate(reason="dwell"), RL(fgsrc, "frame generation gate: engage reason=", 5.69),
+              fl_gate(state="engaged", reason="none", lock="none"), RL(fgsrc, "frame generation gate: disengage reason=", "cut", "tunnel"), fl_gate(reason="cut", cut="tunnel")],
+              0, [("OK", FL)], lacks=["UNPARSED"], extra=["--runtime-file", runtime([RL(flsrc, "frame generation lock: armed (fix.frame_generation = auto"), fl_engage(), fl_report()])],
+              has=["gate: 3 line(s) in auto, engaged in 1, 1 engage / 1 disengage edge(s)", "cut 2, dwell 1", "1 lock line(s), engaged 1.00 s"])
+        check("frame generation gate: the gate engaged and Lock never did is NEVER APPLIED", fl_auto + [fl_gate(state="engaged", reason="none", lock="no_s")], 3, [("NEVER APPLIED", FL)],
+              extra=["--runtime-file", runtime([RL(flsrc, "frame generation lock: armed (fix.frame_generation = auto"), fl_report(engaged=0.0, real=0, s=0, from_s=0, reason="no_s")])],
+              has=["Lock never engaged"])
+        check("frame generation gate: on prints the gate line (forced) and Lock is judged as before", fl_gfx + [fl_gate(state="engaged", reason="forced", mode="on", lock="none")],
+              0, [("OK", FL)], lacks=["UNPARSED", "line(s) in auto"], extra=["--runtime-file", runtime([fl_armed(), fl_engage(), fl_report()])], has=["1 lock line(s), engaged 1.00 s"])
+        check("frame generation gate: a drifted gate line is counted as unparsed", fl_auto + [fl_gate().replace("margin_ms=", "margin=")], 3, [("NEVER APPLIED", FL)],
+              has=["line(s) the rule's patterns do not match"])
+        # H6 at the slot: the pose line's slot tail is read and summarised; a line without it (before 2.3) still parses.
+        check("frame generation shadow: a pose line with the slot tail says the slot pose's miss", fg_all, 0, [("OK", FG)], lacks=["UNPARSED"],
+              extra=["--runtime-file", runtime([health_render(fmts["fgp:pose"], (4, 14.1, 4.11, 4.11, 4.11, 0.471, 0.471, 0.471, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3, 0, 1, 0, 0, 0,
+                                                                                  44, 0.4, 0.9, 1.2, 0.05, 0.1, 0.15, 21.5))])],
+              has=["slot pose: 44 scored, miss max 1.20 mm / 0.150 deg, lead median 21.5 ms (last line)"])
+        check("frame generation shadow: a pose line from before the slot tail still parses", fg_all, 0, [("OK", FG)], lacks=["UNPARSED", "slot pose:"],
+              extra=["--runtime-file", runtime([fg_pose().split(" slot=")[0]])])
+        # ---- the hull layer (diag.hull_layer, TEMPORARY): the graphics log's untagged lines, rendered from the C format strings in src\d3d11\hull_layer.cpp ----
+        hlsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "hull_layer.cpp"))
+
+        def RH(needle, *vals):
+            key = "hl:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(hlsrc, needle)
+            if fmts[key] is None:
+                raise AssertionError("hull layer: no log format holds %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def hl_key(mode="dump"):
+            return RH("hull layer: diag.hull_layer=%s (TEMPORARY", mode)
+
+        def hl_report(state="applied", eye_frames=5400, seeds=5400, no_seed=0, no_slot=0, own=(54, 54, 55), readbacks=5400, filt=(0, 1200, 9000),
+                      hd=(70, 84, 92), reissued=453600, light=59400, ld=(11, 11, 11), nocp=(0, 0, 0), culled=453000, filter_draws=600, busy=0, nv=(5400, 5400)):
+            return RH("hull layer: state=%s", state, 2700, eye_frames, seeds, no_seed, no_slot, 0, own[0], own[1], own[2], readbacks, filt[0], filt[1], filt[2],
+                      culled, filter_draws, hd[0], hd[1], hd[2], reissued, 0, seeds, seeds, 10800, 32400, light, ld[0], ld[1], ld[2], nocp[0], nocp[1], nocp[2],
+                      0, seeds, 0, 0, 0, 2700, 0, busy, 12, 59400, nv[0], nv[1])
+
+        def hl_idle(state, eye_frames=5400, no_seed=0, no_slot=0):
+            return hl_report(state, eye_frames=eye_frames, seeds=0, no_seed=no_seed, no_slot=no_slot, own=(0, 0, 0), readbacks=0, filt=(0, 0, 0), hd=(0, 0, 0),
+                             reissued=0, light=0, ld=(0, 0, 0), nocp=(2700, 2700, 2700))
+
+        def hl_dump(eye=0, hull="written"):
+            return RH("hull layer: dump %ls eye %d frame", "123456789001", eye, 1234, 2816, 2448, 26, hull, "written", "written", 54, 3000, 3, 3, 84, 11)
+
+        HL, hl_base = H_HULL, [f90_part()]
+        check("hull layer: no line at all, nothing said (the key off)", hl_base, 0, [("OK", F90S)], lacks=["hull layer"])
+        check("hull layer: the key off and no report says nothing", hl_base + [hl_key("off")], 0, [("OK", F90S)], lacks=[row("NEVER APPLIED", HL), row("OK", HL)])
+        check("hull layer: on, seeded, filtered and lit, with an auto dump, is OK",
+              hl_base + [hl_key(), RH("hull layer: the seed, filter and count shaders"), RH("hull layer: the seed reads the pool", 688128, 1, 0, 0, 2048, 336, 2048, 1,
+                                                                                         131072, 0),
+                         RH("hull layer: auto dump armed (reason:", 54, 600, 1, 3), RH("hull layer: dump %ls armed", "123456789001"), hl_dump(), hl_dump(eye=1),
+                         RH("hull layer: unknown lighting pair vs", 0x1234567890ABCDEF, 0xFEDCBA0987654321, 0, 77, 1),
+                         RH("hull layer: private copy made", 2016, 2240, 26, 0x28, 5), RH("hull layer: private copy of a %ux%u", 2016, 2240, 19, 120, 31),
+                         hl_report()], 0, [("OK", HL)],
+              has=["seeded 5400 (no seed 0, no slot target 0, refused 0), own records 54/54/55", "from 5400 readback(s), filtered px 0/1200/9000",
+                   "hull draws an eye 70/84/92", "substituted copy 10800, mask 32400, light 59400; light draws an eye 11/11/11",
+                   "1 unknown lighting pair(s); 1 auto dump(s)",
+                   "dump 123456789001: eye 0 HullHdr written GameHdrLit written HullDepth written (own 54, filtered 3000 px), eye 1 HullHdr written"],
+              lacks=["UNPARSED", "do not match"])
+        check("hull layer: on and never reported is NEVER APPLIED", hl_base + [hl_key()], 3, [("NEVER APPLIED", HL)], has=["the layer never reported"])
+        check("hull layer: the shell with no seed is NEVER APPLIED, ran and seeded nothing", hl_base + [hl_key(), hl_idle("no-seed", no_seed=5400)], 3,
+              [("NEVER APPLIED", HL)], has=["it ran and seeded nothing (the eye passes drew the cockpit shell but no hull-family draw followed)"])
+        check("hull layer: no slot target is NEVER APPLIED, and names engine motion", hl_base + [hl_key(), RH("hull layer: no-slot-target:", "x"),
+                                                                                       hl_idle("no-slot-target", no_slot=5400)], 3,
+              [("NEVER APPLIED", HL)], has=["the seed draw had no slot target at render target 6 (engine motion's patched shaders"], lacks=["UNPARSED"])
+        check("hull layer: no eye pass at all is NEVER APPLIED, and says so", hl_base + [hl_key(), hl_idle("no-eye-pass", eye_frames=0)], 3,
+              [("NEVER APPLIED", HL)], has=["no hull-family G-buffer draw and no cockpit shell"])
+        check("hull layer: seeded with no readback is PARTIAL, mask pending", hl_base + [hl_key(), hl_report("mask-pending", own=(0, 0, 0), readbacks=0)], 0,
+              [("PARTIAL", HL)], has=["no own-mask readback came back (mask-pending)"])
+        check("hull layer: seeded and no lighting substituted is PARTIAL", hl_base + [hl_key(), hl_report("partial", light=0, ld=(0, 0, 0), nocp=(0, 0, 2700))], 0,
+              [("PARTIAL", HL)], has=["no lighting draw got its private counterpart"])
+        check("hull layer: a report inside --since is read, the key before it is kept", hl_base + [(1, hl_key()), (70, hl_report())], 0, [("OK", HL)], extra=["--since", "10:01:00"])
+        check("hull layer: a drifted report line is counted as unparsed and is no report", hl_base + [hl_key(), hl_report().replace(" reissued=", " reissues=")], 3,
+              [("NEVER APPLIED", HL)], has=["line(s) the rule's patterns do not match"])
+        # Station fixes: the keep-own VS's and the busy governor's fields and lines are parsed and said; a whole window asleep is PARTIAL.
+        check("hull layer: the station fixes' fields and lines are parsed and said",
+              hl_base + [hl_key(), RH("hull layer: busy: eye %d drew", 0, 1650, 2400, "x", 120), RH("hull layer: busy over:", 120, 2400, 300, ""),
+                         RH("hull layer: a %s re-issue could not take the keep-own", "hull", "x"),
+                         RH("hull layer: the private copy of eye %d's slot target dropped", 1, 120, 30),
+                         RH("hull layer: a %s stage draw into a", "lighting", 256, 256, 10, 0, 2816, 2448), hl_report(busy=240)], 0, [("OK", HL)],
+              has=["453000 re-issue(s) culled to the own ship in the vertex shader, 600 needed the neighbour filter",
+                   "asleep (busy) 240 frame(s), 12 offscreen stage draw(s) declined, 59400 lighting re-issue(s) without the scratch R16",
+                   "night vision re-issued 5400 time(s), 5400 with EDVR's night-vision state"],
+              lacks=["UNPARSED", "do not match"])
+        check("hull layer: night vision re-issued without EDVR's state is said as such",
+              hl_base + [hl_key(), hl_report(nv=(5400, 0))], 0, [("OK", HL)], has=["night vision re-issued 5400 time(s), 0 with EDVR's night-vision state"],
+              lacks=["UNPARSED", "do not match"])
+        check("hull layer: a window the busy governor slept through is PARTIAL and says why",
+              hl_base + [hl_key(), hl_report("busy", seeds=0, own=(0, 0, 0), readbacks=0, filt=(0, 0, 0), hd=(0, 0, 0), reissued=0, light=0, ld=(0, 0, 0),
+                                             culled=0, filter_draws=0, busy=2700)], 0,
+              [("PARTIAL", HL)], has=["the busy governor slept the whole window"])
+        check("hull layer: a report line from before the station fixes still parses",
+              hl_base + [hl_key(), hl_report().replace(" culled_draws=453000 filter_draws=600", "").replace(" busy=0 offscreen=12 null_rt1=59400", "")
+                         .replace(" night_vision=5400/5400", "")], 0,
+              [("OK", HL)], lacks=["UNPARSED", "do not match", "culled to the own ship", "night vision re-issued"])
+
+        def hl_main(own=5400, decals=1800, no_variant=0, fallback=0, reissued=1800, no_slot=0):
+            return RH("hull layer: main pass: own_draws=%u", own, decals, no_variant, fallback, reissued, no_slot)
+
+        def hl_comp(sep=2700, comp=5300, ready=60, fb=(0, 0, 0, 0, 30), fail=(16, 0, 0, 2), declined=(0, 0, 0), toned=5400, own_max=0, ms=(0.042, 0.181)):
+            return RH("hull layer: composite: separate_frames=%u", sep, comp, ready, fb[0], fb[1], fb[2], fb[3], fb[4], fail[0], fail[1], fail[2], fail[3],
+                      declined[0], declined[1], declined[2], toned, 0, 4, 0, own_max, comp, 0, ms[0], ms[1], 16)
+
+        def hl_ao(eye_frames=5400, full=5400, disp=16200, applied=5400, missed=(0, 0, 0, 0), no_eye=0):
+            return RH("hull layer: ao: eye_frames=%u", eye_frames, full, disp, disp / eye_frames if eye_frames else 0.0, applied, missed[0], missed[1],
+                      missed[2], missed[3], no_eye, 3)
+
+        check("hull layer: the AO chain re-issued in full is OK and says so", hl_base + [hl_key(), hl_report(), hl_ao()], 0, [("OK", HL)],
+              has=["AO: 5400 of 5400 lit eye-frame(s) with the whole chain and apply re-issued, 16200 step dispatch(es) (3.00 an eye-frame",
+                   "missed deinterleave 0, hbao 0, interleave 0, apply 0; 0 chain dispatch(es) with no eye"], lacks=["UNPARSED", "do not match"])
+        check("hull layer: no AO chain in the game is OK and says why", hl_base + [hl_key(), hl_report(), hl_ao(full=0, disp=0, applied=0)], 0, [("OK", HL)],
+              has=["the game ran no AO chain"], lacks=["UNPARSED"])
+        check("hull layer: the AO chain seen and never re-issued is PARTIAL", hl_base + [hl_key(), hl_report(),
+                                                                                       hl_ao(full=0, disp=0, applied=0, missed=(5400, 5400, 5400, 5400))], 0,
+              [("PARTIAL", HL)], has=["no eye-frame had it re-issued in full", "missed deinterleave 5400, hbao 5400"])
+
+        # Dump v2: the stage times' line, the dump's lighting windows and TAA sequence, the reference frame: parsed and said, never judged.
+        def hl_gpu(total=1.58, timed=168, overflow=0, gbuf=0.41):
+            return RH("hull layer: gpu_ms gbuffer=%.3f", gbuf, 0.05, 0.3, 0.6, 0.04, 0.18, total, timed, 168.0, 2.0, 12.0, 22.0, 2.0, 2.0, 0.3, 0.02, 0.05, 0.08,
+                      0.01, 0.02, 0.48, overflow, 0, 0, 8)
+
+        hl_v2 = [hl_gpu(), RH("hull layer: dump %ls: HullLights", "123456789001", "written", 40, 30, 28, 2, 6, ""),
+                 RH("hull layer: dump %ls: HullSeq", "123456789001", 16, 16, 1234, 412.5, "written", "complete"),
+                 RH("hull layer: dump %ls eye %d: reference frame", "123456789001", 0, "yes", "written", "written", 22),
+                 RH("hull layer: dump %ls: no HullSeq", "123456789002", "123456789001")]
+        check("hull layer: dump v2's lines are parsed and said, the verdict unchanged", hl_base + [hl_key(), hl_report(), hl_ao()] + hl_v2, 0, [("OK", HL)],
+              has=["GPU ms a timed frame (median of 1 line(s) with 168 timed frame(s)): gbuffer 0.410, mask/filter 0.050, screen 0.300, light 0.600, "
+                   "tone 0.040, taa 0.180, total 1.580; CPU ms a frame 0.480; overflow=0",
+                   "dump 123456789001 lighting windows: 40 draw(s), 28 re-issued, 2 unknown writing the HDR, 6 stencil-only (HullLights written)",
+                   "dump 123456789001 TAA sequence: 16 of 16 frame(s), 412.5 MB, history written, end complete"],
+              lacks=["UNPARSED", "do not match", "WARNING"])
+        check("hull layer: every stage-times line is summarised (median by stage, a line with none timed left out) and overflow warns",
+              hl_base + [hl_key(), hl_report(), hl_ao(), hl_gpu(gbuf=0.2, total=1.0), hl_gpu(gbuf=0.9, total=3.0, overflow=37),
+                         hl_gpu(gbuf=0.5, total=2.0), RH("hull layer: gpu_ms gbuffer=%.3f", -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 0, 0.0, 0.0, 0.0, 0.0,
+                                                         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 8)], 0, [("OK", HL)],
+              has=["median of 3 line(s) with 504 timed frame(s)): gbuffer 0.500,", "total 2.000;", "overflow=37 (WARNING: timed frames ran out"],
+              lacks=["UNPARSED", "do not match"])
+        check("hull layer: a drifted stage-times line is counted as unparsed", hl_base + [hl_key(), hl_report(), hl_gpu().replace(" timed_frames=", " timed=")],
+              0, [("OK", HL)], has=["+1 line(s) the rule's patterns do not match: [10:00:04.000] hull layer: gpu_ms"], lacks=["GPU ms a timed frame"])
+
+        check("hull layer: separate, the own discard taken and composited, is OK and says so",
+              hl_base + [hl_key("separate"), RH("hull layer: separate mode takes the own ship out"), hl_report(), hl_main(),
+                         RH("hull layer: the tone cover and composite shaders", 0.1), RH("hull layer: tone targets made", 0, 2816, 2448, 28),
+                         RH("hull layer: composite targets made", 0, 3520, 3060),
+                         RH("hull layer: separate mode falls back: the own mask holds", 612, 400, 120.0),
+                         RH("hull layer: tonemap re-issue declined:", "x"),
+                         RH("hull layer: composite declined for eye", 1, "x"),
+                         RH("hull layer: dump %ls eye %d: GameGbuf0", "123456789001", 0, "written", "written", 40, 22, 22),
+                         RH("hull layer: dump %ls eye %d: HullTone", "123456789001", 0, "written", "written", "applied"), hl_comp()], 0, [("OK", HL)],
+              has=["main pass (separate): the own discard on 5400 hull and 1800 decal draw(s), 0 window draw(s) without it, 0 eye-frame(s) fell back",
+                   "composite (separate): 5300 eye-frame(s) composited, 60 made ready on fallback frames; 2700 frame(s) with the discard on",
+                   "a recent miss 30; misses seed 16, lit 0, tone 0, composite 2", "AA hull_taa, GPU tone 0.042 ms, composite 0.181 ms a call"],
+              lacks=["UNPARSED", "do not match"])
+        check("hull layer: separate with no main-pass line is PARTIAL", hl_base + [hl_key("separate"), hl_report()], 0, [("PARTIAL", HL)],
+              has=["no 'hull layer: main pass:' line follows"])
+        check("hull layer: separate with no composite line is PARTIAL (a Step 2 build)", hl_base + [hl_key("separate"), hl_report(), hl_main()], 0,
+              [("PARTIAL", HL)], has=["no 'hull layer: composite:' line follows"])
+        check("hull layer: separate, nothing discarded, is PARTIAL", hl_base + [hl_key("separate"), hl_report(), hl_main(own=0, decals=0, no_variant=5400),
+                                                                       hl_comp(sep=0, comp=0, ready=0, fb=(2700, 0, 0, 0, 0))], 0,
+              [("PARTIAL", HL)], has=["no main-pass hull draw took the own discard", "fell back for frame generation 2700"])
+        check("hull layer: separate, discarded and never composited, is PARTIAL", hl_base + [hl_key("separate"), hl_report(), hl_main(),
+                                                                                         hl_comp(comp=0, ready=0, fail=(0, 0, 0, 5400), declined=(5400, 0, 0))],
+              0, [("PARTIAL", HL)], has=["no eye-frame was composited", "misses seed 0, lit 0, tone 0, composite 5400; declined stale 5400"])
+
+        def hl_seed(rig=5300, draw=100, resets=2, slots=(12, 14, 46), radius=(84, 87, 91), reach=(54, 57, 61)):
+            return RH("hull layer: own seed: rig=%u", rig, draw, resets, slots[0], slots[1], slots[2], radius[0], radius[1], radius[2], reach[0], reach[1],
+                      reach[2])
+
+        check("hull layer: the rig seed's line is parsed and said, the verdict unchanged", hl_base + [hl_key(), hl_report(), hl_seed()], 0, [("OK", HL)],
+              has=["own seed: 5300 eye-frame(s) from the rig probe's own slots, 100 from the seed draw (fallback), 2 hold restart(s); last line: slots 12/14/46, "
+                   "radius 84/87/91 m, reach 54/57/61 m"], lacks=["UNPARSED", "do not match"])
+        check("hull layer: every own mask from the seed draw is PARTIAL", hl_base + [hl_key(), hl_report(), hl_seed(rig=0, draw=5400, resets=0, slots=(0, 0, 0),
+                                                                                                                     radius=(0, 0, 0), reach=(0, 0, 0))],
+              0, [("PARTIAL", HL)], has=["every own mask grew from the seed draw", "the rig probe gave no own slot"])
+        check("hull layer: a drifted own seed line is counted as unparsed", hl_base + [hl_key(), hl_report(), hl_seed().replace(" hold_resets=", " resets=")],
+              0, [("OK", HL)], has=["+1 line(s) the rule's patterns do not match: [10:00:04.000] hull layer: own seed"], lacks=["own seed: 5300"])
+        # ---- the hull layer's rig probe (diag.hull_layer, TEMPORARY): its own row, from the C format strings in src\d3d11\hull_rig_probe.cpp ----
+        rpsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "hull_rig_probe.cpp"))
+
+        def RP(needle, *vals):
+            key = "rp:" + needle
+            if key not in fmts:
+                fmts[key] = health_c_format(rpsrc, needle)
+            if fmts[key] is None:
+                raise AssertionError("hull layer rig probe: no log format holds %r: the --health rule that reads it is out of date" % needle)
+            return health_render(fmts[key], vals)
+
+        def rp_line(state="ok", hits=(1700, 470), cpu=76, gpu=80, both=74, held=2, pool="known", target=("AnacondaMkII", "AnacondaMkII_Cockpit")):
+            return RP("hull layer: rig_probe frame=%u", 1234, 5678, 0, target[0], target[1], 60, 16, 1800, 480, 1750, 480, 1750, 480, hits[0], hits[1],
+                      30, 900, 0, 0, 5, 0, 0, 0, 0, 0, 90000, 150000, 0, 0, 1800, 0, 0, pool, 1056, 900, cpu, 70, 6, gpu, both, cpu - both, gpu - both,
+                      gpu - both - held, held, state)
+
+        RPN, rp_armed = H_HULL_PROBE, RP("hull layer: rig_probe armed")
+        rp_target = RP("hull layer: rig_probe target ship=", "AnacondaMkII", 60, "AnacondaMkII_Cockpit", 16, 1)
+        check("hull layer rig probe: armed, compared with copier hits, is OK and says the sets",
+              hl_base + [hl_key(), rp_armed, rp_target, RP("hull layer: rig_probe own emits stopped", 2100, "known", 77),
+                         RP("hull layer: rig_probe own emits resumed", 9000, 600), rp_line(), RP("hull layer: rig_probe dump %ls", "123456789001", "written",
+                                                                                                  1234, 0, "ok", 4096, "read"), hl_report()],
+              0, [("OK", RPN), ("OK", HL)],
+              has=["1 comparison line(s) (ok 1); emit calls 90000, own emits ship 1800 cockpit 480", "copier hits 1700/470, merges moved 30",
+                   "target AnacondaMkII (60 records) / AnacondaMkII_Cockpit (16)", "own emits stopped 1 time(s)", "dump 123456789001 HullRigProbe written",
+                   "cpu 76 (fresh 70, retained 6), gpu 80, both 74, cpu only 2, gpu only 6 (written this frame 4, held 2)"],
+              lacks=["UNPARSED", "do not match"])
+        check("hull layer rig probe: armed and never compared is NEVER APPLIED", hl_base + [hl_key(), rp_armed, hl_report()], 3, [("NEVER APPLIED", RPN), ("OK", HL)],
+              has=["the rig probe was armed but no 'hull layer: rig_probe frame=' line follows"])
+        check("hull layer rig probe: comparisons with no target are PARTIAL and say the state",
+              hl_base + [hl_key(), rp_armed, rp_line(state="no_target", hits=(0, 0), target=("-", "-")), hl_report()], 0, [("PARTIAL", RPN)],
+              has=["no comparison was ok (the last state no_target)"], lacks=["UNPARSED", "do not match"])
+        check("hull layer rig probe: ok with no copier hit is PARTIAL", hl_base + [hl_key(), rp_armed, rp_line(hits=(0, 0), cpu=0, both=0), hl_report()], 0,
+              [("PARTIAL", RPN)], has=["the copier never copied a claimed item"])
+        check("hull layer rig probe: the probe off with no comparison says nothing", hl_base + [hl_key("off"), RP("hull layer: rig_probe off")], 0, [("OK", F90S)],
+              lacks=[row("NEVER APPLIED", RPN), row("OK", RPN), "do not match"])
+        check("hull layer rig probe: a drifted comparison line is counted as unparsed",
+              hl_base + [hl_key(), rp_armed, rp_line().replace(" spliced=", " splice="), hl_report()], 3, [("NEVER APPLIED", RPN)],
+              has=["line(s) the rule's patterns do not match"])
+        # ---- the hull variant bench (hotkey.hull_bench, TEMPORARY): its own row, from the C format strings in src\d3d11\hull_layer.cpp ----
+        HB, hb_stamp = H_HULL_BENCH, "101112123001"
+        hb_armed = RH("hull layer: bench %s armed", hb_stamp, 8, 4, "C:\\logs\\eyes")
+        hb_rect = RH("hull layer: bench %s rect:", hb_stamp, 300, 600, 1500, 900, 400, 800, 2000, 1200, 2817, 2448, 3756, 3264, 3)
+
+        def hb_var(vid, status="ok", frames=8, reason="-"):
+            return RH("hull layer: bench %s variant %s:", hb_stamp, vid, status, frames, 60, 0, 0, 0.8, 0.0, 1.5, 11.0, 0.3, 120.0, 0.0, 9000, 1, reason)
+        hb_done = RH("hull layer: bench %s done:", hb_stamp, 4, 4, 0, 42, 0, 0, 900.5, 0, "written", "", hb_stamp)
+        hb_abort = RH("hull layer: bench %s aborted:", hb_stamp, "frame generation turned on", 1, 4, 3, 10, 0, 0, 200.0, 0, "written")
+        check("hull layer bench: a press that finished is OK and says the variants",
+              hl_base + [hl_key("separate"), hb_armed, hb_rect, hb_var("orig_a"), RH("hull layer: bench %s: %s eye %d feature made", hb_stamp, "dlss_full", 0, 35.0),
+                                                         hb_var("dlss_full", "refused", 0, "not built"), hb_done, hl_report()], 0,
+              [("OK", HB)], has=["bench 101112123001: 4 ok, 4 refused, 0 aborted, 42 files, 0 failed", "rect output 400,800 2000x1200", "orig_a ok",
+                                 "dlss_full refused (not built)"], lacks=["UNPARSED", "do not match"])
+        check("hull layer bench: an abort is PARTIAL and says why",
+              hl_base + [hl_key("separate"), hb_armed, hb_rect, hb_var("orig_a"), hb_var("sep_taa", "aborted", 3, "frame generation turned on"), hb_abort,
+                         hl_report()], 0, [("PARTIAL", HB)], has=["ABORTED: frame generation turned on", "sep_taa aborted (frame generation turned on)"],
+              lacks=["UNPARSED", "do not match"])
+        check("hull layer bench: armed and never ended is NEVER APPLIED", hl_base + [hl_key("separate"), hb_armed, hl_report()], 3,
+              [("NEVER APPLIED", HB)], has=["bench 101112123001 was armed but no"])
+        check("hull layer bench: presses all refused are PARTIAL and say why",
+              hl_base + [hl_key("separate"), RH("hull layer: bench refused: %s", "frame generation is on (the layer stands aside)"),
+                         RH("hull layer: bench %s: cancel pressed", hb_stamp), hl_report()], 0, [("PARTIAL", HB)],
+              has=["1 press(es), all refused (the last: frame generation is on (the layer stands aside))"], lacks=["do not match"])
+        check("hull layer bench: no press says nothing", hl_base + [hl_key(), hl_report()], 0, [("OK", HL)], lacks=[row("OK", HB), row("PARTIAL", HB)])
         # ---- the SRV turret view: the graphics log's untagged lines, rendered from the C format strings in src\d3d11\srv_turret.cpp and (the geometry shader's creation line) shader_swap.cpp ----
         stsrc = read_text(os.path.join(repo_root(), "src", "d3d11", "srv_turret.cpp"))
 

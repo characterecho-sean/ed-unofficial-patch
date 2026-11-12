@@ -782,6 +782,22 @@ void gpuPassProfileRequest() {
                     g_requestFrames, g_requestDelayMs);
 }
 
+bool gpuPassProfileRequestFor(uint32_t frames, const char* why) {
+    if (g_requested || g_batch || g_haveBatch) {
+        Log::get().note("gpu pass profile: %s asked for a capture while one is already armed or running; refused", why ? why : "?");
+        return false;
+    }
+    g_requestFrames = frames < 1 ? 1 : frames > kMaxCaptureFrames ? kMaxCaptureFrames : frames;
+    g_requestDelayMs = 0;   // the frames are measured as they are: no delay dispatch is placed
+    g_requested = true;
+    gpuTimingSetYield(true);   // as the hotkey's press: cleared by endYield at the batch's end
+    Log::get().note("gpu pass profile: armed by %s. The next %u whole frames are measured from the next frame boundary, with no delay; the lines "
+                    "follow once the GPU has reported them. The application GPU timing and the census timers pause until the capture's last frame "
+                    "is closed.",
+                    why ? why : "?", g_requestFrames);
+    return true;
+}
+
 std::string gpuPassProfileKeyPart(const std::string& value) { return parseCaptureSpec(value).key; }
 
 void gpuPassProfileNoteOm(ID3D11DeviceContext* ctx, uint32_t n, ID3D11RenderTargetView* const* rtvs,

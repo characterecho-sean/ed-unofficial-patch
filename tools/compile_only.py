@@ -21,7 +21,11 @@ build's identity, shared by the toolchain that writes its receipt and by
                             .dll and .txt files).
 
     python tools/compile_only.py --fingerprint [--root DIR]
+    python tools/compile_only.py --build-native [--jobs N] [--root DIR]
     python tools/compile_only.py --self-test
+
+On native Windows `--build-native` is the same test-flight path without Wine:
+build.bat --wait-lock --compile-only by absolute path, then this receipt.
 """
 
 import argparse
@@ -196,6 +200,24 @@ def self_test():
             raise AssertionError("a receipt was written without openvr_api.dll")
         except ValueError:
             pass
+        write(Path("build/compile-build") / "openvr_api.dll", b"RUNTIME")
+
+        if os.name == "nt":
+            class Done:
+                def __init__(self, code):
+                    self.returncode = code
+            seen = []
+            quiet = lambda *a: None
+            expect(build_native(root, 3, run=lambda c, cwd: seen.append(c) or Done(0), out=quiet) == 0,
+                   "--build-native refused a clean compile")
+            expect(seen and seen[0][2] == str(root.resolve() / "build.bat") and "--compile-only" in seen[0]
+                   and "--wait-lock" in seen[0] and seen[0][-2:] == ["--jobs", "3"],
+                   "--build-native ran %r, not build.bat --wait-lock --compile-only by absolute path" % seen)
+            native = json.loads(path.read_text(encoding="utf-8"))
+            expect(native["kind"] == KIND and native["toolchain"]["host"] == "windows-native"
+                   and native["source_fingerprint"] == first, "--build-native wrote the wrong receipt")
+            expect(build_native(root, run=lambda c, cwd: Done(1), out=quiet) == 1 and not path.exists(),
+                   "--build-native left a receipt after a failed compile")
 
         write("docs/notes.md", b"a note\n")
         git("add", "-A")
@@ -207,16 +229,47 @@ def self_test():
     return 0
 
 
+def build_native(root, jobs=None, run=subprocess.run, out=print):
+    """Native Windows test-flight path: `build.bat --wait-lock --compile-only`
+    of `root` by its absolute path, then the same receipt the Linux toolchain
+    writes, so `install_edvr.py --compile-only` takes it. Not validation."""
+    root = Path(root).resolve()
+    if os.name != "nt":
+        out("compile_only: --build-native runs on Windows only (Linux: tools/linux_toolchain.py build-dlls)")
+        return 2
+    fingerprint = source_fingerprint(root)
+    remove_receipt(root)
+    command = ["cmd", "/c", str(root / "build.bat"), "--wait-lock", "--compile-only"]
+    if jobs:
+        command += ["--jobs", str(jobs)]
+    rc = run(command, cwd=str(root)).returncode
+    if rc != 0:
+        out("compile_only: build.bat --compile-only failed (exit %d); no receipt written" % rc)
+        return rc
+    try:
+        path = write_receipt(root, fingerprint, {"host": "windows-native", "build": "build.bat --compile-only"})
+    except (OSError, ValueError) as error:
+        out("compile_only: no receipt written: %s" % error)
+        return 1
+    out("compile_only: receipt %s (%s), NOT Windows validated" % (path, describe(root)))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--fingerprint", action="store_true", help="print the tree's compile-only fingerprint")
+    parser.add_argument("--build-native", action="store_true",
+                        help="Windows: run build.bat --compile-only and write the receipt (a test-flight build, not validation)")
+    parser.add_argument("--jobs", type=int, default=None)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
+    if args.build_native:
+        return build_native(args.root, args.jobs)
     if not args.fingerprint:
-        parser.error("one of --fingerprint or --self-test is required")
+        parser.error("one of --fingerprint, --build-native or --self-test is required")
     print(source_fingerprint(args.root))
     return 0
 

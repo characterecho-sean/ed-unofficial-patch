@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 
 #include "../common/code_hook.h"
 #include "../common/game_build.h"
@@ -311,15 +312,57 @@ bool wrongRead(vr::Status st) noexcept {
     return st == vr::Status::kFault || st == vr::Status::kVtableMismatch || st == vr::Status::kAbsurd || st == vr::Status::kBadArray;
 }
 
+// ---- the own arrays for the hull layer's rig probe (vehicle_rig.h g_vehicleRigOwn; diag.hull_layer, TEMPORARY) ----------------------------------------------------------
+// Refresh-owned (one at a time); the names under their own lock for the render thread's copy.
+std::mutex g_ownNameMutex;
+char g_ownName[vr::kRigs][48] = {};
+uint64_t g_ownCount[vr::kRigs] = {};
+
+void publishOwn(uint32_t role, uint64_t lo, uint64_t hi, uint64_t count, const char* name) noexcept {
+    if (role >= vr::kRigs) return;
+    if (g_vehicleRigOwn.lo[role].load(std::memory_order_relaxed) == lo && g_vehicleRigOwn.hi[role].load(std::memory_order_relaxed) == hi) return;
+    g_vehicleRigOwn.hi[role].store(0, std::memory_order_release);
+    g_vehicleRigOwn.lo[role].store(lo, std::memory_order_release);
+    g_vehicleRigOwn.hi[role].store(hi, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(g_ownNameMutex);
+        std::memset(g_ownName[role], 0, sizeof(g_ownName[role]));
+        if (name) std::memcpy(g_ownName[role], name, strnlen(name, 47));
+        g_ownCount[role] = count;
+        g_vehicleRigOwn.gen.fetch_add(1, std::memory_order_acq_rel);
+    }
+}
+
+// The refresh's view of the tracked rigs: each role that read ok publishes its array (its name read only when the array changed), every other
+// role publishes an empty one.
+void publishOwnArrays(const Slot* slots, const vr::RigRead* reads, const vr::Status* status, uint32_t n) noexcept {
+    bool done[vr::kRigs] = {};
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t role = static_cast<uint32_t>(slots[i].role);
+        if (role >= vr::kRigs || done[role] || status[i] != vr::Status::kOk) continue;
+        done[role] = true;
+        const vr::RigRead& rr = reads[i];
+        if (g_vehicleRigOwn.lo[role].load(std::memory_order_relaxed) == rr.lo && g_vehicleRigOwn.hi[role].load(std::memory_order_relaxed) == rr.hi) continue;
+        vr::RigInfo info;
+        vr::describeRig(g_mem, rr, false, &info);
+        publishOwn(role, rr.lo, rr.hi, rr.count, info.haveName ? info.name : "?");
+    }
+    for (uint32_t role = 0; role < vr::kRigs; ++role)
+        if (!done[role]) publishOwn(role, 0, 0, 0, nullptr);
+}
+
 void refresh() noexcept {
     if (g_refreshBusy.exchange(true, std::memory_order_acquire)) return;
     const int64_t t0 = ticks();
     Slot slots[vr::kRigs];
     uint32_t n = 0;
     if (readTracked(slots, &n)) {
+        vr::RigRead reads[vr::kRigs];
+        vr::Status status[vr::kRigs] = {};
         for (uint32_t i = 0; i < n; ++i) {
-            vr::RigRead rr;
+            vr::RigRead& rr = reads[i];
             const vr::Status st = vr::readRig(g_mem, slots[i].h, slots[i].E, slots[i].I, g_rigVtable, &rr);
+            status[i] = st;
             if (st == vr::Status::kVtableMismatch) g_vtableMismatches.fetch_add(1, std::memory_order_relaxed);
             if (st == vr::Status::kAbsurd) g_absurd.fetch_add(1, std::memory_order_relaxed);
             RigMemo& memo = g_memo[i];
@@ -342,6 +385,7 @@ void refresh() noexcept {
             }
             if (slots[i].role == vr::kCockpit) adoptCockpit(slots[i]);
         }
+        publishOwnArrays(slots, reads, status, n);
         refreshCockpits();
     }
     g_refreshes.fetch_add(1, std::memory_order_relaxed);
@@ -653,6 +697,16 @@ void vehicleRigFrameWindow(VehicleFrameWindow* out) {
         std::memcpy(&out->sphereRadius, &b, 4);
         out->rigKnown = true;
     }
+}
+
+void vehicleRigOwnDescribe(char (*names)[48], uint64_t* counts, uint32_t* gen) {
+    std::lock_guard<std::mutex> lock(g_ownNameMutex);
+    for (uint32_t r = 0; r < vr::kRigs; ++r) {
+        std::memcpy(names[r], g_ownName[r], 48);
+        names[r][47] = 0;
+        counts[r] = g_ownCount[r];
+    }
+    *gen = g_vehicleRigOwn.gen.load(std::memory_order_acquire);
 }
 
 void vehicleRigPoll(uint64_t nowMs) {

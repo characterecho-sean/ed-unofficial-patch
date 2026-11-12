@@ -29,5 +29,12 @@ inline bool nightVisionShape(char kind,uint32_t count,uint32_t instances){
 bool nightVisionMatches(char kind,uint32_t count,uint32_t instances);
 void nightVisionBegin(ID3D11DeviceContext*);
 void nightVisionEnd(ID3D11DeviceContext*);
+// diag.hull_layer (hull_layer.h, TEMPORARY): the hull layer issues the matched draw once more into its private targets,
+// after nightVisionEnd has put the game's state back. Begin binds again exactly what nightVisionBegin gave the game's issue
+// of that draw (the replacement PS; in realistic mode also the dual-source blend, the gain at PS b3 and the exterior mask at
+// PS t5), past the hooks, and saves what was bound; End puts it back. Begin is true only when nightVisionBegin engaged on
+// the draw just issued (once: it consumes that), so a draw it declined, or night vision off, re-issues as the game drew it.
+bool nightVisionReissueBegin(ID3D11DeviceContext*);
+void nightVisionReissueEnd(ID3D11DeviceContext*);
 void nightVisionShutdown();
 }

@@ -98,6 +98,10 @@ DRAW_RE = re.compile(r'^DCO? (\d+) #(\d+) ([A-Z]) n=(\d+) i=(\d+) '
                      # is bound, so most draws still carry no such token.
                      # Optional and out of the signature like every tail.
                      r'(?: vt=\S+(?:,\S+){7})?'
+                     # mt= is render targets 1-3 (2026-11-08, the own hull
+                     # layer study), emitted only when one is bound. Optional
+                     # and out of the signature like vt=.
+                     r'(?: mt=\S+(?:,\S+){2})?'
                      # The viewport/scissor tail (2026-08-30), optional for
                      # the same reason every tail before it is: logs already
                      # captured do not carry it and must keep parsing. It is
@@ -541,14 +545,15 @@ def self_test():
               # the way a pointer does, and this draw must still match.
               'DC %d #%d I n=5000 i=24 r=@1 d=@2 c=@9 s=@3,-,-,- '
               'vs=@7 vb=@8 sd=32 of=0 tp=4 ia=1536,-12,0 ib=@13+64 x=@4,-,-,- '
-              'ph=00AA11BB22CC33DD vt=-,@11,-,-,-,-,@12,- q=0' % (f, 1),
+              # ...and mt= (2026-11-08), render targets 1-3, after vt=.
+              'ph=00AA11BB22CC33DD vt=-,@11,-,-,-,-,@12,- mt=@6,-,- q=0' % (f, 1),
               # The full modern tail, on a draw that is IDENTICAL in both
               # censuses and carries NO tail in census a: the output-survival
               # columns, the blend equation and so= (the stencil masks and
               # ops, 2026-09-07) must parse, and must leave this draw matched
               # rather than reported as added or changed. A tail that reached
               # the signature would show up here as a false ADDED.
-              'DC %d #%d I n=6 i=1 r=@1 d=- c=@9 s=@4,-,-,- '
+              'DC %d #%d I n=6 i=1 r=@1 d=- c=@9 s=@4,-,-,- mt=@6,@6,- '
               'vp=0,0+1832x1920 z=0.000-1.000 sc=off '
               'ds=17wZ st=14 bm=F pr=- bl=1,5,6,1/2,1,1 sm=FFFFFFFF '
               'so=rFF/wFF/f8/1,1,2 rs=Fw/-100/1.50/1 q=1' % (f, 2),

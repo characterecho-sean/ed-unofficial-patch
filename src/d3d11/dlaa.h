@@ -202,6 +202,25 @@ bool dlaaEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour,
 // Performance mode's default M is at 2.7x K's error at rest on fine detail;
 // on the full frame the models cost the same.
 void dlaaSetPreset(unsigned preset);
+// The preset set last (the hull variant bench's manifest; 0 without NGX in the build).
+unsigned dlaaPresetNow();
+
+// The hull variant bench's second DLSS (TEMPORARY; hull_layer.h, docs\research-own-hull-layer-2026-11-08.md "Variant bench"): a
+// private feature pair beside the eyes' (not upscaler slots: FSR, the stats and the switch release key off kUpscalerSlots), on
+// the shared parameter block, created like the eyes' (the same flags, mode by the size ratio, the same preset). `sub` non-null
+// evaluates only that render subrect into the output at (outX, outY) -- a feature created with output subrects at the subrect's
+// own size (NGX takes the output region's size from the feature), so a new rect remakes it, and the full and
+// the subrect variants are separate features: the caller releases one pair before the other is made. createMs: a creation's
+// duration this call, else 0. False with its reason on a refusal (the bench records it and carries on).
+struct DlaaSubrect {
+    uint32_t renderX = 0, renderY = 0, renderW = 0, renderH = 0, outX = 0, outY = 0;
+};
+bool dlaaHullEvaluate(ID3D11DeviceContext* ctx, int eye, ID3D11Texture2D* colour, ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                      ID3D11Texture2D* output, uint32_t w, uint32_t h, uint32_t outW, uint32_t outH, float jx, float jy, bool reset,
+                      const DlaaSubrect* sub, const char** reason, double* createMs);
+void dlaaHullRelease();
+// NVIDIA's own count of every DLSS feature's GPU memory (NGX_DLSS_GET_STATS); false when the runtime will not say.
+bool dlaaVramBytes(uint64_t* bytes);
 
 // The measured price, for the totals line: evaluations, the mean
 // milliseconds by timestamp query, and how many evaluations carried the

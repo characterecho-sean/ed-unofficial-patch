@@ -24,6 +24,7 @@
 #include "skin_join.h"        // kChainHash
 #include "flat_runtime.h"
 #include "flat_temporal.h"  // flat discovery and capture-only dispatch forwarding
+#include "hull_layer.h"     // diag.hull_layer (TEMPORARY): the game's AO chain re-issued on the hull layer's private G-buffer
 #include "object_probe.h"   // objectProbeNoteDispatch: the skin ledger's view of the palette chain (armed eye runs only)
 #include "vr_world_route.h"  // g_vrWorldInternal: the VR world route's own dispatches pass straight through
 #include "../common/runtime_profile.h"
@@ -708,9 +709,18 @@ void STDMETHODCALLTYPE hookedDispatchIndirect(ID3D11DeviceContext* self,
     if (drawCensusArmed()) {
         drawCensusDispatch(self, 0, 0, 0, foreignContext(self), args, off);
     }
-    if (!foreignContext(self)) s->computeThisFrame = true;
+    const bool owner = !foreignContext(self);
+    if (owner) s->computeThisFrame = true;
 
     s->realDispatchIndirect(self, args, off);
+    // diag.hull_layer (TEMPORARY): the game's reflection pass re-issued into the hull layer's private HDR with the same arguments.
+    if (owner && args && hullLayerWanted()) {
+        VrWorldInternalScope internal;
+        if (hullLayerBeginDispatch(self, hashOf(bindingGet(BindSlot::Cs)))) {
+            s->realDispatchIndirect(self, args, off);
+            hullLayerEndDispatch(self);
+        }
+    }
 }
 
 // F2: is the bound compute shader the skinning palette chain (skin_join.h kChainHash)? Asked of every owner dispatch while the second skin
@@ -721,6 +731,18 @@ bool skinChainBound() {
     if (!cs) return false;
     static skinjoin::ChainVerdicts verdicts;
     return verdicts.bound(cs, shaderRegistryGeneration(), [](const void* shader) { return hashOf(const_cast<void*>(shader)); });
+}
+
+// diag.hull_layer (hull_layer.h; TEMPORARY): right after the game's own issue of an owner-context dispatch, with its bindings still bound, a step
+// of the game's AO chain is dispatched once more with the same groups into the hull layer's private copies (vscreen.cpp hullLayerAfterDraw's
+// shape); End puts the game's compute views back. The layer's own calls step past the game-facing hooks (VrWorldInternalScope).
+// NOINLINE: the dispatch path pays one bool load while the key is off.
+__declspec(noinline) void hullLayerAfterDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
+    VrWorldInternalScope internal;
+    if (hullLayerBeginDispatch(self, hashOf(bindingGet(BindSlot::Cs)))) {
+        g_state->realDispatch(self, x, y, z);
+        hullLayerEndDispatch(self);
+    }
 }
 
 void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y, UINT z) {
@@ -841,6 +863,7 @@ void STDMETHODCALLTYPE hookedDispatch(ID3D11DeviceContext* self, UINT x, UINT y,
     // A skipped dispatch still counts as seen below (the census recorded it above, as the game SUBMITTED it).
     const bool skipped = dec.action == exposurechain::Action::Skip;
     if (!skipped) s->realDispatch(self, x, y, z);
+    if (!skipped && hullLayerWanted()) hullLayerAfterDispatch(self, x, y, z);   // diag.hull_layer (TEMPORARY): one load while off; owner context here
     if (!isTarget) return;
 
     guardedBudget(g_budget, [&] {

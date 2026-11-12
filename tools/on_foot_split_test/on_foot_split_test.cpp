@@ -987,11 +987,11 @@ void testShader(const std::string& root) {
     struct Mutant { const char* name; const char* anchor; const char* mutated; };
     const Mutant ms[] = {
         {"the world path's gate demands more than a millimetre", "bool worldOn = tvCam.w != 0.0 && split.x > 0.0;", "bool worldOn = tvCam.w != 0.0 && split.x > 1.0;"},
-        {"the split's comparison ignores the split's value", "if (worldOn && (far || z > split.x) && !scannerUi) {\n                count15 = 1;", "if (worldOn && (far || z > 10.0) && !scannerUi) {\n                count15 = 1;"},
-        {"no pixel with a depth takes the world path", "if (worldOn && (far || z > split.x) && !scannerUi) {\n                count15 = 1;", "if (worldOn && (far) && !scannerUi) {\n                count15 = 1;"},
-        {"the camera's translation dropped", "dp = dp * z + tvCam.xyz;\n                    zPred = -dp.z;\n#if EDVR_CELESTIAL\n                    float3 celestialDp;\n                    if (celestialPixel(p, d, z, celestialDp)) {\n                        dp = celestialDp;\n                        zPred = -dp.z;\n                        count39 = 1;",
-         "dp = dp * z;\n                    zPred = -dp.z;\n#if EDVR_CELESTIAL\n                    float3 celestialDp;\n                    if (celestialPixel(p, d, z, celestialDp)) {\n                        dp = celestialDp;\n                        zPred = -dp.z;\n                        count39 = 1;"},
-        {"the head's translation dropped", "dp = dp * z + tvUsed.xyz;\n                zPred = -dp.z;", "dp = dp * z;\n                zPred = -dp.z;"},
+        {"the split's comparison ignores the split's value", "if (temporalWorldPath(worldOn, far, z, split.x, scannerUi)) {\n                count15 = 1;", "if (temporalWorldPath(worldOn, far, z, 10.0, scannerUi)) {\n                count15 = 1;"},
+        {"no pixel with a depth takes the world path", "if (temporalWorldPath(worldOn, far, z, split.x, scannerUi)) {\n                count15 = 1;", "if (temporalWorldPath(worldOn, far, 0.0, split.x, scannerUi)) {\n                count15 = 1;"},
+        {"the camera's translation dropped", "dp = temporalCarry(d, z, far, c2R0.xyz, c2R1.xyz, c2R2.xyz, tvCam.xyz);\n                if (!far) {\n                    zPred = -dp.z;\n#if EDVR_CELESTIAL\n                    float3 celestialDp;\n                    if (celestialPixel(p, d, z, celestialDp)) {\n                        dp = celestialDp;\n                        zPred = -dp.z;\n                        count39 = 1;",
+         "dp = temporalCarry(d, z, far, c2R0.xyz, c2R1.xyz, c2R2.xyz, float3(0.0, 0.0, 0.0));\n                if (!far) {\n                    zPred = -dp.z;\n#if EDVR_CELESTIAL\n                    float3 celestialDp;\n                    if (celestialPixel(p, d, z, celestialDp)) {\n                        dp = celestialDp;\n                        zPred = -dp.z;\n                        count39 = 1;"},
+        {"the head's translation dropped", "dp = temporalCarry(d, z, far, dR0.xyz, dR1.xyz, dR2.xyz, tvUsed.xyz);\n                zPred = -dp.z;", "dp = temporalCarry(d, z, far, dR0.xyz, dR1.xyz, dR2.xyz, float3(0.0, 0.0, 0.0));\n                zPred = -dp.z;"},
         {"the world path's decision code left at the head's", "decisionPath = count39 != 0 ? 12u : (count15 != 0 ? 2u : 1u);", "decisionPath = count39 != 0 ? 12u : (count15 != 0 ? 1u : 1u);"},
     };
     constexpr size_t kM = sizeof(ms) / sizeof(ms[0]);
@@ -1114,7 +1114,8 @@ void testPins(const std::string& root) {
         {&journal, "s.pub.seatedKnown = false;", 1, "R5j", "three missed reads drop the seat with the rest"},
         // the shader's reading of split.x, which a millimetre relies on: > 0 turns the world path on, z > split picks a pixel
         {&shader, "split.x > 0.0", 4, "R5k", "the shader reads split.x > 0 as the world path being available (the history fetch, main's depth tile fill, the motion entry, the flag)"},
-        {&shader, "(far || z > split.x)", 2, "R5k", "the shader sends a pixel to the world path when it is far or farther than split.x"},
+        {&shader, "(far || z > splitMetres)", 1, "R5k", "the shared split function sends a pixel to the world path when it is far or farther than the split"},
+        {&shader, "temporalWorldPath(worldOn, far, z, split.x, scannerUi)", 2, "R5k", "both the history fetch and the motion entry hand the split function split.x"},
     };
     runPins(pins);
     std::printf("(R5) %zu source pins, each with its control (the line removed must fail it)\n", pins.size());

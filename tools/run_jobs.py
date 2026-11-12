@@ -547,6 +547,12 @@ def child_env(env, job, exe_dir=None, localappdata=None):
         child["EDVR_LOG_DIR_FOR"] = exe_dir
     if localappdata is not None:
         child["LOCALAPPDATA"] = localappdata
+        # The python.exe/py.exe aliases of the Python install manager look for runtimes under LOCALAPPDATA\Python, so
+        # under the rig's LOCALAPPDATA they find none and fail ("No runtimes are installed"). Put this interpreter's
+        # directory first on PATH so a rig's own `python` is the runner's, whatever installed it.
+        here = os.path.dirname(sys.executable)
+        if here:
+            child["PATH"] = here + os.pathsep + child.get("PATH", "")
     return child
 
 
@@ -1689,6 +1695,8 @@ def self_test():
     check(child_env(env, Job(alpha), exe_dir, fixture)["LOCALAPPDATA"] == fixture
           and "LOCALAPPDATA" not in child_env(env, Job(alpha), exe_dir) and "LOCALAPPDATA" not in env,
           "a child given the fixture root runs under it; a child given none keeps the runner's LOCALAPPDATA")
+    check(child_env(env, Job(alpha), exe_dir, fixture)["PATH"].split(os.pathsep)[0] == os.path.dirname(sys.executable),
+          "a child under the fixture LOCALAPPDATA finds the runner's python first (the install manager's alias would find none)")
     with tempfile.TemporaryDirectory() as tmp:
         root = rig_localappdata(tmp)
         with open(os.path.join(root, "Frontier Developments", "Elite Dangerous", "Options", "Graphics", "Settings.xml"), "rb") as f:

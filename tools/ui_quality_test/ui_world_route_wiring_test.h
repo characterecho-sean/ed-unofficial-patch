@@ -343,7 +343,8 @@ void testWiringDoor() {
 
     const std::string sharpenText = readText("src/d3d11/native_sharpen.cpp");
     check(!sharpenText.empty(), "src/d3d11/native_sharpen.cpp is readable from the working directory");
-    const std::string sharpen = bodyOf(sharpenText, "HRESULT WINAPI treat(void* p,uint64_t seq,", "native_sharpen treat()");
+    // B's door: treat() takes the lock and calls treatB(), then finishes frame generation's S (framegen_synth.h) after it.
+    const std::string sharpen = bodyOf(sharpenText, "HRESULT treatB(void* p,uint64_t seq,", "native_sharpen treatB()");
     const size_t only = sharpen.find("if(edvr::uiLayerDoorLayerOnly(eye,seq)){");
     const size_t ordinary = sharpen.rfind("if(s->strength<=0.f||s->stoodDown){");
     check(only != std::string::npos && ordinary != std::string::npos && only < ordinary, "sharpen: the layer-only branch precedes the ordinary path");

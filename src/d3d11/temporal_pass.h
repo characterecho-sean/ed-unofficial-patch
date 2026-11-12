@@ -140,6 +140,11 @@ void temporalPassNoteOffAaSceneDepth(int eye, ID3D11Texture2D* source, const uin
 // and per-eye motion metadata in edvr_logs\eyes; the diagnostics that ride one
 // armed frame (the draw census, the object ledger, the pixel probe) arm with it.
 void temporalPassArmEyeDump();
+// The hull variant bench (hotkey.hull_bench, TEMPORARY; hull_layer.h): whether an eye run is still taking or writing (the
+// bench refuses then), and a stamp from the eye dump's own maker (HHMMSSmmm and the session's serial), so the bench's files
+// sort among the dumps'.
+bool temporalPassEyeRunBusy();
+void temporalPassMakeEyeStamp(wchar_t* out, size_t count);
 // Active eye-run diagnostic only, after the final crisp composition and before
 // the runtime's menu. region is the actual returned texture's unflipped bounds.
 void temporalPassCaptureFinalEye(uint64_t sequence, uint32_t eye, ID3D11Texture2D* texture,
@@ -290,6 +295,32 @@ void temporalPassLogMap();
 // d3d11.dll; the established exported head-pose ABI stays unchanged.
 void temporalPassNoteEyes(int eye, const float (*prevEyes)[12],
                           const float (*nowEyes)[12]);
+
+// Frame generation, Phase 2.2 (fix.frame_generation_shadow): before each native treat, the eye's head step from this frame (B) to the synthetic slot S, from the runtime's pose for
+// S (framegen_synth_math.h frameGenSlotStep; rot row-major 3x3, t metres, B's eye space to S's), null when the runtime handed none; and whether the runtime consumes this frame's S
+// (edvrFrameGenNoteSlot's consumer), with the treat's sequence the module stamps its answer with. Good for the treat that follows on the same frame only. Internal to d3d11.dll.
+void temporalPassNoteFrameGenSlot(int eye, const float* rot, const float* t, bool consumer, uint64_t sequence);
+// Phase 2.3b: the eye dump's frame k, at B's door (native_sharpen.cpp through framegen_synth.h's dumpSink): the synthesized S as finished (eye_<stamp>_S<k>.bmp) and B as its door
+// finished it (eye_<stamp>_SB<k>.bmp), both in the pre-interface output's crop, so the two are compared pixel for pixel. Copies only; written with the run's other files.
+void temporalPassStageFrameGenDump(ID3D11DeviceContext* ctx, int k, ID3D11Texture2D* finishedS, ID3D11Texture2D* finishedB);
+// Frame generation, Phase 2.3 (fix.frame_generation): whether the runtime's slot for the treat being made said Lock 2:1 is engaged (native_temporal.cpp; false with a 2.2
+// runtime, which hands a size 1 slot, or with no slot). Read by the pass right after the treat's note, on the same thread.
+bool nativeTemporalFrameGenLock();
+// The settings menu's Monitor page (common/framegen_monitor_text.h, which a caller includes): the runtime's half of frame generation as its last slot gave it (a size 3 slot; a
+// smaller one reads as unknown), with that slot's age. Any thread; the slot's own lock.
+struct FrameGenMonitorRuntime;
+FrameGenMonitorRuntime nativeTemporalFrameGenMonitor();
+// Frame generation, Phase 2.4 (fix.frame_generation = off | auto | on; common/framegen_gate.h): the mode as the keys were last read (off in the flat profile), as framegen_gate.h's
+// FrameGenMode values (0 off, 1 auto, 2 on). Frame thread.
+uint8_t temporalPassFrameGenMode();
+// The gate's decision in auto (perf_monitor.cpp, once a frame): word 17 says whether Lock is admitted (framegen_gate.h frameGenLockWord), and hold stops the synthesizer while
+// the runtime cannot read auto (an older openvr_api.dll: frame generation then behaves as off). Ignored unless the mode is auto. Frame thread.
+void temporalPassFrameGenGate(bool admit, bool hold);
+// How many treats the camera gate dropped or carried the rows of, or the origin jumped on, while the synthesizer ran (the left eye): the gate's camera cut. Any thread.
+uint32_t temporalPassFrameGenCameraJumps();
+// How many treats built S (the left eye's calls of the synthesizer, all time): every frame under on, auto with the gate open and the shadow key; once a second in auto with it
+// closed. The treat lies inside Elite's GPU figure, so the gate reads the share of frames that held the synthesizer (framegen_gate.h frameGenGateEliteGpuMs). Any thread.
+uint32_t temporalPassFrameGenSynthFrames();
 
 // probe.w bits 64 and 256 of the temporal shader: t6 (the smoke's depth) / t7
 // (the private UI depth) NOT bound, so zSceneAt skips the fetch and uses the

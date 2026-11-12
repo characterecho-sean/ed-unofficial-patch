@@ -960,7 +960,7 @@ struct EyeState {
     uint32_t                   outW = 0, outH = 0;
     DXGI_FORMAT                outFmt = DXGI_FORMAT_UNKNOWN;
 };
-EyeState g_eye[2];
+EyeState g_eye[4];   // [2] and [3]: frame generation's S of each eye (menuPanelCompositeNativeFrameGen), kept apart from the eyes' own
 
 ID3D11Texture2D*          g_panelTex = nullptr;
 ID3D11ShaderResourceView* g_panelSrv = nullptr;
@@ -1166,7 +1166,7 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT texFmt, DXGI
 }
 
 void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf,
-                     bool flat = false) {
+                     bool flat = false, bool frameGen = false) {
     MenuGeometry g;
     {
         std::lock_guard<std::mutex> lock(g_geomMutex);
@@ -1246,7 +1246,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
         if (!ok) failOnce("the sampler could not be created");
     }
 
-    EyeState& e = g_eye[eye];
+    EyeState& e = g_eye[frameGen ? 2 + eye : eye];
     ID3D11ShaderResourceView* inSrv = nullptr;
     bool viaCopy = false;
     if (ok) {
@@ -1348,7 +1348,7 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             return nullptr;
         }
         pollQueries(ctx);
-        const int qs = acquireQuery(dev, ctx);
+        const int qs = frameGen ? -1 : acquireQuery(dev, ctx);   // S's composite is not the door's timing
         D3D11_BOX rb{};
         rb.left = region[0];
         rb.top = region[1];
@@ -1371,8 +1371,10 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             for (int i = 0; i < 4; ++i) p.region[i] = static_cast<int32_t>(region[i]);
         }
         for (int i = 0; i < 4; ++i) p.box[i] = box[i];
-        g_lastBoxW = static_cast<uint32_t>(box[2] - box[0]);
-        g_lastBoxH = static_cast<uint32_t>(box[3] - box[1]);
+        if (!frameGen) {
+            g_lastBoxW = static_cast<uint32_t>(box[2] - box[0]);
+            g_lastBoxH = static_cast<uint32_t>(box[3] - box[1]);
+        }
         p.outSize[0] = static_cast<int32_t>(regionW);
         p.outSize[1] = static_cast<int32_t>(regionH);
         p.flipV = flipV ? 1 : 0;
@@ -1436,9 +1438,11 @@ void* compositeInner(void* srcTex, int eye, const float* bounds, const float* xf
             if (savedSamp) savedSamp->Release();
 
             result = e.outTex;
-            ++g_draws;
-            if (!flat) bumpMenuDrawn();
-            if (!g_firstNoted) {
+            if (!frameGen) {   // S's composite (menuPanelCompositeNativeFrameGen): B's own counts the draw, keeps the keyboard gate and says the first
+                ++g_draws;
+                if (!flat) bumpMenuDrawn();
+            }
+            if (!frameGen && !g_firstNoted) {
                 g_firstNoted = true;
                 Log::get().note(
                     "menu panel: first composite -- a %dx%d bitmap on a %ux%u %s eye region "
@@ -1492,6 +1496,12 @@ void* menuPanelCompositeNative(ID3D11Texture2D* src, int eye, const float* bound
     if (graphicsRuntimeDisabled() || !src || !xf || eye < 0 || eye > 1) return nullptr;
     void* out = nullptr;
     guardedBudget(g_budget, [&] { out = compositeInner(src, eye, bounds, xf); });
+    return out;
+}
+void* menuPanelCompositeNativeFrameGen(ID3D11Texture2D* src, int eye, const float* bounds, const float xf[12]) {
+    if (graphicsRuntimeDisabled() || !src || !xf || eye < 0 || eye > 1) return nullptr;
+    void* out = nullptr;
+    guardedBudget(g_budget, [&] { out = compositeInner(src, eye, bounds, xf, false, true); });
     return out;
 }
 

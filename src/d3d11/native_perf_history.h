@@ -5,6 +5,8 @@
 
 namespace edvr {
 struct NativePerfAverage { unsigned count=0; double meanMs=0; };
+// Frame generation 2.4 (common/framegen_gate.h): the same samples' median and maximum over a window, for the gate's H1 terms.
+struct NativePerfSpread { unsigned count=0; double medianMs=0, maxMs=0; };
 
 // The monitor's CPU figure from one runtime frame, by the rule the settlement
 // governor's readWork uses: the caller work per cycle when the frame is timing
@@ -33,6 +35,9 @@ public:
     // GPU time.
     NativePerfAverage applicationCpu(uint64_t nowMs, uint64_t windowMs) const noexcept;
     NativePerfAverage applicationGpu(uint64_t nowMs, uint64_t windowMs) const noexcept;
+    // Frame generation 2.4: the median and maximum of those two series over the window (count 0: none, or the series is stale).
+    NativePerfSpread applicationCpuSpread(uint64_t nowMs, uint64_t windowMs) const noexcept;
+    NativePerfSpread applicationGpuSpread(uint64_t nowMs, uint64_t windowMs) const noexcept;
     // The frame's GPU work span, with the application clock off (2026-10-14): one sample a frame into the applicationGpu series.
     void noteFrameWork(uint64_t sequence, uint64_t nowMs, double ms) noexcept;
     static NativeCpuFigure cpuFigure(const NativeTimingSnapshot&) noexcept;
@@ -67,6 +72,7 @@ private:
         const Entry& at(unsigned index) const noexcept;
         bool fresh(uint64_t now) const noexcept;
         NativePerfAverage average(unsigned field,uint64_t now,uint64_t window) const noexcept;
+        NativePerfSpread spread(unsigned field,uint64_t now,uint64_t window) const noexcept;
         int graph(float* out,int max,uint64_t now) const noexcept;
     } cpu_, applicationCpu_, producer_, applicationGpu_, device_;
     uint64_t generation_=0, firstSequence_=0;

@@ -371,6 +371,9 @@ struct Eye {
     Ptr<ID3D11Texture2D> tex;
     Ptr<ID3D11RenderTargetView> rtv;
     Ptr<ID3D11ShaderResourceView> srv;
+    // The layer as an unordered-access view, for the HUD SMAA's tiled path to smooth it in place (ui_layer_smaa.h). Made only in VR with fix.hud_antialiasing on
+    // when the layer is made (ensureLayer); null otherwise, and the SMAA then runs its full passes.
+    Ptr<ID3D11UnorderedAccessView> uav;
     uint32_t w = 0, h = 0;
     uint32_t basisW = 0, basisH = 0;  // the door size the layer was made for
     uint64_t seq = 0;            // the frame whose draws it holds
@@ -490,6 +493,15 @@ struct Eye {
     uint32_t wMarkMissStreak = 0;    // consecutive frames whose marks no re-issue published
     bool wPubMatched = false;        // the re-issue that stamped wPubSeq composited by the tonemap difference (false: the plain add)
     uint64_t wMarkNotedSeq = 0;      // the last frame whose mark the door counted (scopeZoomNoteMarkComposite), once an eye-frame
+    // Frame generation, Phase 2.3b (uiLayerFrameGenInputs): what the door did at fgDoorSeq for the synthesized S finished after it -- whether the ripple or the scope lens
+    // rewrote the picture (fgEdit: 1 ripple, 2 scope), and, when the composite ran (fgCompSeq), the layer view it read (the SMAA output when smoothed), its multiply, size and
+    // rectangle. Views are the layer's own, alive until its next composite or release.
+    uint64_t fgDoorSeq = 0, fgCompSeq = 0;
+    uint32_t fgEdit = 0;
+    ID3D11ShaderResourceView* fgLayer = nullptr;
+    ID3D11ShaderResourceView* fgMult = nullptr;
+    uint32_t fgW = 0, fgH = 0;
+    float fgUv[4] = {};
 
     // The half-resolution canopy's glass target G: R16G16B16A16_FLOAT at the draw target's size, cleared at the eye-frame's first half
     // route canopy draw, added bilinearly into W once at the tonemap re-issue, before W is composited. gDs is its own depth-stencil at the same size, seeded from the game's, so no other
@@ -779,6 +791,9 @@ struct Window {
     // the key was off, the raw layer because the passes could not be had -- the key as the last composite saw it, and the layer's size then. VR's logTotals prints
     // them; the flat profile keeps its own (flat_ui_layer.cpp) and skips logTotals.
     uint64_t hudSmoothed = 0, hudRawKeyOff = 0, hudRawFault = 0;
+    // Of the smoothed: by the tiled path (in place, tiles with edges only) or the full passes, and why the last full one was full.
+    uint64_t hudTiled = 0, hudFull = 0;
+    const char* hudFullWhy = nullptr;
     bool hudKeyOn = false;
     uint32_t hudW = 0, hudH = 0;
     // afterWrites' own breakdown: taken into the layer after the UI (kept
@@ -1381,6 +1396,40 @@ bool makeTarget(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT format,
     return true;
 }
 
+// VR's half of fix.hud_antialiasing (2026-11-03: one key for both profiles, off by default, live): read by uiLayerConfigure, on every reconfigure, and used only
+// while the profile is not flat (the flat adapter reads the same key itself, a frame at a time, and asks per composite through g_flatEdge). uiLayerComposite smooths
+// an eye's HUD layer when either asks. ensureLayer reads it too: the layer is made unordered-access bindable for the SMAA's tiled path only while it is on.
+bool g_hudSmoothVr = false;
+
+// The layer, with an unordered-access view when the HUD SMAA's tiled path can use one (VR, the key on, a typed store of R8G8B8A8_UNORM, which D3D11 at feature
+// level 11 always has). A layer that refuses the flag is made as before, without it, and the SMAA runs its full passes.
+bool makeLayerTexture(ID3D11Device* dev, Eye& e, uint32_t w, uint32_t h, bool* withUav) {
+    *withUav = false;
+    e.uav.Reset();
+    if (!runtimeFlatProfile() && g_hudSmoothVr) {
+        D3D11_TEXTURE2D_DESC d{};
+        d.Width = w;
+        d.Height = h;
+        d.MipLevels = d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        if (SUCCEEDED(dev->CreateTexture2D(&d, nullptr, e.tex.ReleaseAndGetAddressOf())) &&
+            SUCCEEDED(dev->CreateRenderTargetView(e.tex.Get(), nullptr, e.rtv.ReleaseAndGetAddressOf())) &&
+            SUCCEEDED(dev->CreateShaderResourceView(e.tex.Get(), nullptr, e.srv.ReleaseAndGetAddressOf())) &&
+            SUCCEEDED(dev->CreateUnorderedAccessView(e.tex.Get(), nullptr, e.uav.ReleaseAndGetAddressOf()))) {
+            *withUav = true;
+            return true;
+        }
+        e.tex.Reset();
+        e.rtv.Reset();
+        e.srv.Reset();
+        e.uav.Reset();
+    }
+    return makeTarget(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, &e.tex, &e.rtv, &e.srv);
+}
+
 bool ensureLayer(ID3D11Device* dev, Eye& e, uint32_t w, uint32_t h, int eye) {
     if (e.tex && e.w == w && e.h == h) return true;
     e.coverage.reset();
@@ -1389,14 +1438,14 @@ bool ensureLayer(ID3D11Device* dev, Eye& e, uint32_t w, uint32_t h, int eye) {
     e.seq = 0;
     e.draws = 0;
     e.chainOpen = false;
-    if (!dev || !w || !h ||
-        !makeTarget(dev, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, &e.tex, &e.rtv, &e.srv))
+    bool withUav = false;
+    if (!dev || !w || !h || !makeLayerTexture(dev, e, w, h, &withUav))
         return false;
     e.w = w;
     e.h = h;
-    Log::get().note("ui quality: layer: %s eye's layer %s at %ux%u (R8G8B8A8_UNORM, %.1f MB).",
+    Log::get().note("ui quality: layer: %s eye's layer %s at %ux%u (R8G8B8A8_UNORM%s, %.1f MB).",
                     eye == 0 ? "left" : "right", resized ? "re-created" : "created", w, h,
-                    uiLayerMB(uiLayerBytes(w, h)));
+                    withUav ? ", unordered-access bindable for the HUD SMAA's tiled path" : "", uiLayerMB(uiLayerBytes(w, h)));
     return true;
 }
 
@@ -1806,6 +1855,7 @@ bool releaseLayers() {
         e.tex.Reset();
         e.rtv.Reset();
         e.srv.Reset();
+        e.uav.Reset();
         e.w = e.h = e.basisW = e.basisH = 0;
         e.seq = 0;
         e.draws = 0;
@@ -3299,10 +3349,7 @@ struct FlatEdgeSmoothing {
     UiLayerEdgeSmoothingResult result;
 };
 FlatEdgeSmoothing g_flatEdge;
-// VR's half of fix.hud_antialiasing (2026-11-03: one key for both profiles, off by default, live): read by uiLayerConfigure, on every reconfigure, and used only
-// while the profile is not flat (the flat adapter reads the same key itself, a frame at a time, and asks per composite through g_flatEdge). uiLayerComposite smooths
-// an eye's HUD layer when either asks.
-bool g_hudSmoothVr = false;
+// VR's half of fix.hud_antialiasing: g_hudSmoothVr, above ensureLayer.
 
 void compileOnce(ID3D11DeviceContext* ctx) {
     if (g_cs || g_csTried || !ctx) return;
@@ -3391,10 +3438,17 @@ ID3D11UnorderedAccessView* inPlaceUavFor(Eye& e, ID3D11Device* dev, ID3D11Textur
 UiLayerSmaa* edgeSmoothingFor(Eye& e, uint32_t eye, ID3D11Device* dev) {
     UiLayerSmaaFail fail;
     const char* who = runtimeFlatProfile() ? "flat ui layer smaa" : eye == 0 ? "ui layer smaa (left eye)" : "ui layer smaa (right eye)";
-    switch (uiLayerSmaaEnsure(e.smaa, dev, e.w, e.h, &fail)) {
+    // The tiled path's resources are made only for a layer that can take them (e.uav); its failure is said once per size, and the full passes run instead.
+    const bool tiledWas = e.smaa.tiledFail != nullptr;
+    const UiLayerSmaaState state = uiLayerSmaaEnsure(e.smaa, dev, e.w, e.h, &fail, e.uav != nullptr);
+    if (e.uav && !tiledWas && e.smaa.tiledFail)
+        Log::get().note("%s: the tiled path stood down at %ux%u -- %s; the full passes run", who, e.w, e.h, e.smaa.tiledFail);
+    switch (state) {
         case UiLayerSmaaState::kMade:
-            Log::get().note("%s: ready at %ux%u -- edges R8G8, weights and output R8G8B8A8, %.1f MB", who, e.w, e.h,
-                            uiLayerMB(uiLayerBytes(e.w, e.h, 10)));
+            Log::get().note("%s: ready at %ux%u -- edges R8G8, weights and output R8G8B8A8, %.1f MB; %s", who, e.w, e.h,
+                            uiLayerMB(uiLayerBytes(e.w, e.h, 10)),
+                            e.smaa.tiledReady() ? "the tiled path (tiles with edges only, smoothed in place)"
+                                                : "the full passes (the layer is not unordered-access bindable, or the tiled path stood down)");
             return &e.smaa;
         case UiLayerSmaaState::kReady:
             return &e.smaa;
@@ -3598,11 +3652,12 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         D3D11_BOX box{region[0], region[1], 0, region[2], region[3], 1};
         ctx->CopySubresourceRegion(e.copy.Get(), 0, 0, 0, 0, frame, 0, &box);
     }
-    // The layer the composite reads: its SMAA output when the passes ran, else the layer itself.
+    // The layer the composite reads: the layer itself, smoothed in place, when the SMAA's tiled path ran; its SMAA output when the full passes ran; else the raw layer.
     ID3D11ShaderResourceView* layerSrv = e.srv.Get();
     bool smoothed = false;
+    UiLayerSmaaPath smaaPath = UiLayerSmaaPath::kNone;
     if (smaa) {
-        if (ID3D11ShaderResourceView* output = uiLayerSmaaRun(*smaa, ctx.Get(), e.srv.Get())) {
+        if (ID3D11ShaderResourceView* output = uiLayerSmaaRun(*smaa, ctx.Get(), e.srv.Get(), e.uav.Get(), &smaaPath)) {
             layerSrv = output;
             smoothed = true;
         }
@@ -3638,6 +3693,13 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     if (savedCb) savedCb->Release();
 
     ++g_win.composites;
+    // Phase 2.3b: the inputs this composite read, for S's (uiLayerFrameGenInputs).
+    e.fgCompSeq = e.seq;
+    e.fgLayer = layerSrv;
+    e.fgMult = useMult ? e.mSrv.Get() : nullptr;
+    e.fgW = static_cast<uint32_t>(e.w);
+    e.fgH = static_cast<uint32_t>(e.h);
+    std::memcpy(e.fgUv, uv, sizeof(e.fgUv));
     g_flatEdge.result.outcome = !smooth ? UiLayerEdgeSmoothing::kRaw : (smoothed ? UiLayerEdgeSmoothing::kSmoothed : UiLayerEdgeSmoothing::kFault);
     g_flatEdge.result.w = e.w;
     g_flatEdge.result.h = e.h;
@@ -3646,6 +3708,13 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
         if (!smooth) ++g_win.hudRawKeyOff;
         else if (smoothed) ++g_win.hudSmoothed;
         else ++g_win.hudRawFault;
+        if (smaaPath == UiLayerSmaaPath::kTiled) {
+            ++g_win.hudTiled;
+        } else if (smaaPath == UiLayerSmaaPath::kFull) {
+            ++g_win.hudFull;
+            g_win.hudFullWhy = !e.uav ? "the layer was made without an unordered-access view (the key was off when it was made)"
+                                      : e.smaa.tiledFail ? e.smaa.tiledFail : "the tiled path was not made";
+        }
         g_win.hudKeyOn = smooth;
         g_win.hudW = e.w;
         g_win.hudH = e.h;
@@ -4273,11 +4342,13 @@ void logTotals(double seconds) {
     // The HUD layer's edge smoothing in VR (fix.hud_antialiasing, 2026-11-03), whenever the window composited the layer: the composites (both eyes) that read the SMAA output,
     // those that read the raw layer because the key was off, those that fell back to it because the passes could not be had, the key as the last composite read it and the
     // layer's size then. A window with composites and all three counts zero says the composite never reached the smoothing. The passes run inside the composite's timed
-    // span, so the "ui quality: layer" price line below includes their cost.
+    // span, so the "ui quality: layer" price line below includes their cost. Of the smoothed (2026-11-11): tiled, by the tiled path in place; full, by the three full
+    // passes, with why the last of them was full.
     if (g_win.composites || g_win.hudSmoothed || g_win.hudRawKeyOff || g_win.hudRawFault)
-        Log::get().note("ui quality: hud smaa: key=%s smoothed=%llu raw-key-off=%llu raw-fault=%llu size=%ux%u", g_win.hudKeyOn ? "on" : "off",
+        Log::get().note("ui quality: hud smaa: key=%s smoothed=%llu raw-key-off=%llu raw-fault=%llu size=%ux%u tiled=%llu full=%llu%s%s", g_win.hudKeyOn ? "on" : "off",
                         static_cast<unsigned long long>(g_win.hudSmoothed), static_cast<unsigned long long>(g_win.hudRawKeyOff),
-                        static_cast<unsigned long long>(g_win.hudRawFault), g_win.hudW, g_win.hudH);
+                        static_cast<unsigned long long>(g_win.hudRawFault), g_win.hudW, g_win.hudH, static_cast<unsigned long long>(g_win.hudTiled),
+                        static_cast<unsigned long long>(g_win.hudFull), g_win.hudFull ? " full-why=" : "", g_win.hudFull && g_win.hudFullWhy ? g_win.hudFullWhy : "");
     uiSurfacesLogAtlas();  // the glyph atlas instrument's write counts, when one is watched
     // The price: each stage's GPU time per eye-frame it ran in, and the
     // route's -- every stage of an eye-frame added up -- per eye-frame the
@@ -7700,6 +7771,22 @@ bool uiLayerDoorFromPass(uint32_t eye) {
     return eye <= 1 && g_eye[eye].doorFromPass;
 }
 
+bool uiLayerFrameGenInputs(uint64_t sequence, uint32_t eye, UiLayerFrameGenInputs* out) {
+    if (!out || eye > 1) return false;
+    *out = UiLayerFrameGenInputs{};
+    const Eye& e = g_eye[eye];
+    if (e.fgDoorSeq != sequence) return false;
+    out->pictureEdit = e.fgEdit;
+    if (e.fgCompSeq == sequence && e.compositedSeq == sequence && e.fgLayer) {
+        out->layer = e.fgLayer;
+        out->mult = e.fgMult;
+        out->w = e.fgW;
+        out->h = e.fgH;
+        std::memcpy(out->uv, e.fgUv, sizeof(out->uv));
+    }
+    return true;
+}
+
 // F26: the eye check's re-arm on a native on-foot mode change. The eye tables are reset on each change; a mismatch is tolerated for
 // kEyeSwapPersist composites after it (kEyeRearmWindow composites counts the window), and only a mismatch that persists stands down.
 uint32_t g_eyeEdgeSeen = 0;             // nativeOnFootEdges() at the last composite
@@ -7737,7 +7824,11 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     // The shield ripple: the picture is rewritten over the bubble's coverage BEFORE the weapons/HUD composite below (the ripple must not touch them). A frame
     // that is not EDVR's own comes back rewritten in EDVR's copy of it, which stands in for it from here on.
     Ptr<ID3D11Texture2D> rewritten;
+    const uint64_t rippleBefore = g_win.rippleApplied;
     if (g_rippleLive) guarded("shieldRipple.door", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame, resolved, &rewritten); });
+    // Phase 2.3b: what this door does to the picture, for the S finished after it (uiLayerFrameGenInputs).
+    e.fgDoorSeq = sequence;
+    e.fgEdit = g_win.rippleApplied != rippleBefore ? 1u : (scopeZoomWanted() ? 2u : 0u);
     const auto handOn = [&]() -> ID3D11Texture2D* {
         if (!rewritten) return nullptr;
         rewritten->AddRef();

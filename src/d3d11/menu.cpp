@@ -2215,6 +2215,24 @@ void buildMonitor(MenuContent& c) {
         l.style = kMenuNote;
         l.badge = kBadgeNone;
     }
+    // FRAME GENERATION, only while fix.frame_generation (auto or on) or fix.frame_generation_shadow is on (perf_monitor.h): a heading and up to five lines (2.4: the gate's in
+    // auto), once a second.
+    {
+        char fg[5][96];
+        const int fgCount = perfMonitorFrameGenLines(fg, 5);
+        if (fgCount > 0 && c.lineCount + 1 + fgCount <= kMenuMaxLines) {
+            MenuLine& h = c.lines[c.lineCount++];
+            strncpy(h.left, "FRAME GENERATION", sizeof(h.left) - 1);
+            h.style = kMenuHeading;
+            h.badge = kBadgeNone;
+            for (int i = 0; i < fgCount; ++i) {
+                MenuLine& l = c.lines[c.lineCount++];
+                strncpy(l.left, fg[i], sizeof(l.left) - 1);
+                l.style = kMenuNote;
+                l.badge = kBadgeNone;
+            }
+        }
+    }
     c.compact = true;
     // Two strips, fpsVR's pair: the GPU frame the compositor measured, and
     // the render thread's own busy time.
@@ -4921,6 +4939,26 @@ void menuShowNotice(const char* text) {
 
 void menuNoteOwnChange(const char* dotted) {
     if (dotted) g_s.menuWroteDotted = dotted;
+}
+
+bool menuSetRowValue(const char* dotted, const char* value) {
+    if (!g_s.configured || !dotted || !value) return false;
+    for (int i = 0; i < kRowDefCount; ++i) {
+        if (dottedOf(kMenuRows[i]) != dotted) continue;
+        applyChange(i, value);
+        return true;
+    }
+    return false;
+}
+
+bool menuRowValue(const char* dotted, char* out, size_t size) {
+    if (!g_s.configured || !dotted || !out || !size) return false;
+    for (int i = 0; i < kRowDefCount; ++i) {
+        if (dottedOf(kMenuRows[i]) != dotted) continue;
+        snprintf(out, size, "%s", g_rows[i].value.c_str());
+        return true;
+    }
+    return false;
 }
 
 void menuNoteConfigReloaded() {

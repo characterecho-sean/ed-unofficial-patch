@@ -31,6 +31,7 @@
 
 #include "../../include/edvr_plugin_api.h"
 #include "../common/star_glow_bloom.h"   // sgb::Bloom: menuStarGlowBloom
+#include <cstddef>
 #include <cstdint>
 
 struct ID3D11Device;
@@ -84,6 +85,13 @@ void menuShowNotice(const char* text);
 // The caller changed `dotted` itself (a runtime override, not an ini write), so the reload that follows must not toast it as an edit
 // made from outside. One-shot, like the menu's own write mark.
 void menuNoteOwnChange(const char* dotted);
+
+// Set a setting row's value from outside the menu (a hotkey), exactly as picking it on its page does: the row shows it, the worker writes
+// it to the ini (and the mirror), and the reload that follows applies it. Frame thread. False, and nothing written, when the menu is not
+// configured or no row owns `dotted`.
+bool menuSetRowValue(const char* dotted, const char* value);
+// The value that row shows now (a write still in flight included), into out. False when no row owns `dotted`.
+bool menuRowValue(const char* dotted, char* out, size_t size);
 
 // Does the menu want the config poll to run NOW rather than at its cadence?
 // True once after each write the menu made, so the change lands this frame

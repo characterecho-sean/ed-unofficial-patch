@@ -43,6 +43,10 @@ ID3D11PixelShader* shaderSwapCreatePs(ID3D11DeviceContext* ctx,const void* bytec
     hr(dev->CreatePixelShader(bytecode,size,nullptr,&p));return p;
 }
 void vScreenSetRenderTargetsRaw(ID3D11DeviceContext* c,UINT n,ID3D11RenderTargetView*const* r,ID3D11DepthStencilView* d){c->OMSetRenderTargets(n,r,d);}
+void vScreenPSSetShaderRaw(ID3D11DeviceContext* c,ID3D11PixelShader* p,ID3D11ClassInstance*const* k,uint32_t n){c->PSSetShader(p,k,n);}
+void vScreenPSSetConstantBuffersRaw(ID3D11DeviceContext* c,uint32_t s,uint32_t n,ID3D11Buffer*const* b){c->PSSetConstantBuffers(s,n,b);}
+void vScreenPSSetShaderResourcesRaw(ID3D11DeviceContext* c,uint32_t s,uint32_t n,ID3D11ShaderResourceView*const* v){c->PSSetShaderResources(s,n,v);}
+void vScreenOMSetBlendStateRaw(ID3D11DeviceContext* c,ID3D11BlendState* b,const float f[4],uint32_t m){c->OMSetBlendState(b,f,m);}
 ID3D11ComputeShader* shaderSwapCompileCs(ID3D11DeviceContext* ctx,const char* s,size_t,const char* entry,const char*,const SwapMacro*,const char*){
     if(testFail)return nullptr;auto code=compile(s,entry,"cs_5_0");ComPtr<ID3D11Device> dev;ctx->GetDevice(&dev);ID3D11ComputeShader* p=nullptr;
     hr(dev->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&p));return p;
@@ -116,6 +120,24 @@ struct Rig {
         ComPtr<ID3D11PixelShader> ps;ctx->PSGetShader(&ps,nullptr,nullptr);check(ps.Get()==stock.Get(),"original PS restored");
         ComPtr<ID3D11BlendState> afterBlend;FLOAT afterFactors[4];UINT afterMask;ctx->OMGetBlendState(&afterBlend,afterFactors,&afterMask);
         check(afterBlend==beforeBlend && !memcmp(beforeFactors,afterFactors,sizeof(beforeFactors)) && beforeMask==afterMask,"original blend, factors and sample mask restored");
+        return read();
+    }
+    // The hull layer's re-issue of the draw just issued (vscreen.cpp hullLayerAfterDraw), after nightVisionEnd: the target
+    // is reset to the scene and drawn once more, through nightVisionReissueBegin/End, and the game's state must come back.
+    std::vector<float> reissue(bool* engaged){
+        ctx->UpdateSubresource(target.Get(),0,nullptr,scene.data(),64*16,0);
+        ComPtr<ID3D11BlendState> beforeBlend;FLOAT beforeFactors[4];UINT beforeMask;ctx->OMGetBlendState(&beforeBlend,beforeFactors,&beforeMask);
+        ComPtr<ID3D11Buffer> beforeControl;ctx->PSGetConstantBuffers(3,1,&beforeControl);
+        ComPtr<ID3D11ShaderResourceView> beforeT5;ctx->PSGetShaderResources(5,1,&beforeT5);
+        *engaged=nightVisionReissueBegin(ctx.Get());ctx->Draw(3,0);if(*engaged)nightVisionReissueEnd(ctx.Get());
+        ComPtr<ID3D11Buffer> afterControl;ctx->PSGetConstantBuffers(3,1,&afterControl);check(afterControl==beforeControl,"re-issue: PS constant buffer 3 restored");
+        ComPtr<ID3D11ShaderResourceView> afterT5;ctx->PSGetShaderResources(5,1,&afterT5);check(afterT5==beforeT5,"re-issue: PS t5 restored");
+        ComPtr<ID3D11PixelShader> ps;ctx->PSGetShader(&ps,nullptr,nullptr);check(ps.Get()==stock.Get(),"re-issue: original PS restored");
+        ComPtr<ID3D11BlendState> afterBlend;FLOAT afterFactors[4];UINT afterMask;ctx->OMGetBlendState(&afterBlend,afterFactors,&afterMask);
+        check(afterBlend==beforeBlend && !memcmp(beforeFactors,afterFactors,sizeof(beforeFactors)) && beforeMask==afterMask,"re-issue: blend, factors and sample mask restored");
+        return read();
+    }
+    std::vector<float> read(){
         ctx->CopyResource(stage.Get(),target.Get());D3D11_MAPPED_SUBRESOURCE m{};hr(ctx->Map(stage.Get(),0,D3D11_MAP_READ,0,&m));std::vector<float> out(64*64*4);
         for(UINT y=0;y<64;++y)memcpy(out.data()+y*64*4,static_cast<char*>(m.pData)+y*m.RowPitch,64*16);ctx->Unmap(stage.Get(),0);return out;
     }
@@ -147,6 +169,13 @@ void test(bool realistic){
         check(fabsf(pulse[i]-.6f)<.0001f,"radial pulse matches fixed-point analytic distance");
     }
     check(fabsf(pulse[0]-pulse[1])<.0001f&&fabsf(oldPulse[0]-oldPulse[1])>.02f,"head rotation moves stock pulse but not corrected pulse");
+    // The hull layer's re-issue draws what the engaged game draw drew, once; a re-issue with nothing engaged draws stock.
+    {
+        auto game=r.draw(true);bool engaged=false;auto again=r.reissue(&engaged);
+        check(engaged && again==game,"hull re-issue reproduces the engaged draw");
+        auto stockNow=r.draw(false);check(game!=stockNow,"the engaged draw differs from stock here");
+        again=r.reissue(&engaged);check(!engaged && again==stockNow,"hull re-issue is consumed by the first");
+    }
     // Intentional pixelation keeps its original artistic normal shading.
     r.n[10][1]=0;r.n[9][0]=.218f;r.n[9][1]=.5f;r.n[9][2]=-.5f;
     std::vector<unsigned> pattern(64*64);for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)pattern[y*64+x]=((x%2?750u:512u)<<10)|(512u<<20);
@@ -160,6 +189,7 @@ void test(bool realistic){
     // A matched hash is insufficient when a future build changes resources.
     r.ctx->PSSetConstantBuffers(2,1,r.camera.GetAddressOf());nightVisionBegin(r.ctx.Get());
     ComPtr<ID3D11PixelShader> ps;r.ctx->PSGetShader(&ps,nullptr,nullptr);check(ps.Get()==r.stock.Get(),"wrong settings size rejected");nightVisionEnd(r.ctx.Get());r.ctx->PSSetConstantBuffers(2,1,r.settings.GetAddressOf());
+    check(!nightVisionReissueBegin(r.ctx.Get()),"a declined draw is re-issued as the game's");
     r.bind(2,r.depth);fixed=r.draw(true);stock=r.draw(false);check(fixed==stock,"wrong normal format draws stock");r.bind(2,r.normals);stock=r.draw(false);
     // The second shader output is a blend factor, not another render
     // target. A changed MRT/blend contract must retain the original draw.
@@ -264,6 +294,12 @@ void brightnessTest(){
             for(unsigned c=0;c<3;++c)check(std::isfinite(out[i*4+c]) && std::fabs(out[i*4+c]-r.scene[i*4+c]*scale)<1e-6,"live brightness is bounded and preserves texture/hue");
             check(out[i*4+3]==r.scene[i*4+3],"brightness preserves target alpha");
         }
+    }
+    // The hull layer's re-issue carries the gain at b3, the dual-source blend and the exterior mask: the same lifted scene.
+    testBrightness=8;nightVisionConfigure(Config::get());
+    {
+        auto game=r.draw(true);bool engaged=false;auto again=r.reissue(&engaged);
+        check(engaged && again==game && game!=r.scene,"hull re-issue carries the exterior brightness");
     }
     testBrightness=16;nightVisionConfigure(Config::get());r.setStencil(std::vector<unsigned>(64*64,16));
     auto out=r.draw(true);check(out==r.scene,"maximum brightness never illuminates excluded body");

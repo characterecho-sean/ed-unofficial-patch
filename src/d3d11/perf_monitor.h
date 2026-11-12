@@ -21,6 +21,11 @@
 //                                    two entry points; elsewhere "n/a"
 //   EDVR's own passes                the temporal, DLSS and sharpen totals
 //                                    those passes already keep
+//   FRAME GENERATION (only with      Lock's state and last second from the
+//   fix.frame_generation or its      runtime's last slot; the synthesizer's
+//   shadow key on)                   last window and VRAM; once a second;
+//                                    in auto (2.4) the performance gate's state
+//                                    and reason
 //
 // THE COST, by design: the once-a-second samplers run ONLY while the page
 // is showing (a two-second grace so the first numbers are there when it
@@ -96,6 +101,11 @@ void perfMonitorLocalGpuLine(char* buf, size_t bufLen);
 // submit spans include blocking and rendezvous, while producer spans include
 // queued GPU work and exclude the XR device. These are never compositor times.
 void perfMonitorNativeTimingLine(char* buf, size_t bufLen);
+
+// FRAME GENERATION (common/framegen_monitor_text.h): the block's lines under its heading, as the
+// once-a-second sampler last made them, at most `max` of 96 characters. 0 while fix.frame_generation
+// and fix.frame_generation_shadow are both off: the page draws no block then.
+int perfMonitorFrameGenLines(char (*out)[96], int max);
 
 // DROP ATTRIBUTION (docs/settings-menu.md, "diagnosing drops caused by the
 // mod"). Every frame's ring entry carries what EDVR did in it -- the events

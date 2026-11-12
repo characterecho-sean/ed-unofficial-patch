@@ -29,6 +29,10 @@ inline bool gpuPassProfileCapturing() { return detail::g_gpuPassCapturing; }
 // The hotkey. Arms the next capture; a press while armed or running is refused with a note. The frame count is read from the
 // hotkey.gpu_pass_profile value at the press.
 void gpuPassProfileRequest();
+// Another instrument's arm (dump v2: the eye dump with diag.hull_layer on, TEMPORARY): the next `frames` whole frames, with NO delay
+// (the frames are the dump's own, not a perturbation study). Refused with a note, and false, while a capture is armed or running, so a
+// hotkey capture in progress is never cut short. `why` names the caller in the armed line.
+bool gpuPassProfileRequestFor(uint32_t frames, const char* why);
 // The key part of a hotkey.gpu_pass_profile value: the value without a trailing frame count (what the hotkey binds).
 std::string gpuPassProfileKeyPart(const std::string& value);
 

@@ -35,6 +35,8 @@ retired) means target UI was separated before DLSS. In that case
 DlssColour is the world-only tone-mapped input, UiInfluence is its signed
 R32 target influence, and UiDepth is the clean private depth. HoloCoverage
 and UiEdits contain the clean maps actually consumed by reconstruction.
+HullHdr and GameHdrLit (diag.hull_layer, TEMPORARY) are R11G11B10_FLOAT (DXGI 26), read as float RGB;
+HullDepth is the private depth (DXGI 19, the depth channel). _e1 names eye 1.
 Chrome0/Chrome1 (only when the scanner's screen was up) are the scanner's
 persistent chrome surfaces as its screen composite sampled them, RGBA8 at
 the chrome's own size; their frame, eye, UI-bound and UI-flags are zero.
@@ -56,8 +58,8 @@ def _load(path):
     if meta['version'] != 1 or len(data) != 44 + meta['row_bytes'] * meta['height']:
         raise ValueError('Unsupported version or incomplete capture')
     fmt, w, h = meta['format'], meta['width'], meta['height']
-    pixel_bytes = {2: 16, 10: 8, 16: 8, 27: 4, 28: 4, 29: 4, 34: 4, 39: 4, 40: 4, 41: 4,
-                   42: 4, 19: 8, 20: 8, 44: 4, 45: 4, 53: 2, 55: 2, 61: 1}
+    pixel_bytes = {2: 16, 10: 8, 16: 8, 23: 4, 26: 4, 27: 4, 28: 4, 29: 4, 34: 4, 39: 4, 40: 4, 41: 4,
+                   42: 4, 19: 8, 20: 8, 44: 4, 45: 4, 53: 2, 55: 2, 60: 1, 61: 1, 62: 1}
     if not w or not h or fmt not in pixel_bytes or meta['row_bytes'] != w * pixel_bytes[fmt]:
         raise ValueError('Unsupported format or invalid packed row extent')
     return meta, data
@@ -89,6 +91,21 @@ def read_buffer(path):
     return meta, np.frombuffer(data, '<u4', offset=40).reshape(meta['bytes'] // meta['stride'], meta['stride'] // 4)
 
 
+def r11g11b10(words):
+    """R11G11B10_FLOAT words (a NumPy uint32 array) as float32 RGB: 6-bit mantissas for R and G, 5-bit for B, a 5-bit exponent each, no sign."""
+    import numpy as np
+    words = np.asarray(words, dtype=np.uint32)
+    out = []
+    for shift, bits in ((0, 6), (11, 6), (22, 5)):
+        field = (words >> shift) & ((1 << (bits + 5)) - 1)
+        mant = (field & ((1 << bits) - 1)).astype(np.float64)
+        exp = (field >> bits).astype(np.int64)
+        value = np.where(exp == 0, mant / (1 << bits) * 2.0 ** -14, (1.0 + mant / (1 << bits)) * np.exp2(exp - 15))
+        value = np.where(exp == 31, np.where(mant == 0, np.inf, np.nan), value)
+        out.append(value)
+    return np.stack(out, axis=-1).astype('float32')
+
+
 def read(path):
     import numpy as np
     meta, data = _load(path)
@@ -101,6 +118,11 @@ def read(path):
         image = np.frombuffer(data, '<f4', offset=44).reshape(h, w, 2)
     elif fmt == 34:
         image = np.frombuffer(data, '<f2', offset=44).reshape(h, w, 2).astype('float32')
+    elif fmt == 26:  # R11G11B10_FLOAT: the HDR target (HullHdr, GameHdrLit; diag.hull_layer)
+        image = r11g11b10(np.frombuffer(data, '<u4', offset=44).reshape(h, w))
+    elif fmt == 23:  # R10G10B10A2_UNORM: the G-buffer's RT0 (RefGbuf0, GameGbuf0; diag.hull_layer), RGBA in [0, 1]
+        words = np.frombuffer(data, '<u4', offset=44).reshape(h, w)
+        image = np.stack([((words >> s) & m) / float(m) for s, m in ((0, 1023), (10, 1023), (20, 1023), (30, 3))], axis=-1).astype('float32')
     elif fmt in (27, 28, 29):
         image = np.frombuffer(data, 'u1', offset=44).reshape(h, w, 4).astype('float32') / 255.0
     elif fmt in (39, 40, 41):
@@ -113,7 +135,7 @@ def read(path):
         image = (np.frombuffer(data, '<u4', offset=44).reshape(h, w) & 0xffffff) / 16777215.0
     elif fmt in (53, 55):
         image = np.frombuffer(data, '<u2', offset=44).reshape(h, w) / 65535.0
-    elif fmt == 61:
+    elif fmt in (60, 61, 62):  # R8: also a one-byte stencil copy (the hull layer's reflection dump)
         image = np.frombuffer(data, 'u1', offset=44).reshape(h, w)
     else:
         raise ValueError(f'Unsupported DXGI format {fmt}')
@@ -190,6 +212,32 @@ def self_test():
             else:
                 _, image = read(path)
                 np.testing.assert_array_equal(image, np.array(list(rgba), dtype='float32').reshape(1, 2, 4) / 255.0)
+        # R11G11B10_FLOAT (HullHdr, GameHdrLit): (1.0, 0.5, 2.0), then (1.5, 0, 0) and a denormal R.
+        hdr = struct.pack('<3I', 960 | 896 << 11 | 512 << 22, 992, 1)
+        path.write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, 3, 1, 26, 12, 23, 1, 0, 0) + hdr)
+        meta, data = _load(path)
+        assert meta['format'] == 26 and meta['eye'] == 1 and data[44:] == hdr
+        try:
+            import numpy as np
+        except ImportError:
+            pass
+        else:
+            _, image = read(path)
+            expected = np.array([[[1.0, 0.5, 2.0], [1.5, 0.0, 0.0], [2.0 ** -20, 0.0, 0.0]]], dtype='float32')
+            np.testing.assert_array_equal(image, expected)
+        # R10G10B10A2_UNORM (RefGbuf0, GameGbuf0): (0, 1, 512/1023, 1/3), then (1, 0, 0, 1).
+        gbuf = struct.pack('<2I', 0 | 1023 << 10 | 512 << 20 | 1 << 30, 1023 | 3 << 30)
+        path.write_bytes(b'EDVRTEX1' + struct.pack('<9I', 1, 2, 1, 23, 8, 23, 0, 0, 0) + gbuf)
+        meta, data = _load(path)
+        assert meta['format'] == 23 and data[44:] == gbuf
+        try:
+            import numpy as np
+        except ImportError:
+            pass
+        else:
+            _, image = read(path)
+            expected = np.array([[[0.0, 1.0, 512 / 1023, 1 / 3], [1.0, 0.0, 0.0, 1.0]]], dtype='float32')
+            np.testing.assert_allclose(image, expected, rtol=0, atol=1e-7)
         for invalid in (b'', payload[:-1], payload + b'x',
                         payload[:24] + struct.pack('<I', 8) + payload[28:],
                         payload[:8] + struct.pack('<I', 2) + payload[12:]):

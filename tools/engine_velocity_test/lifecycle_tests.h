@@ -745,6 +745,21 @@ inline void run(const Harness& h) {
         ComPtr<ID3D11PixelShader> bound;
         h.context->PSGetShader(&bound, nullptr, nullptr);
         h.check(bound && bound.Get() != g.ps.Get(), "life: the keyed draw ran the substituted pixel shader");
+        // diag.hull_layer = separate (TEMPORARY): the substitute's own-discard variant is made once and kept; the game's own shader has none.
+        const char* why = nullptr;
+        ID3D11PixelShader* own = edvr::engineVelocityOwnDiscardPs(h.context, bound.Get(), &why);
+        if (!own) std::printf("  life: no own-discard variant: %s\n", why ? why : "?");
+        h.check(own && own != bound.Get() && own != g.ps.Get(), "life: the substituted pixel shader has an own-discard variant");
+        h.check(edvr::engineVelocityOwnDiscardPs(h.context, bound.Get(), nullptr) == own, "life: the own-discard variant is made once and kept");
+        h.check(!edvr::engineVelocityOwnDiscardPs(h.context, g.ps.Get(), &why) && why, "life: the game's own pixel shader has no own-discard variant");
+        // diag.hull_layer (TEMPORARY): the keyed family's vertex shader as bound has a keep-own variant, made once and kept.
+        ComPtr<ID3D11VertexShader> boundVs;
+        h.context->VSGetShader(&boundVs, nullptr, nullptr);
+        ID3D11VertexShader* keep = edvr::engineVelocityKeepOwnVs(h.context, boundVs.Get(), &why);
+        if (!keep) std::printf("  life: no keep-own vertex shader: %s\n", why ? why : "?");
+        h.check(keep && keep != boundVs.Get(), "life: the keyed family's vertex shader has a keep-own variant");
+        h.check(edvr::engineVelocityKeepOwnVs(h.context, boundVs.Get(), nullptr) == keep, "life: the keep-own variant is made once and kept");
+        h.check(!edvr::engineVelocityKeepOwnVs(h.context, nullptr, &why) && why, "life: no vertex shader, no keep-own variant");
         edvr::engineVelocityBeforeDraw(h.context, false);   // a draw into something that is not an eye
         bound.Reset();
         h.context->PSGetShader(&bound, nullptr, nullptr);
@@ -1570,6 +1585,15 @@ inline void run(const Harness& h) {
                 g.ctx->PSGetShaderResources(3, 1, &bound);
                 if (!(bound && bound.Get() != sentinel.Get())) std::printf("  VR overlay lifecycle: overlay draw #%d has no private t3 (bound %p, game %p)\n", eyeOverlayNo, static_cast<void*>(bound.Get()), static_cast<void*>(sentinel.Get()));
                 h.check(bound && bound.Get() != sentinel.Get(), "VR overlay lifecycle: the guarded pixel shader has the private snapshot at t3");
+                if (eyeOverlayNo == 1) {
+                    // diag.hull_layer = separate (TEMPORARY): the guarded decal substitute has its own own-discard variant.
+                    ComPtr<ID3D11PixelShader> guarded;
+                    g.ctx->PSGetShader(&guarded, nullptr, nullptr);
+                    const char* why = nullptr;
+                    ID3D11PixelShader* own = edvr::engineVelocityOwnDiscardPs(g.ctx, guarded.Get(), &why);
+                    if (!own) std::printf("  VR overlay lifecycle: no own-discard variant: %s\n", why ? why : "?");
+                    h.check(own && own != guarded.Get() && own != overlayPs.Get(), "VR overlay lifecycle: the guarded decal substitute has an own-discard variant");
+                }
                 g.ctx->DrawInstanced(4, 1, 0, 0);
             };
             auto eyeUnderlay = [&] {

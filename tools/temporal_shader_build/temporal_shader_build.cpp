@@ -38,6 +38,9 @@
 #include "../../src/d3d11/stellar_coverage.h"
 #include "../../src/d3d11/supercruise_bars_shader.h"
 #include "../../src/d3d11/sky_ring_shader.h"          // the sky ring (TEMPORARY, diag.sky_ring)
+#include "../../src/d3d11/framegen_shadow_shader.h"  // the frame-generation shadow scorer (TEMPORARY, fix.frame_generation_shadow)
+#include "../../src/d3d11/framegen_synth_shader.h"   // the frame-generation synthesizer (TEMPORARY, fix.frame_generation_shadow)
+#include "../../src/common/framegen_synth_math.h"    // its constant block
 #include "../../src/openxr/stereo_shader_source.h"
 
 namespace fs = std::filesystem;
@@ -123,6 +126,8 @@ struct LegacyContract {
 #include "fixed_srv_turret_variants.h"
 #include "fixed_galaxy_map_variants.h"
 #include "fixed_cockpit_glass_variants.h"
+#include "fixed_framegen_shadow_variants.h"
+#include "fixed_framegen_synth_variants.h"
 #include "../../src/d3d11/cockpit_glass_core.h"   // the game canopy shader's input signature, which the replacement must carry
 #include "../../src/d3d11/srv_turret_math.h"
 
@@ -358,6 +363,10 @@ static std::vector<Variant> fixedVariants(const std::string& core) {
     variants.insert(variants.end(), galaxyMap.begin(), galaxyMap.end());
     const auto cockpitGlass = cockpitGlassVariants();
     variants.insert(variants.end(), cockpitGlass.begin(), cockpitGlass.end());
+    const auto frameGenShadow = frameGenShadowVariants();
+    variants.insert(variants.end(), frameGenShadow.begin(), frameGenShadow.end());
+    const auto frameGenSynth = frameGenSynthVariants();
+    variants.insert(variants.end(), frameGenSynth.begin(), frameGenSynth.end());
     return variants;
 }
 
@@ -436,11 +445,23 @@ static std::string mapEasuSource() {
 // The map SMAA 1x source for one entry (2026-10-10): the prologue (the SMAA macros, samplers and the metrics constant buffer), then the
 // vendored SMAA.hlsl text (smaa_hlsl_gen.h), then that entry. One source per entry: the three entries reuse register names, which
 // D3DCompile rejects in one unit.
-static std::string mapSmaaSource(const char* entryHlsl) {
+static std::string mapSmaaSource(const std::string& entryHlsl) {
     std::string out = edvr::kMapSmaaPrologueHlsl;
     for (const char* const* c = edvr::kSmaaChunks; *c; ++c) out += *c;
     out += entryHlsl;
     return out;
+}
+
+// The HUD layer SMAA's tiled entries (ui_layer_smaa_shader.h, 2026-11-11), each over the text of the full entry it shares declarations with: the edge
+// test and its mark; the tile list; the map's weights and blend declarations with the list reader and the tiled entry; the copy back with the list reader.
+struct UiLayerSmaaTiledTexts {
+    std::string edgesMark, tileList, weights, blend, copyBack;
+};
+static UiLayerSmaaTiledTexts uiLayerSmaaTiledTexts() {
+    const std::string tiles = edvr::kUiLayerSmaaTilesHlsl;
+    return {mapSmaaSource(std::string(edvr::kUiLayerSmaaEdgesHlsl) + edvr::kUiLayerSmaaEdgesMarkHlsl), mapSmaaSource(edvr::kUiLayerSmaaTileListHlsl),
+            mapSmaaSource(edvr::kMapSmaaWeightsHlsl + tiles + edvr::kUiLayerSmaaWeightsTiledHlsl),
+            mapSmaaSource(edvr::kMapSmaaBlendHlsl + tiles + edvr::kUiLayerSmaaBlendTiledHlsl), mapSmaaSource(tiles + edvr::kUiLayerSmaaCopyBackHlsl)};
 }
 
 // The concourse cull's seven fixed shaders (src/d3d11/concourse_pane_shaders.h). Each was a runtime D3DCompile on the render thread at every concourse entry (perf audit
@@ -474,6 +495,7 @@ static int generateTemporal(const Options& o) {
     const std::string mapSmaaWeights = mapSmaaSource(edvr::kMapSmaaWeightsHlsl);
     const std::string mapSmaaBlend = mapSmaaSource(edvr::kMapSmaaBlendHlsl);
     const std::string uiLayerSmaaEdges = mapSmaaSource(edvr::kUiLayerSmaaEdgesHlsl);
+    const UiLayerSmaaTiledTexts uiSmaaTiled = uiLayerSmaaTiledTexts();
     std::vector<Variant> variants = {
         {"kEyeJumpLatticeBytecode", "eye_jump_lattice_cs", "main", nullptr, {}, false, edvr::kEyeJumpLatticeHlsl},
         // F85c: the reticle's hit depth (reticle_depth_shader.h): one thread marches the aim line through an eye's scene depth. Its own source, entry "main".
@@ -524,6 +546,12 @@ static int generateTemporal(const Options& o) {
         // The HUD layer's edge smoothing (ui_layer_smaa_shader.h): the one pass that is not the map's, SMAA's colour edge test over four channels. Its
         // weights and blend are kFlatMapSmaaWeightsBytecode and kFlatMapSmaaBlendBytecode above (plain SMAA, no colour transform).
         {"kUiLayerSmaaEdgesBytecode", "ui_layer_smaa_edges_cs", "uiSmaaEdges", nullptr, {}, false, uiLayerSmaaEdges.c_str()},
+        // Its tiled path (2026-11-11): the edges with the tile marks, the tile list, and the weights, blend and copy back over the listed tiles.
+        {"kUiLayerSmaaEdgesMarkBytecode", "ui_layer_smaa_edges_mark_cs", "uiSmaaEdgesMark", nullptr, {}, false, uiSmaaTiled.edgesMark.c_str()},
+        {"kUiLayerSmaaTileListBytecode", "ui_layer_smaa_tile_list_cs", "uiSmaaTileList", nullptr, {}, false, uiSmaaTiled.tileList.c_str()},
+        {"kUiLayerSmaaWeightsTiledBytecode", "ui_layer_smaa_weights_tiled_cs", "uiSmaaWeightsTiled", nullptr, {}, false, uiSmaaTiled.weights.c_str()},
+        {"kUiLayerSmaaBlendTiledBytecode", "ui_layer_smaa_blend_tiled_cs", "uiSmaaBlendTiled", nullptr, {}, false, uiSmaaTiled.blend.c_str()},
+        {"kUiLayerSmaaCopyBackBytecode", "ui_layer_smaa_copy_back_cs", "uiSmaaCopyBack", nullptr, {}, false, uiSmaaTiled.copyBack.c_str()},
         // The HDR route's pixel-shader half (section 81): the result goes back into the game's HDR target, a render
         // target, so the finish and the spatial recovery are draws: one triangle vertex shader and two pixel shaders.
         {"kFlatMonoHdrVsBytecode", "flat_mono_hdr_vs", "hdrVs", nullptr, {}, true, nullptr, "vs_5_0"},
@@ -669,8 +697,8 @@ static void selfTest() {
     coreLegacy.insert(coreLegacy.end(), originalCore.begin(), originalCore.end());
     coreLegacy.insert(coreLegacy.end(), originalExtra.begin(), originalExtra.end());
     auto coreFixed = fixedVariants(extractCore(edvr::kTemporalCsHlsl));
-    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 107 && coreLegacy.size() + 60 == coreFixed.size(),
-          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes, the SRV turret HUD's eleven geometry shaders, the VR maps' twelve (five transcribed vertex shaders, the probe's vertex and pixel shader, the sprites' depth issue's two pixel shaders, the System Map's marker vertex shader and the cut-out's vertex and pixel shader) and the legacy cockpit glass's three pixel shaders (intact, ice overlay, condensation overlay) are registered");
+    check(originalCore.size() == 28 && originalExtra.size() == 12 && coreFixed.size() == 120 && coreLegacy.size() + 73 == coreFixed.size(),
+          "all original fixed shader contracts, three bounded diagnostics, six flat foreground shaders, the supercruise bars' geometry shader, the foreground map's four sibling-pass compute shaders (donor, fit and the shadow's two), the sky ring's compute shader, the UI layer's in-place composite, the explosion billboards' five facing transcriptions the sharp weapons' two source-pass shaders, the shield ripple's door pass, the HUD bloom feed pass, the star light pass, the visor's axis-centred vertex shader, the desktop window's two draw shaders, the scope lens's three compute passes, the SRV turret HUD's eleven geometry shaders, the VR maps' twelve (five transcribed vertex shaders, the probe's vertex and pixel shader, the sprites' depth issue's two pixel shaders, the System Map's marker vertex shader and the cut-out's vertex and pixel shader) the legacy cockpit glass's three pixel shaders (intact, ice overlay, condensation overlay) the frame-generation shadow scorer's five compute entries and the frame-generation synthesizer's eight (splat, source, resolve, holes, resample, luma, score, and Phase 2.3b's finish) are registered");
     for(size_t i=0;i<coreFixed.size();++i)for(size_t j=0;j<i;++j)
         check(std::strcmp(coreFixed[i].symbol,coreFixed[j].symbol)!=0,"generated shader symbols do not collide");
     using ReflectFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, REFIID, void**);
@@ -1444,6 +1472,110 @@ static void selfTest() {
         }
     }
 
+    // The frame-generation shadow scorer (src/d3d11/framegen_shadow_shader.h): five entries of one text, the carry functions cut from kTemporalCsHlsl and the scorer's own.
+    // Held to the symbols, the source name, the entries, the profile, the text (the carry region is in it, once, and is the pass's text byte for byte), the 8x8 group each
+    // is dispatched with, and the bindings each reads at the slots src/d3d11/framegen_shadow.cpp sets them at.
+    {
+        struct Binding { const char* name; D3D_SHADER_INPUT_TYPE type; UINT slot; };
+        struct ShadowContract { const char* symbol; const char* entry; std::vector<Binding> bindings; };
+        const std::vector<ShadowContract> contracts = {
+            {"kFrameGenShadowCaptureBytecode", "fgShadowCapture", {{"Out", D3D_SIT_TEXTURE, 0}, {"Depth", D3D_SIT_TEXTURE, 1}, {"LumaOut", D3D_SIT_UAV_RWTYPED, 0}, {"DepthOut", D3D_SIT_UAV_RWTYPED, 1}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenShadowClearBytecode", "fgShadowClear", {{"Key", D3D_SIT_UAV_RWTYPED, 2}, {"Stats", D3D_SIT_UAV_RWSTRUCTURED, 3}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenShadowSplatBytecode", "fgShadowSplat", {{"DepthA", D3D_SIT_TEXTURE, 3}, {"Key", D3D_SIT_UAV_RWTYPED, 2}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenShadowScoreBytecode", "fgShadowScore", {{"LumaA", D3D_SIT_TEXTURE, 2}, {"LumaB", D3D_SIT_TEXTURE, 4}, {"Key", D3D_SIT_UAV_RWTYPED, 2}, {"Stats", D3D_SIT_UAV_RWSTRUCTURED, 3}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenShadowScoreBBytecode", "fgShadowScoreB", {{"LumaA", D3D_SIT_TEXTURE, 2}, {"LumaB", D3D_SIT_TEXTURE, 4}, {"Mv", D3D_SIT_TEXTURE, 5}, {"DepthB", D3D_SIT_TEXTURE, 6}, {"Stats", D3D_SIT_UAV_RWSTRUCTURED, 3}, {"P", D3D_SIT_CBUFFER, 0}}},
+        };
+        const std::string& text = edvr::frameGenShadowShaderSource();
+        const std::string carry = edvr::frameGenCarryText();
+        check(carry.size() > 200 && text.compare(0, carry.size(), carry) == 0 && text.find(edvr::kFrameGenShadowCs) == carry.size() &&
+              std::string(edvr::kTemporalCsHlsl).find(carry) != std::string::npos,
+              "the scorer's text is the pass's carry region byte for byte, then its own entries");
+        for (size_t v = 0; v < contracts.size(); ++v) {
+            auto& shader = coreFixed[coreLegacy.size() + 60 + v];
+            const ShadowContract& want = contracts[v];
+            check(!std::strcmp(shader.symbol, want.symbol) && !std::strcmp(shader.sourceName, "framegen shadow") && !std::strcmp(shader.entry, want.entry) &&
+                  !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == text.c_str() && shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each frame-generation shadow entry has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each frame-generation shadow entry compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()));
+                UINT x = 0, y = 0, z = 0;
+                if (reflection) reflection->GetThreadGroupSize(&x, &y, &z);
+                check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) && D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_COMPUTE_SHADER &&
+                      D3D11_SHVER_GET_MAJOR(desc.Version) == 5 && x == 8 && y == 8 && z == 1,
+                      "each frame-generation shadow entry reflects as a Shader Model 5 compute shader in the 8x8 group it is dispatched with");
+                bool bound = reflection != nullptr;
+                for (const Binding& b : want.bindings) {
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    bound = bound && SUCCEEDED(reflection->GetResourceBindingDescByName(b.name, &bind)) && bind.Type == b.type && bind.BindPoint == b.slot && bind.BindCount == 1;
+                }
+                D3D11_SHADER_BUFFER_DESC bufferDesc{};
+                ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("P") : nullptr;
+                check(bound && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == sizeof(edvr::FrameGenShadowCb) && desc.BoundResources == want.bindings.size(),
+                      "each frame-generation shadow entry keeps its inputs, outputs and the 368-byte parameter block at the slots the module sets them at, and binds nothing else");
+            }
+        }
+    }
+
+    // The frame-generation synthesizer (src/d3d11/framegen_synth_shader.h): seven entries of one text, the carry functions cut from kTemporalCsHlsl and the synthesizer's own.
+    // Held as the scorer is: the symbols, the source name, the entries, the profile, the text (the carry region is in it, once, byte for byte), the 8x8 group each is dispatched
+    // with, the bindings each reads at the slots src/d3d11/framegen_synth.cpp sets them at (the resample's clamped sampler at s0 among them), and the 224-byte parameter block.
+    {
+        struct Binding { const char* name; D3D_SHADER_INPUT_TYPE type; UINT slot; };
+        struct SynthContract { const char* symbol; const char* entry; std::vector<Binding> bindings; };
+        const std::vector<SynthContract> contracts = {
+            {"kFrameGenSynthSplatBytecode", "fgSynSplat", {{"Depth", D3D_SIT_TEXTURE, 1}, {"Mv", D3D_SIT_TEXTURE, 2}, {"Key", D3D_SIT_UAV_RWTYPED, 1}, {"ReadOut", D3D_SIT_UAV_RWTYPED, 3}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenSynthSrcBytecode", "fgSynSrc", {{"Depth", D3D_SIT_TEXTURE, 1}, {"Mv", D3D_SIT_TEXTURE, 2}, {"KeyT", D3D_SIT_TEXTURE, 4}, {"ReadOut", D3D_SIT_UAV_RWTYPED, 3}, {"Stats", D3D_SIT_UAV_RWSTRUCTURED, 5}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenSynthResolveBytecode", "fgSynResolve", {{"KeyT", D3D_SIT_TEXTURE, 4}, {"Holes", D3D_SIT_UAV_RWSTRUCTURED, 0}, {"ReadOut", D3D_SIT_UAV_RWTYPED, 3}, {"Stats", D3D_SIT_UAV_RWSTRUCTURED, 5}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenSynthHolesBytecode", "fgSynHoles", {{"Depth", D3D_SIT_TEXTURE, 1}, {"Mv", D3D_SIT_TEXTURE, 2}, {"KeyT", D3D_SIT_TEXTURE, 4}, {"Holes", D3D_SIT_UAV_RWSTRUCTURED, 0}, {"ReadOut", D3D_SIT_UAV_RWTYPED, 3}, {"Stats", D3D_SIT_UAV_RWSTRUCTURED, 5}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenSynthResampleBytecode", "fgSynResample", {{"Out", D3D_SIT_TEXTURE, 0}, {"ReadT", D3D_SIT_TEXTURE, 6}, {"SOut", D3D_SIT_UAV_RWTYPED, 4}, {"LinClamp", D3D_SIT_SAMPLER, 0}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenSynthLumaBytecode", "fgSynLuma", {{"Out", D3D_SIT_TEXTURE, 0}, {"Depth", D3D_SIT_TEXTURE, 1}, {"SIn", D3D_SIT_TEXTURE, 7}, {"SLumaOut", D3D_SIT_UAV_RWTYPED, 6}, {"BInfoOut", D3D_SIT_UAV_RWTYPED, 7}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenSynthScoreBytecode", "fgSynScore", {{"Out", D3D_SIT_TEXTURE, 0}, {"SLumaIn", D3D_SIT_TEXTURE, 8}, {"BInfoIn", D3D_SIT_TEXTURE, 9}, {"Stats", D3D_SIT_UAV_RWSTRUCTURED, 5}, {"P", D3D_SIT_CBUFFER, 0}}},
+            {"kFrameGenSynthFinishBytecode", "fgSynFinish", {{"FinFrame", D3D_SIT_TEXTURE, 3}, {"FinLayer", D3D_SIT_TEXTURE, 5}, {"FinMult", D3D_SIT_TEXTURE, 10}, {"FinOut", D3D_SIT_UAV_RWTYPED, 2}, {"P", D3D_SIT_CBUFFER, 0}}},
+        };
+        const std::string& text = edvr::frameGenSynthShaderSource();
+        const std::string carry = edvr::frameGenCarryText();
+        check(carry.size() > 200 && text.compare(0, carry.size(), carry) == 0 && text.find(edvr::kFrameGenSynthCs) == carry.size() &&
+              std::string(edvr::kTemporalCsHlsl).find(carry) != std::string::npos &&
+              text.find("#define FG_USE_F 1") != std::string::npos && text.find("#define FG_REMOVE_HEAD 1") != std::string::npos &&
+              text.find("#define FG_GUARD 1") != std::string::npos && text.find("#define FG_FILL_FAR 1") != std::string::npos &&
+              text.find("#define FG_TURN 1") != std::string::npos && text.find("#define FG_TURN_SIGN 1") != std::string::npos &&
+              text.find("#define FG_SHARP 1") != std::string::npos,
+              "the synthesizer's text is the pass's carry region byte for byte, then its own entries, with the rig's seven checked mutation points all on");
+        for (size_t v = 0; v < contracts.size(); ++v) {
+            auto& shader = coreFixed[coreLegacy.size() + 65 + v];
+            const SynthContract& want = contracts[v];
+            check(!std::strcmp(shader.symbol, want.symbol) && !std::strcmp(shader.sourceName, "framegen synth") && !std::strcmp(shader.entry, want.entry) &&
+                  !std::strcmp(shader.profile, "cs_5_0") && shader.alternate == text.c_str() && shader.macros == nullptr && !shader.flags1 && !shader.flags2,
+                  "each frame-generation synthesizer entry has its distinct symbol and exact source/stage contract");
+            check(compile(compiler.fn, shader.alternate, shader, true) && shader.bytes.size() > 4 && !std::memcmp(shader.bytes.data(), "DXBC", 4),
+                  "each frame-generation synthesizer entry compiles to fixed DXBC");
+            if (reflect && !shader.bytes.empty()) {
+                ComPtr<ID3D11ShaderReflection> reflection;
+                D3D11_SHADER_DESC desc{};
+                const HRESULT hr = reflect(shader.bytes.data(), shader.bytes.size(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()));
+                UINT x = 0, y = 0, z = 0;
+                if (reflection) reflection->GetThreadGroupSize(&x, &y, &z);
+                const bool holes = !std::strcmp(want.entry, "fgSynHoles");   // one thread per listed hole: 64x1 groups
+                check(SUCCEEDED(hr) && reflection && SUCCEEDED(reflection->GetDesc(&desc)) && D3D11_SHVER_GET_TYPE(desc.Version) == D3D11_SHVER_COMPUTE_SHADER &&
+                      D3D11_SHVER_GET_MAJOR(desc.Version) == 5 && x == (holes ? 64u : 8u) && y == (holes ? 1u : 8u) && z == 1,
+                      "each frame-generation synthesizer entry reflects as a Shader Model 5 compute shader in the group it is dispatched with (8x8; the hole pass 64x1)");
+                bool bound = reflection != nullptr;
+                for (const Binding& b : want.bindings) {
+                    D3D11_SHADER_INPUT_BIND_DESC bind{};
+                    bound = bound && SUCCEEDED(reflection->GetResourceBindingDescByName(b.name, &bind)) && bind.Type == b.type && bind.BindPoint == b.slot && bind.BindCount == 1;
+                }
+                D3D11_SHADER_BUFFER_DESC bufferDesc{};
+                ID3D11ShaderReflectionConstantBuffer* cbuffer = reflection ? reflection->GetConstantBufferByName("P") : nullptr;
+                check(bound && cbuffer && SUCCEEDED(cbuffer->GetDesc(&bufferDesc)) && bufferDesc.Size == sizeof(edvr::FrameGenSynthCb) && desc.BoundResources == want.bindings.size(),
+                      "each frame-generation synthesizer entry keeps its inputs, outputs and the 224-byte parameter block at the slots the module sets them at, and binds nothing else");
+            }
+        }
+    }
+
     // The native runtime's stereo shaders (src/openxr/stereo_shader_source.h): four variants from two texts, held to the four D3DCompile calls they replace. The
     // contracts below are written independently of stereoVariants(): the source names, entries, profiles and flag word of src/openxr/d3d11_stereo.cpp at
     // origin/main 069ebee4, and the FNV-1a64 hash of each text as it stood there (the raw string between R"( and )"). A changed text, name, entry, profile or flag word
@@ -1582,6 +1714,15 @@ static void selfTest() {
             const std::string source = mapSmaaSource(s.text);
             Variant mono{"kMapSmaaSelfTest", "flat_map_smaa_self_test", s.entry, nullptr, {}, false, source.c_str()};
             check(compile(compiler.fn, source.c_str(), mono), "production map SMAA shader compilation");
+        }
+        // The HUD layer SMAA's tiled entries, each over its assembled text.
+        const UiLayerSmaaTiledTexts tiled = uiLayerSmaaTiledTexts();
+        const struct { const char* entry; const std::string* text; } tiledEntries[] = {
+            {"uiSmaaEdgesMark", &tiled.edgesMark}, {"uiSmaaTileList", &tiled.tileList}, {"uiSmaaWeightsTiled", &tiled.weights},
+            {"uiSmaaBlendTiled", &tiled.blend}, {"uiSmaaCopyBack", &tiled.copyBack}};
+        for (const auto& s : tiledEntries) {
+            Variant mono{"kMapSmaaSelfTest", "ui_layer_smaa_tiled_self_test", s.entry, nullptr, {}, false, s.text->c_str()};
+            check(compile(compiler.fn, s.text->c_str(), mono), "production HUD layer SMAA tiled shader compilation");
         }
     }
     // The HDR route's three graphics entry points, each under its own profile.

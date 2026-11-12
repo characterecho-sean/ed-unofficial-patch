@@ -27,13 +27,15 @@ enum class ReissueCaller : uint8_t {
     UiLayerSecond,   // uiLayerSecondIssues: the multiply and the write-back
     SplashDim,       // the splash screen's dim
     FssReveal,       // the FSS reveal fix's replay of the first downsample (fss_reveal_replay.h)
+    HullLayer,       // diag.hull_layer (TEMPORARY): the own-ship block and three lighting stages into private targets (hull_layer.h)
     Count
 };
 constexpr size_t kReissueCallers = static_cast<size_t>(ReissueCaller::Count);
 
 inline const char* reissueCallerName(size_t c) {
     static const char* const names[kReissueCallers] = {"screen_motion", "screen_motion_ui", "weapon_motion", "panel_curve", "loader_panel", "quad_split", "flat_ui",
-                                                       "ui_depth", "star_glow", "blend_probe", "crisp_hud", "tonemap", "world_screen", "ui_layer_second", "splash_dim", "fss_reveal"};
+                                                       "ui_depth", "star_glow", "blend_probe", "crisp_hud", "tonemap", "world_screen", "ui_layer_second", "splash_dim", "fss_reveal",
+                                                       "hull_layer"};
     return c < kReissueCallers ? names[c] : "unknown";
 }
 
