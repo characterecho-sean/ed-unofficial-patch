@@ -203,8 +203,6 @@ struct FgDescs {
     ffxCreateBackendDX12Desc backend{};
     ffxCreateContextDescFrameGenerationVersion version{};
     ffxOverrideVersion overrideVersion{};
-    ffxCreateContextDescFrameGenerationHudless hudless{};
-    bool useHudless = false;
 };
 
 struct Pending {
@@ -282,6 +280,7 @@ struct Session {
     uint32_t presenterFlags = 0;
     DXGI_FORMAT presenterFormat = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT colourFormat = DXGI_FORMAT_UNKNOWN;
+    FrameGenColourContract colourContract{};
     double dispatchGpuMs = -1;
     double gpuSamples[64]{};
     unsigned gpuCount = 0;
@@ -704,14 +703,21 @@ bool queryVersion(Session& s) {
 }
 
 bool chainCreate(Session& s, FgDescs& d, uint32_t width, uint32_t height, uint32_t maxW, uint32_t maxH,
-                 DXGI_FORMAT back, DXGI_FORMAT hudless, bool withHudless) {
+                 DXGI_FORMAT presenter, DXGI_FORMAT colour) {
     d = {};
-    d.useHudless = withHudless;
+    const FrameGenColourContract contract = frameGenColourContract(static_cast<uint32_t>(colour),
+                                                                    static_cast<uint32_t>(presenter));
+    s.colourContract = contract;
     d.create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
     d.create.flags = FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED | FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE;
+    if (contract.highDynamicRange)
+        d.create.flags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
     d.create.displaySize = FfxApiDimensions2D{width, height};
     d.create.maxRenderSize = FfxApiDimensions2D{maxW, maxH};
-    d.create.backBufferFormat = ffxApiGetSurfaceFormatDX12(back);
+    // The presentation source is the copied colour when that colour is the HUD-less radiance.
+    // The formats match, so the different-format HUD-less create descriptor stays unlinked.
+    const DXGI_FORMAT backFormat = contract.backBufferIsColour ? colour : presenter;
+    d.create.backBufferFormat = ffxApiGetSurfaceFormatDX12(backFormat);
     d.backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
     d.backend.device = s.d12.Get();
     d.version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_VERSION;
@@ -721,11 +727,6 @@ bool chainCreate(Session& s, FgDescs& d, uint32_t width, uint32_t height, uint32
     d.create.header.pNext = &d.backend.header;
     d.backend.header.pNext = &d.version.header;
     d.version.header.pNext = &d.overrideVersion.header;
-    if (withHudless) {
-        d.hudless.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION_HUDLESS;
-        d.hudless.hudlessBackBufferFormat = ffxApiGetSurfaceFormatDX12(hudless);
-        d.overrideVersion.header.pNext = &d.hudless.header;
-    }
     ffxContext created = nullptr;
     const ffxReturnCode_t rc = s.api.create(&created, &d.create.header, nullptr);
     if (rc != FFX_API_RETURN_OK || !created) {
@@ -746,6 +747,8 @@ bool configureFg(Session& s, uint64_t frameId, uint32_t width, uint32_t height, 
     desc.frameID = frameId;
     desc.allowAsyncWorkloads = false;
     desc.onlyPresentGenerated = false;
+    if (s.colourContract.bindHudlessColor && s.colour.d12)
+        desc.HUDLessColor = ffxApiGetResourceDX12(s.colour.d12.Get(), FFX_API_RESOURCE_STATE_COMPUTE_READ, 0);
     (void)reset;
     return s.api.configure(&s.context, &desc.header) == FFX_API_RETURN_OK;
 }
@@ -812,6 +815,7 @@ bool recordDispatch(Session& s, const DispatchIn& in) {
         return false;
     }
 
+    const FrameGenColourContract& contract = s.colourContract;
     ffxDispatchDescFrameGeneration generate{};
     generate.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION;
     generate.commandList = in.list;
@@ -820,9 +824,9 @@ bool recordDispatch(Session& s, const DispatchIn& in) {
                                                 FFX_API_RESOURCE_USAGE_UAV);
     generate.numGeneratedFrames = 1;
     generate.reset = in.reset;
-    generate.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
-    generate.minMaxLuminance[0] = 0.0f;
-    generate.minMaxLuminance[1] = 1.0f;
+    generate.backbufferTransferFunction = static_cast<uint32_t>(contract.transfer);
+    generate.minMaxLuminance[0] = contract.minLuminance;
+    generate.minMaxLuminance[1] = contract.maxLuminance;
     generate.generationRect = FfxApiRect2D{0, 0, static_cast<int32_t>(in.outW), static_cast<int32_t>(in.outH)};
     generate.frameID = in.frameId;
     const ffxReturnCode_t generated = s.api.dispatch(&s.context, &generate.header);
@@ -936,7 +940,7 @@ bool runProbe(Session& s) {
     }
     FgDescs descs;
     if (!chainCreate(s, descs, kProbeSize, kProbeSize, kProbeSize, kProbeSize, DXGI_FORMAT_R8G8B8A8_UNORM,
-                     DXGI_FORMAT_R8G8B8A8_UNORM, false)) {
+                     DXGI_FORMAT_R8G8B8A8_UNORM)) {
         failRejected();
         return false;
     }
@@ -1033,6 +1037,15 @@ bool productionFormat(DXGI_FORMAT format) {
     }
 }
 
+static_assert(kFrameGenR11G11B10 == DXGI_FORMAT_R11G11B10_FLOAT, "scene hdr format");
+static_assert(kFrameGenR8G8B8A8Unorm == DXGI_FORMAT_R8G8B8A8_UNORM, "8-bit presenter format");
+static_assert(kFrameGenB8G8R8A8Unorm == DXGI_FORMAT_B8G8R8A8_UNORM, "bgra presenter format");
+static_assert(static_cast<uint32_t>(FrameGenTransfer::Srgb) == FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB,
+              "srgb transfer");
+static_assert(static_cast<uint32_t>(FrameGenTransfer::Pq) == FFX_API_BACKBUFFER_TRANSFER_FUNCTION_PQ, "pq transfer");
+static_assert(static_cast<uint32_t>(FrameGenTransfer::ScRgb) == FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SCRGB,
+              "scrgb transfer");
+
 void logReady(Session& s) {
     if (g_boot.ready) return;
     perfMonitorNoteSwapChain(s.presenter.Get());
@@ -1059,16 +1072,21 @@ bool makeRing(Session& s) {
     return true;
 }
 
-void queryMemory(Session& s, DXGI_FORMAT back, DXGI_FORMAT hudless) {
+void queryMemory(Session& s, DXGI_FORMAT presenter, DXGI_FORMAT colour) {
+    const FrameGenColourContract& contract = s.colourContract;
     ffxQueryDescFrameGenerationGetGPUMemoryUsageV2 query{};
     query.header.type = FFX_API_QUERY_DESC_TYPE_FRAMEGENERATION_GPU_MEMORY_USAGE_V2;
     query.device = s.d12.Get();
     query.maxRenderSize = FfxApiDimensions2D{s.maxRenderW, s.maxRenderH};
     query.displaySize = FfxApiDimensions2D{s.displayW, s.displayH};
     query.createFlags = FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED | FFX_FRAMEGENERATION_ENABLE_DEPTH_INFINITE;
+    if (contract.highDynamicRange)
+        query.createFlags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
     query.dispatchFlags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
-    query.backBufferFormat = ffxApiGetSurfaceFormatDX12(back);
-    query.hudlessBackBufferFormat = ffxApiGetSurfaceFormatDX12(hudless);
+    const DXGI_FORMAT described = contract.backBufferIsColour ? colour : presenter;
+    query.backBufferFormat = ffxApiGetSurfaceFormatDX12(described);
+    query.hudlessBackBufferFormat = contract.bindHudlessColor ? ffxApiGetSurfaceFormatDX12(colour)
+                                                              : static_cast<uint32_t>(FFX_API_SURFACE_FORMAT_UNKNOWN);
     FfxApiEffectMemoryUsage usage{};
     query.gpuMemoryUsageFrameGeneration = &usage;
     if (s.api.query(&s.context, &query.header) == FFX_API_RETURN_OK)
@@ -1128,8 +1146,7 @@ bool ensureProduction(Session& s, uint32_t renderW, uint32_t renderH, DXGI_FORMA
     blend.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
     s.d11->CreateTexture2D(&blend, nullptr, s.blendTarget.ReleaseAndGetAddressOf());
     s.descs = new FgDescs;
-    const bool hudless = ffxApiGetSurfaceFormatDX12(colour) != ffxApiGetSurfaceFormatDX12(s.presenterFormat);
-    if (!chainCreate(s, *s.descs, s.displayW, s.displayH, maxW, maxH, s.presenterFormat, colour, hudless)) {
+    if (!chainCreate(s, *s.descs, s.displayW, s.displayH, maxW, maxH, s.presenterFormat, colour)) {
         delete s.descs;
         s.descs = nullptr;
         g_boot.productionFailed = true;
@@ -1138,7 +1155,7 @@ bool ensureProduction(Session& s, uint32_t renderW, uint32_t renderH, DXGI_FORMA
         failProbe(text);
         return false;
     }
-    queryMemory(s, s.presenterFormat, hudless ? colour : DXGI_FORMAT_UNKNOWN);
+    queryMemory(s, s.presenterFormat, colour);
     logReady(s);
     return true;
 }

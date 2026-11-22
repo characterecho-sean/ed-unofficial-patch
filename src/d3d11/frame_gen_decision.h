@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace edvr {
 
@@ -120,6 +121,100 @@ inline FrameGenResolveAction frameGenResolveAction(bool internalHdrRoute, bool h
         return FrameGenResolveAction::SkipMissingInputs;
     // The internal route and the copy route both copy once the three inputs and the size are present.
     return internalHdrRoute ? FrameGenResolveAction::CopyInputs : FrameGenResolveAction::CopyInputs;
+}
+
+// DXGI formats the dispatch contract names. frame_gen.cpp static_asserts these against DXGI_FORMAT.
+constexpr uint32_t kFrameGenR11G11B10 = 26;
+constexpr uint32_t kFrameGenR8G8B8A8Unorm = 28;
+constexpr uint32_t kFrameGenB8G8R8A8Unorm = 87;
+
+// Values match FfxApiBackbufferTransferFunction. frame_gen.cpp static_asserts that.
+enum class FrameGenTransfer { Srgb = 0, Pq = 1, ScRgb = 2 };
+
+// How one dispatch describes the copied colour. The 8-bit copy route and the 64x64 probe stay
+// sRGB with luminance 0 and 1 and do not bind a HUD-less colour. The default flat path is an
+// 8-bit window whose HUD-less image is R11G11B10 scene radiance: that image is the presentation
+// source, so the context is high-dynamic-range, its back-buffer format is the image's format,
+// and configure binds the image as HUD-less colour.
+//
+// The provider converts scRGB with (value - min/80) / ((max - min) / 80). Min 0 and max 80
+// make that the identity, so the interpolator sees the radiance. This is the scRGB reference
+// (1.0 = 80 nits), not a measured display range and not the game's tone curve.
+struct FrameGenColourContract {
+    bool highDynamicRange = false;
+    bool bindHudlessColor = false;
+    bool backBufferIsColour = false;
+    FrameGenTransfer transfer = FrameGenTransfer::Srgb;
+    float minLuminance = 0.0f;
+    float maxLuminance = 1.0f;
+};
+
+inline bool frameGenPresenterIs8Bit(uint32_t presenterFormat) {
+    return presenterFormat == kFrameGenR8G8B8A8Unorm || presenterFormat == kFrameGenB8G8R8A8Unorm;
+}
+
+inline FrameGenColourContract frameGenColourContract(uint32_t colourFormat, uint32_t presenterFormat) {
+    FrameGenColourContract contract;
+    if (colourFormat != kFrameGenR11G11B10 || !frameGenPresenterIs8Bit(presenterFormat)) return contract;
+    contract.highDynamicRange = true;
+    contract.bindHudlessColor = true;
+    contract.backBufferIsColour = true;
+    contract.transfer = FrameGenTransfer::ScRgb;
+    contract.minLuminance = 0.0f;
+    contract.maxLuminance = 80.0f;
+    return contract;
+}
+
+// frame_gen.cpp must describe the HUD-less image through frameGenColourContract. A source that
+// hardcodes an sRGB transfer, or that never binds HUDLessColor, is not that dispatch.
+inline bool frameGenDispatchSourceWired(const char* src) {
+    if (!src) return false;
+    if (std::strstr(src, "frameGenColourContract(") == nullptr) return false;
+    if (std::strstr(src, "FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE") == nullptr) return false;
+    if (std::strstr(src, "HUDLessColor") == nullptr) return false;
+    if (std::strstr(src, "backBufferIsColour") == nullptr) return false;
+    if (std::strstr(src, "backbufferTransferFunction = static_cast<uint32_t>(contract.transfer)") == nullptr)
+        return false;
+    if (std::strstr(src, "minMaxLuminance[0] = contract.minLuminance") == nullptr) return false;
+    if (std::strstr(src, "minMaxLuminance[1] = contract.maxLuminance") == nullptr) return false;
+    if (std::strstr(src, "generate.presentColor = ffxApiGetResourceDX12(s.colour.d12.Get()") == nullptr)
+        return false;
+    if (std::strstr(src, "backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB") != nullptr)
+        return false;
+    return true;
+}
+
+// Reads the graphics DLL source the caller loaded. The twins are the rejected dispatch: a hardcoded
+// sRGB transfer, no colour-contract call, or presentColor with no HUDLessColor.
+inline int frameGenDispatchWiringSelfTest(const char* src) {
+    int failed = 0;
+    auto expect = [&](bool cond, const char* name) {
+        std::printf("frame_gen_dispatch: %s %s\n", name, cond ? "ok" : "FAIL");
+        if (!cond) ++failed;
+    };
+    expect(frameGenDispatchSourceWired(src), "dispatch interpolates the hudless image as the presentation source");
+    if (!src) {
+        std::printf("frame_gen_dispatch: %s\n", failed ? "FAIL" : "OK");
+        return failed;
+    }
+    const std::string text(src);
+    const std::string srgbTwin =
+        text + "\ngenerate.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;\n";
+    expect(!frameGenDispatchSourceWired(srgbTwin.c_str()), "twin: a hardcoded sRGB transfer fails the dispatch check");
+    std::string stripped = text;
+    const std::string call = "frameGenColourContract(";
+    const size_t at = stripped.find(call);
+    if (at != std::string::npos) stripped.erase(at, call.size());
+    expect(at != std::string::npos && !frameGenDispatchSourceWired(stripped.c_str()),
+           "twin: dispatch without the colour contract fails");
+    std::string noHudless = text;
+    const std::string hudless = "HUDLessColor";
+    const size_t hudAt = noHudless.find(hudless);
+    if (hudAt != std::string::npos) noHudless.erase(hudAt, hudless.size());
+    expect(hudAt != std::string::npos && !frameGenDispatchSourceWired(noHudless.c_str()),
+           "twin: presentColor alone, with no HUDLessColor, fails the dispatch check");
+    std::printf("frame_gen_dispatch: %s\n", failed ? "FAIL" : "OK");
+    return failed;
 }
 
 // Present permission for one frame. The internal HDR route is not an extra block: an 8-bit window
@@ -257,6 +352,26 @@ inline int frameGenDecisionSelfTest() {
     expect(!frameGenPresentAllowsGenerated(hdrRoute, true), "no luminance range does not present");
     expect(frameGenHardRefusal(on, scratch, sizeof(scratch)) == nullptr,
            "internal hdr route is not the luminance line");
+
+    // The provider's scRGB conversion. The shipped luminance pair must make it the identity on
+    // a radiance sample above 1, which an sRGB 0..1 range does not.
+    const FrameGenColourContract scene = frameGenColourContract(kFrameGenR11G11B10, kFrameGenR8G8B8A8Unorm);
+    const float radiance = 4.0f;
+    const float span = (scene.maxLuminance - scene.minLuminance) / 80.0f;
+    const float linear = span != 0.0f ? (radiance - scene.minLuminance / 80.0f) / span : 0.0f;
+    expect(scene.highDynamicRange && scene.bindHudlessColor && scene.backBufferIsColour,
+           "internal hdr route dispatch binds the hudless image");
+    expect(scene.transfer == FrameGenTransfer::ScRgb && linear == radiance,
+           "internal hdr route scRGB range leaves radiance unchanged");
+    const FrameGenColourContract bgra = frameGenColourContract(kFrameGenR11G11B10, kFrameGenB8G8R8A8Unorm);
+    expect(bgra.highDynamicRange && bgra.bindHudlessColor && bgra.backBufferIsColour &&
+               bgra.transfer == scene.transfer && bgra.minLuminance == scene.minLuminance &&
+               bgra.maxLuminance == scene.maxLuminance,
+           "internal hdr route on a BGRA window uses the same contract");
+    const FrameGenColourContract copy = frameGenColourContract(kFrameGenR8G8B8A8Unorm, kFrameGenR8G8B8A8Unorm);
+    expect(!copy.highDynamicRange && !copy.bindHudlessColor && !copy.backBufferIsColour &&
+               copy.transfer == FrameGenTransfer::Srgb && copy.minLuminance == 0.0f && copy.maxLuminance == 1.0f,
+           "8-bit copy route dispatch stays sRGB 0 to 1");
 
     std::printf("frame_gen_decision: %s\n", failed ? "FAIL" : "OK");
     return failed;

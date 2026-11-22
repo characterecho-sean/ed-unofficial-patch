@@ -8,6 +8,6 @@ Flat only, on NVIDIA and AMD, through AMD's signed frame-generation provider. Th
 
 A VR session logs `frame generation: not started: VR session, flat only` and does not create a context or present a generated frame. XeSS Frame Generation keeps its own keys. While XeSS owns the swap chain this row stands down.
 
-The flat session's default resolve is the internal HDR route. On an 8-bit window that route's HUD-less image is the game's R11G11B10 target, and a generated frame is made from it. An fp16 presenting chain logs `frame generation: flat HDR route has no luminance range yet` and presents only the real frame.
+The flat session's default resolve is the internal HDR route. On an 8-bit window that route's HUD-less image is the game's R11G11B10 target. Dispatch interpolates that image: the context is high-dynamic-range, its back-buffer format is the image's format, configure passes the image as HUD-less colour, and the transfer is scRGB at 0 and 80 nits so the provider's conversion leaves the radiance unchanged. The generated frame is written into the 8-bit presenter. An fp16 presenting chain logs `frame generation: flat HDR route has no luminance range yet` and presents only the real frame.
 
 Open: a headset flight has not confirmed the generated frame. A provider that rejects the null-swapchain probe logs `not started` and presents only the real frame.

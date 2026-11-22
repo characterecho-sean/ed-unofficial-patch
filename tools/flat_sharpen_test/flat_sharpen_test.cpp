@@ -1019,6 +1019,7 @@ void frameGenHdrRouteWiring(const char* root) {
     check(frameGenHdrRouteWired(text), "frame gen copies the internal hdr route instead of skipping it");
     const std::string twin = text + "\nif (hdr || !colour) noteSkip(*session, \"hdr frame\");\n";
     check(!frameGenHdrRouteWired(twin), "twin: an hdr skip in frame_gen.cpp fails the wiring check");
+    g_failures += static_cast<unsigned>(edvr::frameGenDispatchWiringSelfTest(text.c_str()));
 }
 
 int main(int argc, char** argv) {
