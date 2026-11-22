@@ -20,6 +20,7 @@
 // fails if the twin passes: a check that cannot fail proves nothing.
 //   flat_sharpen_test --dry-run
 //   flat_sharpen_test --self-test <repo root> <generated folder>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -996,6 +997,30 @@ void swapChainProbeGuard() {
           "the optional interface probe is refused for an unknown method");
 }
 
+// The graphics DLL must call the shipped resolve action. A source that returns on the resolver's
+// hdr flag, or that skips with "hdr frame", fails. The twin appends that old guard and must fail.
+bool frameGenHdrRouteWired(const std::string& src) {
+    return src.find("frameGenResolveAction(") != std::string::npos &&
+           src.find("frameGenPresentAllowsGenerated(") != std::string::npos &&
+           src.find("noteSkip(*session, \"hdr frame\")") == std::string::npos &&
+           src.find("if (hdr ||") == std::string::npos;
+}
+
+void frameGenHdrRouteWiring(const char* root) {
+    const std::string path = std::string(root) + "\\src\\d3d11\\frame_gen.cpp";
+    FILE* file = std::fopen(path.c_str(), "rb");
+    check(file != nullptr, "frame_gen.cpp opens for the hdr-route wiring check");
+    if (!file) return;
+    std::string text;
+    char buf[4096];
+    size_t n = 0;
+    while ((n = std::fread(buf, 1, sizeof(buf), file)) > 0) text.append(buf, n);
+    std::fclose(file);
+    check(frameGenHdrRouteWired(text), "frame gen copies the internal hdr route instead of skipping it");
+    const std::string twin = text + "\nif (hdr || !colour) noteSkip(*session, \"hdr frame\");\n";
+    check(!frameGenHdrRouteWired(twin), "twin: an hdr skip in frame_gen.cpp fails the wiring check");
+}
+
 int main(int argc, char** argv) {
     SetErrorMode(3);
     if (argc >= 2 && !std::strcmp(argv[1], "--dry-run")) {
@@ -1008,6 +1033,7 @@ int main(int argc, char** argv) {
     }
     panelTable(argv[2], argv[3]);
     g_failures += static_cast<unsigned>(edvr::frameGenDecisionSelfTest());
+    frameGenHdrRouteWiring(argv[2]);
     swapChainProbeGuard();
     sharpenRowDim();
     hudAntiAliasingRowDimTable();

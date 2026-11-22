@@ -106,6 +106,31 @@ inline bool frameGenPairCountsApplied(bool generatedPresented, bool waitRan) {
     return generatedPresented && waitRan;
 }
 
+// What one resolver snapshot does before any copy. internalHdrRoute is the flat HDR route: the
+// HUD-less image is the game's R11G11B10 target after the resolve writes back into it. On an
+// 8-bit window that image is copied and may be presented. hdrWithoutLuminance is an fp16
+// presenting chain, which this build has no nit range for: it is not copied and not presented.
+enum class FrameGenResolveAction { CopyInputs, SkipMissingInputs, RefuseNoLuminance };
+
+inline FrameGenResolveAction frameGenResolveAction(bool internalHdrRoute, bool hdrWithoutLuminance,
+                                                    bool haveColour, bool haveDepth, bool haveMotion,
+                                                    bool haveSize) {
+    if (hdrWithoutLuminance) return FrameGenResolveAction::RefuseNoLuminance;
+    if (!haveColour || !haveDepth || !haveMotion || !haveSize)
+        return FrameGenResolveAction::SkipMissingInputs;
+    // The internal route and the copy route both copy once the three inputs and the size are present.
+    return internalHdrRoute ? FrameGenResolveAction::CopyInputs : FrameGenResolveAction::CopyInputs;
+}
+
+// Present permission for one frame. The internal HDR route is not an extra block: an 8-bit window
+// may present when frameGenMayPresentGenerated is true. A chain with no luminance range may not.
+inline bool frameGenPresentAllowsGenerated(const FrameGenFacts& facts, bool internalHdrRoute) {
+    if (frameGenResolveAction(internalHdrRoute, facts.hdrWithoutLuminance, true, true, true, true) !=
+        FrameGenResolveAction::CopyInputs)
+        return false;
+    return frameGenMayPresentGenerated(facts);
+}
+
 inline int frameGenDecisionSelfTest() {
     int failed = 0;
     auto expect = [&](bool cond, const char* name) {
@@ -213,6 +238,25 @@ inline int frameGenDecisionSelfTest() {
     expect(frameGenPairCountsApplied(true, true), "wait ran counts applied");
     expect(!frameGenPairCountsApplied(true, false), "wait missed is not applied");
     expect(!frameGenPairCountsApplied(false, true), "a real-only present is not applied");
+
+    // The default flat resolve is the internal HDR route. Its HUD-less colour is copied. The
+    // one-session line stays the fp16 chain, which has no luminance range.
+    expect(frameGenResolveAction(true, false, true, true, true, true) == FrameGenResolveAction::CopyInputs,
+           "internal hdr route copies hudless colour");
+    expect(frameGenResolveAction(false, false, true, true, true, true) == FrameGenResolveAction::CopyInputs,
+           "copy route copies hudless colour");
+    expect(frameGenResolveAction(true, false, false, true, true, true) == FrameGenResolveAction::SkipMissingInputs,
+           "internal hdr route without colour does not copy");
+    expect(frameGenResolveAction(false, false, true, false, true, true) == FrameGenResolveAction::SkipMissingInputs,
+           "missing depth does not copy");
+    expect(frameGenResolveAction(true, true, true, true, true, true) == FrameGenResolveAction::RefuseNoLuminance,
+           "no luminance range refuses the copy");
+    expect(frameGenPresentAllowsGenerated(on, true), "internal hdr route may present");
+    FrameGenFacts hdrRoute = on;
+    hdrRoute.hdrWithoutLuminance = true;
+    expect(!frameGenPresentAllowsGenerated(hdrRoute, true), "no luminance range does not present");
+    expect(frameGenHardRefusal(on, scratch, sizeof(scratch)) == nullptr,
+           "internal hdr route is not the luminance line");
 
     std::printf("frame_gen_decision: %s\n", failed ? "FAIL" : "OK");
     return failed;

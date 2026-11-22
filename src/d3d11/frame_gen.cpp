@@ -1822,12 +1822,11 @@ HRESULT frameGenPresent(IDXGISwapChain* hidden, UINT syncInterval, UINT flags) {
     }
     if (pending.reset) noteReset(*session);
     else if (!pending.valid) noteSkip(*session, "no scene");
-    else if (pending.hdr) noteSkip(*session, "hdr frame");
     else if (!pending.haveInputs) noteSkip(*session, pending.inputWhy);
     else if (session->exclusive) noteSkip(*session, "exclusive fullscreen");
     else if (!pending.haveBasis) noteSkip(*session, "no world camera basis");
     else if (key == FrameGenKey::Auto && !frameGenAutoEngaged(facts)) logAutoHold(*session, facts);
-    const bool may = frameGenMayPresentGenerated(facts) && session->context && !g_boot.stopped && !pending.hdr;
+    const bool may = frameGenPresentAllowsGenerated(facts, pending.hdr) && session->context && !g_boot.stopped;
     if (may && frameGenAutoEngaged(facts)) {
         if (!g_boot.engaged) {
             g_boot.engaged = true;
@@ -1929,8 +1928,13 @@ void frameGenNoteResolved(ID3D11DeviceContext* ctx, ID3D11Texture2D* colour, ID3
         planesFor(proj, &pending.camNear, &pending.camFar);
         pending.fovY = kFsr4DefaultFovYRadians;
     }
-    if (hdr || !colour || !depth || !motion || !renderW || !renderH) {
-        std::snprintf(pending.inputWhy, sizeof(pending.inputWhy), "no dlOut depth or motion");
+    // hdr is the internal flat HDR route. On an 8-bit window its HUD-less image is copied.
+    // Only a presenting chain with no luminance range refuses the copy.
+    const FrameGenResolveAction action = frameGenResolveAction(
+        hdr, g_boot.hdrNoLuma, colour != nullptr, depth != nullptr, motion != nullptr, renderW != 0 && renderH != 0);
+    if (action != FrameGenResolveAction::CopyInputs) {
+        if (action == FrameGenResolveAction::SkipMissingInputs)
+            std::snprintf(pending.inputWhy, sizeof(pending.inputWhy), "no dlOut depth or motion");
         return;
     }
     D3D11_TEXTURE2D_DESC colourDesc{}, depthDesc{}, motionDesc{};
