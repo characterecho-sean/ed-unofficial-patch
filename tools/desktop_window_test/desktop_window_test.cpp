@@ -1236,15 +1236,22 @@ static void vsyncWiring(const std::string& root) {
     auto wired = [](const std::string& t) {
         const size_t mine = at(t, "if (self != g_state->swapChain) {\n        return g_state->realPresent(self, syncInterval, flags);");
         const size_t decide = at(t, "const UINT presentSync = desktopVsyncPresented(flatProfileNow, syncInterval);");
-        // XeSS frame generation and flat frame generation each take a bridged swap chain's Present with the same decided interval.
-        const size_t call = at(t, "const HRESULT hr = xessFgOwns(self) ? xessFgPresent(self, presentSync, flags)\n"
-                                  "                       : frameGenOwns(self) ? frameGenPresent(self, presentSync, flags)\n"
-                                  "                                        : g_state->realPresent(self, presentSync, flags);");
-        return mine != std::string::npos && decide != std::string::npos && call != std::string::npos && mine < decide && decide < call &&
-               count(t, "g_state->realPresent(self, syncInterval, flags)") == 1 && at(t, "GetCurrentThreadId(), syncInterval, flags, static_cast<int32_t>(hr)};") != std::string::npos;
+        // One bridge presents Elite's chain with the decided interval. Both providers are rows of that table.
+        const size_t call = at(t, "const FrameBridge* presentBridge = frameBridgeOwner(self);\n"
+                                  "    const HRESULT hr = presentBridge ? presentBridge->present(self, presentSync, flags)\n"
+                                  "                                     : g_state->realPresent(self, presentSync, flags);");
+        const size_t xess = at(t, "xessFgPresent,");
+        const size_t fg = at(t, "frameGenPresent,");
+        const size_t start = at(t, "if (presentBridge && presentBridge->frameStart) presentBridge->frameStart();");
+        return mine != std::string::npos && decide != std::string::npos && call != std::string::npos &&
+               xess != std::string::npos && fg != std::string::npos && start != std::string::npos && mine < decide && decide < call &&
+               count(t, "g_state->realPresent(self, syncInterval, flags)") == 1 && count(t, "xessFgFrameStart") == 1 &&
+               at(t, "GetCurrentThreadId(), syncInterval, flags, static_cast<int32_t>(hr)};") != std::string::npos;
     };
     check(!hook.empty() && wired(hook), "vsync wiring: another swapchain's Present is forwarded as asked; Elite's is presented with the decided interval; the trace keeps Elite's value");
     check(!wired(replaced(hook, "g_state->realPresent(self, presentSync, flags);", "g_state->realPresent(self, syncInterval, flags);")), "vsync control: a real Present given Elite's value trips the pin");
+    check(!wired(replaced(hook, "presentBridge->present(self, presentSync, flags)", "presentBridge->present(self, syncInterval, flags)")), "vsync control: Elite's chain presented with the interval it asked for trips the pin");
+    check(!wired(replaced(hook, "frameGenPresent,", "frameGenOwns,")), "vsync control: a bridge table without the flat frame-generation present trips the pin");
     check(!wired(replaced(hook, "GetCurrentThreadId(), syncInterval, flags,", "GetCurrentThreadId(), presentSync, flags,")), "vsync control: a trace that records the presented value trips the pin");
 }
 
