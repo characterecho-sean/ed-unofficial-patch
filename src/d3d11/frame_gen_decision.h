@@ -184,8 +184,33 @@ inline bool frameGenDispatchSourceWired(const char* src) {
     return true;
 }
 
+// startupRefusal must read the flat anti-aliasing mode through requestedTemporalMode. getString
+// answers "off" for fix.temporal_aa in a flat process, which refuses every flat session.
+inline bool frameGenStartupAaWired(const char* src) {
+    if (!src) return false;
+    const char* start = std::strstr(src, "bool startupRefusal() {");
+    if (!start) return false;
+    int depth = 0;
+    const char* end = nullptr;
+    for (const char* p = start; *p; ++p) {
+        if (*p == '{') ++depth;
+        else if (*p == '}') {
+            if (--depth == 0) {
+                end = p;
+                break;
+            }
+        }
+    }
+    if (!end) return false;
+    const std::string body(start, end);
+    if (body.find("Config::get().requestedTemporalMode()") == std::string::npos) return false;
+    if (body.find("getString(\"fix.temporal_aa\"") != std::string::npos) return false;
+    return true;
+}
+
 // Reads the graphics DLL source the caller loaded. The twins are the rejected dispatch: a hardcoded
-// sRGB transfer, no colour-contract call, or presentColor with no HUDLessColor.
+// sRGB transfer, no colour-contract call, or presentColor with no HUDLessColor. The startup twins
+// are the flat-gate read that logged anti-aliasing off while it was on.
 inline int frameGenDispatchWiringSelfTest(const char* src) {
     int failed = 0;
     auto expect = [&](bool cond, const char* name) {
@@ -214,6 +239,25 @@ inline int frameGenDispatchWiringSelfTest(const char* src) {
     expect(hudAt != std::string::npos && !frameGenDispatchSourceWired(noHudless.c_str()),
            "twin: presentColor alone, with no HUDLessColor, fails the dispatch check");
     std::printf("frame_gen_dispatch: %s\n", failed ? "FAIL" : "OK");
+    const int dispatchFailed = failed;
+    auto expectStartup = [&](bool cond, const char* name) {
+        std::printf("frame_gen_startup: %s %s\n", name, cond ? "ok" : "FAIL");
+        if (!cond) ++failed;
+    };
+    expectStartup(frameGenStartupAaWired(src), "startup reads the flat anti-aliasing mode");
+    std::string gated = text;
+    const std::string modeRead = "Config::get().requestedTemporalMode()";
+    const size_t modeAt = gated.find(modeRead);
+    if (modeAt != std::string::npos)
+        gated.replace(modeAt, modeRead.size(), "Config::get().getString(\"fix.temporal_aa\", \"off\")");
+    expectStartup(modeAt != std::string::npos && !frameGenStartupAaWired(gated.c_str()),
+                  "twin: getString for fix.temporal_aa fails the startup check");
+    std::string missing = text;
+    const size_t dropAt = missing.find(modeRead);
+    if (dropAt != std::string::npos) missing.erase(dropAt, modeRead.size());
+    expectStartup(dropAt != std::string::npos && !frameGenStartupAaWired(missing.c_str()),
+                  "twin: startup without the mode read fails");
+    std::printf("frame_gen_startup: %s\n", failed == dispatchFailed ? "OK" : "FAIL");
     return failed;
 }
 

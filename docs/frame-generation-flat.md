@@ -10,4 +10,8 @@ A VR session logs `frame generation: not started: VR session, flat only` and doe
 
 The flat session's default resolve is the internal HDR route. On an 8-bit window that route's HUD-less image is the game's R11G11B10 target. Dispatch interpolates that image: the context is high-dynamic-range, its back-buffer format is the image's format, configure passes the image as HUD-less colour, and the transfer is scRGB at 0 and 80 nits so the provider's conversion leaves the radiance unchanged. The generated frame is written into the 8-bit presenter. An fp16 presenting chain logs `frame generation: flat HDR route has no luminance range yet` and presents only the real frame.
 
+The flat anti-aliasing mode is read with `requestedTemporalMode`. In a flat process `getString` answers off for `fix.temporal_aa`, and the 10:40 Epic flight (`edup_logs\edvr_gfx_20261122_104018`, `v0.23.0-6-g3b9cd978`) logged `frame generation: not started: fix.temporal_aa is off` while DLAA was on.
+
+The bridge is made only while the first swap chain of the process is created, and only when the key is already `on` or `auto`. After that, Present reads the key each frame. A menu change once that chain exists does not create the bridge, and a later chain in the same process is not bridged. The 10:22 Epic flight on the same build installed the Present hook with the key still off and logged no `frame generation:` line.
+
 Open: a headset flight has not confirmed the generated frame. A provider that rejects the null-swapchain probe logs `not started` and presents only the real frame.

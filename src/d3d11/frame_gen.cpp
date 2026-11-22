@@ -124,7 +124,8 @@ bool startupRefusal() {
         logRefusal(facts);
         return true;
     }
-    const std::string aa = Config::get().getString("fix.temporal_aa", "off");
+    // getString answers "off" for this key in a flat process. The mode is the one read the rest of flat uses.
+    const std::string aa = Config::get().requestedTemporalMode();
     std::snprintf(g_boot.temporalMode, sizeof(g_boot.temporalMode), "%s", aa.c_str());
     if (_stricmp(aa.c_str(), "off") == 0) {
         g_boot.blocked = true;
