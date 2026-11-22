@@ -43,6 +43,9 @@ inline constexpr FlatPageRow kFlatPageRows[] = {
     // row dimmed as well while the toggle is off. The tab's order is edvr.ini's: they sit under the DLSS preset row there.
     {"fix", "xess_frame_generation", FlatRowRead::Allowlist},
     {"fix", "xess_generated_frames", FlatRowRead::Allowlist},
+    // NVIDIA and AMD frame generation: flat only (`menu flat_performance`). Dimmed while anti-aliasing is off, or while XeSS Frame
+    // Generation is on (frameGenerationRowDim). A different key from the XeSS rows above.
+    {"fix", "frame_generation", FlatRowRead::Allowlist},
     {"fix", "render_sharpness",  FlatRowRead::Allowlist},
     {"fix", "ui_quality",        FlatRowRead::Allowlist},
     // HUD Anti-Aliasing (2026-10-24), directly under UI quality: flat only. Its `menu flat_performance` token (tools\gen_settings_schema.py) is a page VR's
@@ -174,6 +177,14 @@ inline bool aaDependentRowHidden(const char* key, const char* aaMode, bool fgOn)
     if (std::strcmp(key, "xess_frame_generation") == 0) return !aaModeIs(aaMode, "xess");
     if (std::strcmp(key, "xess_generated_frames") == 0) return !aaModeIs(aaMode, "xess") || !fgOn;
     return false;
+}
+
+// fix.frame_generation, the NVIDIA and AMD row. The page keeps it. It dims, and a change is refused, while anti-aliasing is off
+// (there is no depth or motion) or while XeSS Frame Generation is on (that bridge owns the window when it is up). Not
+// aaDependentRowHidden: that helper hides the XeSS rows unless anti-aliasing is XeSS, and this row is the other key.
+inline bool frameGenerationRowDim(const char* aaMode, bool xessFrameGenerationOn) {
+    if (!aaMode || aaMode[0] == '\0' || aaModeIs(aaMode, "off")) return true;
+    return xessFrameGenerationOn;
 }
 
 // Whether the frames option `frames` (1 = 2x, 2 = 3x, 3 = 4x) can be chosen on this GPU. `maxFrames` is the GPU's maximum generated frames per rendered frame

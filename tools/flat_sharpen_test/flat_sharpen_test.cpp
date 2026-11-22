@@ -481,18 +481,27 @@ void panelTable(const std::string& root, const std::string& gen) {
         const char* const order[][2] = {{"fix", "temporal_aa"}, {"fix", "temporal_aa_model"},
                                         {"fix", "dittosr_sharpness"}, {"fix", "dittosr_frame_weight"}, {"fix", "dittosr_anti_shimmer"}, {"fix", "dittosr_sharpen"},
                                         {"fix", "xess_frame_generation"}, {"fix", "xess_generated_frames"},
+                                        {"fix", "frame_generation"},
                                         {"fix", "render_sharpness"}, {"fix", "ui_quality"},
                                         {"fix", "hud_antialiasing"}, {"fix", "optimized_stations"}, {"fix", "station_window_distance"}, {"fix", "skip_rooms_behind_doors"},
                                         {"menu", "monitor_panel_view"}, {"menu", "fps_overlay_lock"}};
-        bool same = kFlatPageRowCount == 16;
-        for (size_t i = 0; same && i < 16; ++i)
+        bool same = kFlatPageRowCount == 17;
+        for (size_t i = 0; same && i < 17; ++i)
             same = std::strcmp(kFlatPageRows[i].section, order[i][0]) == 0 && std::strcmp(kFlatPageRows[i].key, order[i][1]) == 0;
-        check(same, "the Performance tab has the flat page's sixteen rows in their order (DittoSR's four rows under the DLSS preset, the two XeSS Frame Generation rows under those, HUD Anti-Aliasing directly under UI quality, "
+        check(same, "the Performance tab has the flat page's seventeen rows in their order (DittoSR's four rows under the DLSS preset, the two XeSS Frame Generation rows under those, NVIDIA and AMD frame generation under those, HUD Anti-Aliasing directly under UI quality, "
                     "Window 3D distance directly under Optimized stations, Skip closed rooms under that)");
     }
     // The XeSS Frame Generation rows (2026-11-12): read through the gate. The page omits them until Anti-aliasing is XeSS, and omits the frames row until
     // Frame generation is on (aaDependentRowHidden). A copy still drawn dims. Frames above the GPU's maximum are disabled (every option enabled while the maximum is unknown).
     check(flatProfileReadsKey("fix.xess_frame_generation") && flatProfileReadsKey("fix.xess_generated_frames"), "the flat gate reads both XeSS Frame Generation keys");
+    check(flatProfileReadsKey("fix.frame_generation"), "the flat gate reads fix.frame_generation");
+    check(frameGenerationRowDim("off", false) && frameGenerationRowDim("", false) && frameGenerationRowDim(nullptr, false) &&
+              frameGenerationRowDim("dlss", true) && !frameGenerationRowDim("dlss", false) && !frameGenerationRowDim("xess", false) &&
+              frameGenerationRowDim("xess", true) && !frameGenerationRowDim("fsr", false) && !frameGenerationRowDim("on", false),
+          "NVIDIA and AMD frame generation dims while anti-aliasing is off or XeSS Frame Generation is on, and stays live for every other mode");
+    check(menuCpp.find("frameGenerationRowDim(shownValue(\"fix\", \"temporal_aa\").c_str(), xessFgToggleOn() || xessFgBridged())") != std::string::npos &&
+              menuCpp.find("frameGenerationRowRefused") != std::string::npos,
+          "menu.cpp dims fix.frame_generation from the panel's anti-aliasing and XeSS toggle, and from a bridge that already owns the window");
     check(xessFgToggleRowDim(true, false) && !xessFgToggleRowDim(true, true) && !xessFgToggleRowDim(false, false) && !xessFgToggleRowDim(false, true),
           "the XeSS Frame Generation toggle is dimmed in flat unless the AA mode is XeSS, and never for VR (which has none)");
     check(xessFgFramesRowDim(true, false, true) && xessFgFramesRowDim(true, true, false) && !xessFgFramesRowDim(true, true, true),

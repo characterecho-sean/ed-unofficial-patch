@@ -242,7 +242,8 @@ void SettingsModel::refreshRows() {
         } else {
             // XeSS Frame Generation cannot work under OpenXR: the flat selection's rows only (the settings the VR runtime never reads).
             const std::string vrDotted = std::string(def.section) + "." + def.key;
-            if (vrDotted == "fix.xess_frame_generation" || vrDotted == "fix.xess_generated_frames") continue;
+            if (vrDotted == "fix.xess_frame_generation" || vrDotted == "fix.xess_generated_frames" ||
+                vrDotted == "fix.frame_generation") continue;
         }
         SettingRow row;
         row.def = &def;

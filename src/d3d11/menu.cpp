@@ -625,6 +625,35 @@ bool xessFgRowRefused(const MenuRowDef& d, const char** why) {
     return true;
 }
 
+// fix.frame_generation (NVIDIA and AMD, flat Performance tab). The row stays on the page. It dims while anti-aliasing is off, or while
+// XeSS Frame Generation is on or its bridge already owns the window. The values are the ones the panel shows, plus xessFgBridged, which a
+// menu change cannot clear.
+bool isFrameGenerationRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "frame_generation") == 0;
+}
+
+bool frameGenerationRowDisabled() {
+    return frameGenerationRowDim(shownValue("fix", "temporal_aa").c_str(), xessFgToggleOn() || xessFgBridged());
+}
+
+const char* frameGenerationHint() {
+    if (frameGenerationRowDim(shownValue("fix", "temporal_aa").c_str(), false))
+        return "Needs anti-aliasing: turn it on to use this.";
+    return "XeSS Frame Generation owns the window: this stays off.";
+}
+
+const char* frameGenerationRefusal() {
+    if (frameGenerationRowDim(shownValue("fix", "temporal_aa").c_str(), false))
+        return "Frame generation is inactive: turn anti-aliasing on above first.";
+    return "Frame generation is inactive: XeSS Frame Generation owns the window.";
+}
+
+bool frameGenerationRowRefused(const MenuRowDef& d, const char** why) {
+    if (!isFrameGenerationRow(d) || !frameGenerationRowDisabled()) return false;
+    *why = frameGenerationRefusal();
+    return true;
+}
+
 // The toggle is on but frame generation is not running: either it was never tried this session (it takes effect at the next launch), or it
 // was tried and failed or stopped (xessFgProblem), which a restart alone will not fix. The second wins.
 bool xessFgNeedsRestart() { return xessFgToggleOn() && (!xessFgBridged() || xessFgProblem() != nullptr); }
@@ -2961,11 +2990,13 @@ void buildContent(MenuContent& c) {
             const bool doorsRow = isRoomsBehindDoorsRow(d);
             const bool xessFramesRow = isXessFgFramesRow(d);
             const bool xessToggleRow = isXessFgToggleRow(d);
+            const bool frameGenRow = isFrameGenerationRow(d);
             const bool dittoRow = isDittoRow(d);
             const bool dim = (dlssRow && dlssPresetDisabled()) ||
                              (dittoRow && dittoRowDisabled()) ||
                              (xessFramesRow && xessFgFramesRowDisabled()) ||
                              (xessToggleRow && xessFgToggleRowDisabled()) ||
+                             (frameGenRow && frameGenerationRowDisabled()) ||
                              (sharpenRow && sharpenRowDisabled()) ||
                              (hudAaRow && hudAntiAliasingRowDisabled()) ||
                              (glassDirtRow && cockpitGlassDirtRowDisabled()) ||
@@ -3053,6 +3084,8 @@ void buildContent(MenuContent& c) {
                 snprintf(c.hint, sizeof(c.hint), "%s", stationWindowDistanceHint());
             else if (hi && dim && (xessFramesRow || xessToggleRow))
                 snprintf(c.hint, sizeof(c.hint), "%s", xessFgDimHint(xessFramesRow));
+            else if (hi && dim && frameGenRow)
+                snprintf(c.hint, sizeof(c.hint), "%s", frameGenerationHint());
             else if (hi && dim && dittoRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", dittoRowHint());
             else if (hi && (xessFramesRow || xessToggleRow) && xessFgToggleOn() && xessFgExclusiveFullscreen())
@@ -3623,6 +3656,11 @@ void stepRow(int defIndex, int dir, int mult) {
         g_s.contentDirty = true;
         return;
     }
+    if (const char* why = nullptr; frameGenerationRowRefused(d, &why)) {
+        g_s.lastWrite = why;
+        g_s.contentDirty = true;
+        return;
+    }
     if (isOpenxrRenderScaleRow(d)) {
         // A width for the worn headset, stepped by 100 px on the grid of
         // round hundreds (steppedResolution); the generated row is Text,
@@ -4045,6 +4083,11 @@ void beginEdit(int entryIndex, int defIndex) {
         return;
     }
     if (const char* why = nullptr; xessFgRowRefused(kMenuRows[defIndex], &why)) {
+        s.lastWrite = why;
+        s.contentDirty = true;
+        return;
+    }
+    if (const char* why = nullptr; frameGenerationRowRefused(kMenuRows[defIndex], &why)) {
         s.lastWrite = why;
         s.contentDirty = true;
         return;
@@ -4525,6 +4568,9 @@ void dispatchNav(MenuNav nav, uint64_t now) {
                         s.lastWrite = why;
                         s.contentDirty = true;
                     } else if (const char* why = nullptr; xessFgRowRefused(d, &why)) {
+                        s.lastWrite = why;
+                        s.contentDirty = true;
+                    } else if (const char* why = nullptr; frameGenerationRowRefused(d, &why)) {
                         s.lastWrite = why;
                         s.contentDirty = true;
                     } else if (isStationWindowDistanceRow(d) && stationWindowDistanceRowDisabled()) {

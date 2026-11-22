@@ -118,7 +118,9 @@ void rebuildItems(List* list) {
 
     for (size_t i = 0; i < rows.size(); ++i) {
         if (!matches(rows[i], needle)) continue;
-        if (rows[i].def && aaDependentRowHidden(rows[i].def->key, aaHeld.c_str(), fgOn)) continue;
+        if (rows[i].def && (aaDependentRowHidden(rows[i].def->key, aaHeld.c_str(), fgOn) ||
+                            (std::strcmp(rows[i].def->key, "frame_generation") == 0 &&
+                             frameGenerationRowDim(aaHeld.c_str(), fgOn)))) continue;
         const std::wstring wanted = headingFor(*rows[i].def);
         if (!haveHeading || wanted != heading) {
             heading = wanted;
