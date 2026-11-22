@@ -4,33 +4,41 @@
     python tools/fetch_fsr4.py --verify DIR
     python tools/fetch_fsr4.py --self-test
 
-Downloads the ffx-api headers (loader, types, DX12, upscale), AMD's two signed
-D3D12 runtime DLLs (amd_fidelityfx_loader_dx12.dll, the one the app calls, and
-amd_fidelityfx_upscaler_dx12.dll, the FSR 4.1.1 provider beside it) and the
-SDK licence from AMD's official FidelityFX-SDK repository at one pinned commit
-(tag v2.3.0). Every file is checked against its pinned SHA-256 before it is
-installed. No import library is staged: EDVR loads the loader dynamically.
+Downloads the ffx-api headers (loader, types, DX12, upscale, frame generation)
+and AMD's three signed D3D12 runtime DLLs (amd_fidelityfx_loader_dx12.dll, the
+one the app calls; amd_fidelityfx_upscaler_dx12.dll, the FSR 4.1.1 provider;
+amd_fidelityfx_framegeneration_dx12.dll, the frame-generation provider) and
+the SDK licence from AMD's official FidelityFX-SDK repository at one pinned
+commit (tag v2.3.0). Every file is checked against its pinned SHA-256 before
+it is installed. No import library is staged: EDVR loads the loader
+dynamically. The frame-generation effect version is whatever ffxQuery reports
+at runtime; this pin's header constant is 4.0.1.
 
 The repository stores the DLLs as ordinary git blobs (no Git LFS), so
 raw.githubusercontent.com serves the binaries themselves; the SHA-256 pins
 would refuse an LFS pointer file if that ever changed.
 
-Staged layout (ffx_upscale.h includes "../../api/include/ffx_api.h", so the
-relative structure under include\\FidelityFX is kept exactly):
+Staged layout (ffx_upscale.h and ffx_framegeneration.h include
+"../../api/include/ffx_api.h", and the DX12 frame-generation header includes
+"../../../api/include/dx12/ffx_api_dx12.h", so the relative structure under
+include\\FidelityFX is kept exactly):
 
     include\\FidelityFX\\api\\include\\{ffx_api.h, ffx_api_types.h, ffx_api_loader.h}
     include\\FidelityFX\\api\\include\\dx12\\ffx_api_dx12.h
     include\\FidelityFX\\upscalers\\include\\ffx_upscale.h
-    bin\\amd_fidelityfx_loader_dx12.dll, bin\\amd_fidelityfx_upscaler_dx12.dll
+    include\\FidelityFX\\framegeneration\\include\\{ffx_framegeneration.h, ffx_framegeneration_api_types.h}
+    include\\FidelityFX\\framegeneration\\include\\dx12\\ffx_api_framegeneration_dx12.h
+    bin\\amd_fidelityfx_loader_dx12.dll
+    bin\\amd_fidelityfx_upscaler_dx12.dll
+    bin\\amd_fidelityfx_framegeneration_dx12.dll
     LICENSE.txt                      (the SDK's docs/license.md)
 
 Default destination is %LOCALAPPDATA%\\EDVR\\fsr4-sdk, shared by checkouts;
 pass --dest third_party\\fsr4 for a self-contained checkout. --dry-run is
 strictly read-only. The SDK licence is included in the staged payload; this
-tool does not request or record licence acceptance. The licence opens with a
-binary-only redistribution grant and then lists the signed DLLs under MIT; it
-is ambiguous, so nothing here ships the DLLs in an installer or release
-package (design doc fsr-upscaler-design-2026-09-16.md, decision D8).
+tool does not request or record licence acceptance and does not re-sign the
+DLLs. The installer copies the three signed DLLs and the licence beside the
+game.
 """
 import argparse
 import hashlib
@@ -46,7 +54,9 @@ URL = "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK
 COMMIT = "60f4ea81909200d8542eca14dccb2628b763a9a3"  # FidelityFX SDK v2.3.0 (tag v2.3.0, 2026-06-24)
 SDK_VERSION = "2.3.0"
 RUNTIME_VERSION = "FSR 4.1.1"  # amd_fidelityfx_upscaler_dx12.dll FileVersion 4.1.1.2740; the loader is 2.3.0.2740
-DLLS = ("bin/amd_fidelityfx_loader_dx12.dll", "bin/amd_fidelityfx_upscaler_dx12.dll")
+DLLS = ("bin/amd_fidelityfx_loader_dx12.dll",
+        "bin/amd_fidelityfx_upscaler_dx12.dll",
+        "bin/amd_fidelityfx_framegeneration_dx12.dll")
 FILES = {
     "include/FidelityFX/api/include/ffx_api.h": (
         "Kits/FidelityFX/api/include/ffx_api.h",
@@ -69,6 +79,18 @@ FILES = {
     "bin/amd_fidelityfx_upscaler_dx12.dll": (
         "Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll",
         "d0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46"),
+    "include/FidelityFX/framegeneration/include/ffx_framegeneration.h": (
+        "Kits/FidelityFX/framegeneration/include/ffx_framegeneration.h",
+        "e6c42f8a38aab2c7c4fc6931545a8e5463fdf87349902ec9687d9fe4949a0566"),
+    "include/FidelityFX/framegeneration/include/ffx_framegeneration_api_types.h": (
+        "Kits/FidelityFX/framegeneration/include/ffx_framegeneration_api_types.h",
+        "396596af3df63310674e8036abd2ad0fcd061e61334e7a2c76653a2be3c686b4"),
+    "include/FidelityFX/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h": (
+        "Kits/FidelityFX/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h",
+        "d533810bbd6fd4f87dfa2c1657c1457c7b1597b66345827d375b081d67127f66"),
+    "bin/amd_fidelityfx_framegeneration_dx12.dll": (
+        "Kits/FidelityFX/signedbin/amd_fidelityfx_framegeneration_dx12.dll",
+        "02297beedd285e822d3a64f314cf00faf378dcec0edc47ff0c4dd71b3a8c2f18"),
     "LICENSE.txt": (
         "docs/license.md",
         "6757f2fec461238da6f84f83536ec195e8c036b1773a06f6f34301b9ed8c0963"),
@@ -230,7 +252,7 @@ def self_test():
 
     # The production pins: well formed, one source and one destination per file, the licence staged under
     # its published name, and the include tree laid out the way ffx_upscale.h's own includes need.
-    expect("pins", len(FILES) == 8 and re.fullmatch(r"[0-9a-f]{40}", COMMIT) is not None,
+    expect("pins", len(FILES) == 12 and re.fullmatch(r"[0-9a-f]{40}", COMMIT) is not None,
            "unexpected file count or commit pin")
     expect("pin-digests", all(re.fullmatch(r"[0-9a-f]{64}", digest) for _s, digest in FILES.values()),
            "a pinned digest is not 64 lowercase hex digits")
@@ -239,7 +261,10 @@ def self_test():
     expect("pin-layout", all(rel in FILES for rel in DLLS) and "LICENSE.txt" in FILES and
            "include/FidelityFX/upscalers/include/ffx_upscale.h" in FILES and
            "include/FidelityFX/api/include/ffx_api.h" in FILES and
-           "include/FidelityFX/api/include/dx12/ffx_api_dx12.h" in FILES,
+           "include/FidelityFX/api/include/dx12/ffx_api_dx12.h" in FILES and
+           "include/FidelityFX/framegeneration/include/ffx_framegeneration.h" in FILES and
+           "include/FidelityFX/framegeneration/include/ffx_framegeneration_api_types.h" in FILES and
+           "include/FidelityFX/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h" in FILES,
            "the staged layout lost a file the engine includes")
 
     with tempfile.TemporaryDirectory(prefix="edvr-fetch-fsr4-") as base:
@@ -255,8 +280,11 @@ def self_test():
             code = fetch(dest, downloader=lambda source: by_source[source])
             expect("staging", code == 0 and not verify(dest, quiet=True), "valid fixture did not stage")
             expect("staged-include-tree",
-                   (Path(dest) / "include/FidelityFX/upscalers/include" / "../../api/include/ffx_api.h").is_file(),
-                   "ffx_upscale.h's ../../api/include/ffx_api.h does not resolve in the staged tree")
+                   (Path(dest) / "include/FidelityFX/upscalers/include" / "../../api/include/ffx_api.h").is_file() and
+                   (Path(dest) / "include/FidelityFX/framegeneration/include" / "../../api/include/ffx_api.h").is_file() and
+                   (Path(dest) / "include/FidelityFX/framegeneration/include/dx12" /
+                    "../../../api/include/dx12/ffx_api_dx12.h").is_file(),
+                   "a staged header's relative include does not resolve")
             expect("staged-dlls", all((Path(dest) / rel).is_file() for rel in DLLS), "a runtime DLL was not staged")
             Path(dest, "include/FidelityFX/upscalers/include/ffx_upscale.h").write_bytes(b"corrupt")
             expect("corrupt-header", bool(verify(dest, quiet=True)), "corrupt header passed")

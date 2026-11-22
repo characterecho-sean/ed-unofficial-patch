@@ -589,7 +589,8 @@ REM linked; the headers are the only compile input. EDVR_FSR4_SDK names a copy e
 REM path with the literal value "none" (proving fix.temporal_aa=fsr4's runtime refusal even on a machine that
 REM already has the SDK staged); else the checkout's own third_party\fsr4; else the machine's copy under
 REM %LOCALAPPDATA%\EDVR\fsr4-sdk. The copy is VERIFIED first, and a mismatch fails the build. Without any SDK
-REM the build still succeeds: fsr4_engine.cpp compiles as a refusing stub. The two DLLs and the licence land in
+REM the build still succeeds: fsr4_engine.cpp compiles as a refusing stub. The loader, the upscaler, the
+REM frame-generation provider and the licence land in
 REM %BUILD% for tools\install_edup.py --fsr4, the rig and the release: tools\package_native.py packs them as it packs
 REM XeSS's and REFUSES a release whose build lacks them, and the launcher installs them. They keep AMD's own signature:
 REM nothing in this file signs them (the maintainer's 2026-11-21 reversal of decision D8 in
@@ -610,11 +611,13 @@ if defined FSR4 (
     set FSR4FLAGS=/DEDVR_HAVE_FSR4=1 /I"%FSR4%\include"
     copy /Y "%FSR4%\bin\amd_fidelityfx_loader_dx12.dll" "%BUILD%\amd_fidelityfx_loader_dx12.dll" >nul || exit /b 1
     copy /Y "%FSR4%\bin\amd_fidelityfx_upscaler_dx12.dll" "%BUILD%\amd_fidelityfx_upscaler_dx12.dll" >nul || exit /b 1
+    copy /Y "%FSR4%\bin\amd_fidelityfx_framegeneration_dx12.dll" "%BUILD%\amd_fidelityfx_framegeneration_dx12.dll" >nul || exit /b 1
     copy /Y "%FSR4%\LICENSE.txt" "%BUILD%\AMD-FIDELITYFX-LICENSE.txt" >nul || exit /b 1
     echo [edvr] FSR 4 SDK: %FSR4%
 ) else (
     if exist "%BUILD%\amd_fidelityfx_loader_dx12.dll" del /q "%BUILD%\amd_fidelityfx_loader_dx12.dll"
     if exist "%BUILD%\amd_fidelityfx_upscaler_dx12.dll" del /q "%BUILD%\amd_fidelityfx_upscaler_dx12.dll"
+    if exist "%BUILD%\amd_fidelityfx_framegeneration_dx12.dll" del /q "%BUILD%\amd_fidelityfx_framegeneration_dx12.dll"
     if exist "%BUILD%\AMD-FIDELITYFX-LICENSE.txt" del /q "%BUILD%\AMD-FIDELITYFX-LICENSE.txt"
     if defined FSR4_NONE (
         echo [edvr] EDVR_FSR4_SDK=none: building without FSR 4 on purpose, to prove the no-SDK path.
@@ -731,7 +734,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\mem_tick.cpp" ^
     "src\d3d11\native_menu.cpp" ^
     "src\d3d11\native_temporal.cpp" "src\d3d11\flat_temporal.cpp" "src\d3d11\flat_compute_capture.cpp" "src\d3d11\flat_compute_readback.cpp" ^
-    "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\xess_fg.cpp" "src\d3d11\fsr4_engine.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
+    "src\d3d11\flat_runtime.cpp" "src\d3d11\flat_mono_resolve.cpp" "src\d3d11\xess_engine.cpp" "src\d3d11\xess_fg.cpp" "src\d3d11\fsr4_engine.cpp" "src\d3d11\frame_gen.cpp" "src\d3d11\map_easu.cpp" "src\d3d11\map_smaa.cpp" "src\d3d11\flat_projection_scope.cpp" "src\d3d11\flat_projection_runtime.cpp" ^
     "src\d3d11\flat_camera_producer_probe.cpp" "src\d3d11\flat_camera_inject.cpp" "src\d3d11\flat_stationary_camera_capture.cpp" "src\d3d11\galaxy_map_pointer.cpp" "src\d3d11\galaxy_map_ui.cpp" ^
     "src\d3d11\vr_world_route.cpp" "src\d3d11\vr_world_mips.cpp" "src\d3d11\vr_camera_census.cpp" "src\d3d11\vr_star_glow.cpp" ^
     "src\d3d11\desktop_window.cpp" "src\d3d11\desktop_window_cursor.cpp" ^
@@ -1018,8 +1021,12 @@ if exist "%BUILD%\nvngx_dlss.dll" (
     echo        above says where it looked^). Not a release build.
 )
 if exist "%BUILD%\amd_fidelityfx_upscaler_dx12.dll" (
-    echo [edvr] FSR 4 runtime: staged in build\amd_fidelityfx_*.dll for a dev install only ^(decision D8^);
-    echo        it is NOT in the installer or the packages. python tools\install_edup.py --fsr4 places it.
+    if exist "%BUILD%\amd_fidelityfx_framegeneration_dx12.dll" (
+        echo [edvr] FSR 4 runtime: staged in build\amd_fidelityfx_*.dll. The installer and the packages
+        echo        ship the loader, the upscaler and the frame-generation provider. They keep AMD's signature.
+    ) else (
+        echo [edvr] FSR 4 runtime: the upscaler is staged and the frame-generation provider is not.
+    )
 ) else (
     echo [edvr] FSR 4 runtime: NOT STAGED -- no FSR 4 SDK was found, so fix.temporal_aa=fsr4 refuses.
 )

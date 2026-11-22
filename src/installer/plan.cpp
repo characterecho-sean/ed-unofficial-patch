@@ -456,6 +456,7 @@ const FileBlurb kBlurbs[] = {
     {"xess_ll", "XeSS", "Intel's Xe Low Latency runtime", "for xess_frame_generation", "xess"},
     {"fsr4_loader", "FSR 4", "AMD's FSR 4 runtime", "for temporal_aa = fsr4", nullptr},
     {"fsr4_upscaler", "FSR 4", "AMD's FSR 4 upscaler", "for temporal_aa = fsr4", "fsr4_loader"},
+    {"fsr4_framegen", "FSR 4", "AMD's frame-generation provider", "for fix.frame_generation", "fsr4_loader"},
     {"fsr4_license", "FSR 4", nullptr, nullptr, "fsr4_loader"},
     {"openxr_loader", "OpenXR", nullptr, nullptr, nullptr},
     {"openxr_license", "OpenXR", nullptr, nullptr, nullptr},
@@ -1317,10 +1318,11 @@ Plan planInstall(const Survey& s, const Options& o, const PayloadInfo& p) {
         plan.problems.push_back("XeSS runtime lacks its license notices; nothing will be installed.");
         return plan;
     }
-    // AMD's licence terms travel with the runtime too: the loader without its notice, or without the upscaler it loads, is not installed.
-    if (p.find("fsr4_loader") && (!p.find("fsr4_license") || !p.find("fsr4_upscaler"))) {
+    // AMD's licence terms travel with the runtime too: the loader without its notice, its upscaler, or its
+    // frame-generation provider is not installed.
+    if (p.find("fsr4_loader") && (!p.find("fsr4_license") || !p.find("fsr4_upscaler") || !p.find("fsr4_framegen"))) {
         plan.blocked = true;
-        plan.problems.push_back("FSR 4 runtime lacks its license notice or its upscaler; nothing will be installed.");
+        plan.problems.push_back("FSR 4 runtime lacks its license notice, its upscaler, or its frame-generation provider; nothing will be installed.");
         return plan;
     }
     auto placeOwned = [&](const Placed& f) {

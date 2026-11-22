@@ -10704,6 +10704,24 @@ H_DESKTOP_STOP = r"desktop window: stopped \((?P<reason>.*)\); drawn=(?P<drawn>\
 H_DESKTOP_ACTIVE = r"desktop window: active #(?P<n>\d+)"   # F173: the window took the eye images (an activation): evidence that 3D was on
 H_DESKTOP_DECLINED = r"desktop window: not drawing -- (?P<why>.*)$"   # F173: the draw declined, and why
 H_DESKTOP_OTHER = r"desktop window: (?!setting |10 s: |stopped \()"
+# Flat frame generation (src\d3d11\frame_gen.cpp, frame_gen_decision.h). Lines carry no build tag. A log with none is quiet:
+# off writes nothing. First match wins, so disengaged is named before a line that merely ends in "engaged".
+H_FRAME_GEN = "frame generation"
+H_FRAME_GEN_NOT_STARTED = r"not started: (?P<why>.+)$"
+H_FRAME_GEN_STOOD_DOWN = r"stood down, XeSS frame generation owns the swap chain"
+H_FRAME_GEN_HDR = r"flat HDR route has no luminance range yet"
+H_FRAME_GEN_READY = r"ready: key (?P<key>auto|on)\b"
+H_FRAME_GEN_APPLIED = r"applied (?P<n>\d+), skipped (?P<skipped>\d+)"
+H_FRAME_GEN_HELD = r"held off, game is on time"
+H_FRAME_GEN_REFRESH = r"display refresh not read"
+H_FRAME_GEN_SKIPPED = r"skipped, (?P<why>.+)$"
+H_FRAME_GEN_RESET = r"reset, no generated frame"
+H_FRAME_GEN_UI_OFF = r"ui layer off, HUD is in the interpolated image"
+H_FRAME_GEN_PROBE = r"probe dispatch discarded, camera basis identity"
+H_FRAME_GEN_STOPPED = r"stopped for this session: (?P<why>.+)$"
+H_FRAME_GEN_DISENGAGED = r"disengaged, (?P<why>.+)$"
+H_FRAME_GEN_ENGAGED = r"(?<![A-Za-z])engaged$"
+H_FRAME_GEN_TOTALS = r"frame generation totals: ready 1, key (?P<key>auto|on), applied (?P<n>\d+)(?P<never>, NEVER APPLIED)?$"
 # The SRV turret view (issue 140; src\d3d11\srv_turret.cpp, the vehicle latch's line in journal_watch.cpp, and the geometry shader's creation line in shader_swap.cpp, shaderSwapCreateGs,
 # called with who "srv turret hud"): lines of the graphics log with no build tag, read the way the desktop window's are. The settings and vehicle lines are state, so health_scan keeps
 # every one whatever --since says; the rest are events and are cut by the window. Every kind of line the DLL writes has a pattern of its own, so a labelled line that none matches is
@@ -10772,7 +10790,7 @@ H_F125_LABEL = "native on foot log (F125)"
 H_F125_RE = re.compile(r"native on foot log \(F125\): detail (?P<detail>on|off), summary window (?P<wl>\d+) s")
 # Rules whose absence says nothing about a feature, so a log without their lines does not list them as not present: every log written before F125 has no F125
 # line, and its report stays as it was.
-HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD, H_DESKTOP, H_SRV_TURRET))   # world scale writes nothing while the value stays 100; the desktop window nothing while the setting is game; the SRV turret view nothing in a log with no VR profile
+HEALTH_QUIET_WHEN_ABSENT = frozenset((H_F125, H_WORLD, H_DESKTOP, H_SRV_TURRET, H_FRAME_GEN))   # world scale writes nothing while the value stays 100; the desktop window nothing while the setting is game; the SRV turret view nothing in a log with no VR profile; frame generation nothing while the key is off
 
 # ---- F125: summary windows (the on-foot log diet) ----
 # By default an on-foot summary line covers a window of 10 s, 1 s with log.on_foot_detail = on, and 1 to 10 s when a window is flushed early (a held-item change,
@@ -17603,6 +17621,51 @@ def _hj_srv_turret(rows, ctx):
     return (status, text + vnote)
 
 
+def _hj_frame_generation(rows, ctx):
+    """Flat frame generation. A hard refusal, an idle auto, a hold, a discarded probe or a skip with no ready line is OK.
+    NEVER APPLIED only when a ready line says key on and applied stays 0, or auto logged engaged and applied stays 0.
+    A stopped line is PARTIAL. applied counts only the cadence (and the totals line); a generated present whose wait
+    did not run is a skip, so it does not raise applied."""
+    del ctx
+    kinds = ("not_started", "stood_down", "hdr", "ready", "applied", "held", "refresh", "skipped", "reset",
+             "ui_off", "probe", "stopped", "disengaged", "engaged", "totals")
+    if not any(rows.get(kind) for kind in kinds):
+        return None
+    def counts(kind):
+        return [int(row["n"]) for row in rows.get(kind, []) if row.get("n") is not None]
+    applied = counts("applied") + counts("totals")
+    max_applied = max(applied) if applied else 0
+    keys = [row["key"] for row in rows.get("ready", [])] + [row["key"] for row in rows.get("totals", [])]
+    engaged = bool(rows.get("engaged"))
+    stopped = rows.get("stopped") or []
+    if stopped:
+        return ("PARTIAL", "stopped for this session: %s" % (stopped[-1].get("why") or "stopped"))
+    if any(key == "on" for key in keys) and max_applied == 0:
+        return ("NEVER APPLIED", "ready key on and applied is 0")
+    if engaged and max_applied == 0:
+        return ("NEVER APPLIED", "auto engaged and applied is still 0")
+    if max_applied > 0:
+        return ("OK", "applied %d" % max_applied)
+    bits = []
+    if rows.get("not_started"):
+        bits.append(rows["not_started"][-1].get("why") or "not started")
+    if rows.get("stood_down"):
+        bits.append("stood down, XeSS frame generation owns the swap chain")
+    if rows.get("hdr"):
+        bits.append("flat HDR route has no luminance range yet")
+    if rows.get("held"):
+        bits.append("held off, game is on time")
+    if rows.get("refresh"):
+        bits.append("display refresh not read")
+    if rows.get("probe"):
+        bits.append("probe dispatch discarded")
+    if rows.get("skipped"):
+        bits.append("skipped")
+    if any(key == "auto" for key in keys) and not engaged:
+        bits.append("idle auto")
+    return ("OK", "; ".join(bits) or "noted")
+
+
 def _hrule(name, tags, labels, kinds, judge, needs_detail=False):
     return HealthRule(name, tuple(tags), tuple(labels), tuple((k, re.compile(rx)) for k, rx in kinds), judge, needs_detail)
 
@@ -18630,7 +18693,25 @@ HEALTH_RULES = (
         ("state", H_SRV_TURRET_STATE),
         ("scissor", H_SRV_TURRET_SCISSOR),
         ("scissor_unrestored", H_SRV_TURRET_SCISSOR_UNRESTORED),
-    ), _hj_srv_turret),)
+    ), _hj_srv_turret),
+    # Flat frame generation: lines of the graphics log that carry no build tag (health_scan reads them before it drops the untagged lines).
+    _hrule(H_FRAME_GEN, (), (H_FRAME_GEN,), (
+        ("not_started", H_FRAME_GEN_NOT_STARTED),
+        ("stood_down", H_FRAME_GEN_STOOD_DOWN),
+        ("hdr", H_FRAME_GEN_HDR),
+        ("ready", H_FRAME_GEN_READY),
+        ("applied", H_FRAME_GEN_APPLIED),
+        ("held", H_FRAME_GEN_HELD),
+        ("refresh", H_FRAME_GEN_REFRESH),
+        ("skipped", H_FRAME_GEN_SKIPPED),
+        ("reset", H_FRAME_GEN_RESET),
+        ("ui_off", H_FRAME_GEN_UI_OFF),
+        ("probe", H_FRAME_GEN_PROBE),
+        ("stopped", H_FRAME_GEN_STOPPED),
+        ("disengaged", H_FRAME_GEN_DISENGAGED),
+        ("engaged", H_FRAME_GEN_ENGAGED),
+        ("totals", H_FRAME_GEN_TOTALS),
+    ), _hj_frame_generation),)
 HEALTH_BY_TAG = {}
 for _rule in HEALTH_RULES:
     for _tag in _rule.tags:
@@ -18682,6 +18763,7 @@ def health_scan(text, since=None, until=None):
     )
     desktop = next(r for r in HEALTH_RULES if r.name == H_DESKTOP)
     turret = next(r for r in HEALTH_RULES if r.name == H_SRV_TURRET)
+    frame_gen = next(r for r in HEALTH_RULES if r.name == H_FRAME_GEN)
     for raw in text.splitlines():
         if "srv turret" in raw and any(label in raw for label in H_SRV_TURRET_LABELS):
             # The SRV turret view's lines carry no build tag either. The settings and vehicle lines are state, so every one is kept; the rest are events and are cut by the window.
@@ -18712,6 +18794,22 @@ def health_scan(text, since=None, until=None):
                     break
             else:
                 u = unparsed[H_DESKTOP]
+                u[0] += 1
+                u[1] = u[1] or raw.strip()[:160]
+            continue
+        if "frame generation:" in raw or "frame generation totals:" in raw:
+            # Flat frame generation's lines carry no build tag. The ready line and the refusals are state, so every one is kept; the cadence is an event and is cut by the window.
+            sm = HEALTH_STAMP_RE.match(raw)
+            tod = int(sm.group(1)) * 3600 + int(sm.group(2)) * 60 + int(sm.group(3)) + int(sm.group(4)) / 1000.0 if sm else None
+            body = raw[sm.end():] if sm else raw
+            for kind, rx in frame_gen.kinds:
+                g = rx.search(body)
+                if g:
+                    if kind not in ("applied", "skipped", "reset") or _health_in_window(tod, since, until):
+                        rows[H_FRAME_GEN].setdefault(kind, []).append(dict(g.groupdict(), _t=tod))
+                    break
+            else:
+                u = unparsed[H_FRAME_GEN]
                 u[0] += 1
                 u[1] = u[1] or raw.strip()[:160]
             continue
@@ -19805,6 +19903,79 @@ def health_render(fmt, vals):
         v = vals[i] if i < len(vals) and vals[i] is not None else ("x" if conv == "s" else 0.0 if conv in "fFeEgG" else 0)
         return ("%" + m.group(1) + ("d" if conv in "diu" else conv)) % (v,)
     return re.sub(r"%%|%([-+ #0]*\d*(?:\.\d+)?)(?:ll|l|z|h)?([diuxXsfFeEgGc])", one, fmt)
+
+
+def self_test_frame_generation():
+    """--health on the flat frame-generation lines, rendered from the C format strings. off writes no line and stays quiet.
+    A labelled line that matches none of the kinds is UNPARSED."""
+    src = read_text(os.path.join(repo_root(), "src", "d3d11", "frame_gen.cpp"))
+    decision = read_text(os.path.join(repo_root(), "src", "d3d11", "frame_gen_decision.h"))
+    ok = True
+
+    def literal(source, needle):
+        found = health_c_format(source, needle)
+        if not found:
+            print("frame generation: no log format holding %r" % needle)
+            return None
+        return found
+
+    pieces = {
+        "vr": literal(decision, "frame generation: not started: VR session, flat only"),
+        "stood": literal(decision, "frame generation: stood down, XeSS frame generation owns the swap chain"),
+        "hdr": literal(decision, "frame generation: flat HDR route has no luminance range yet"),
+        "ready": literal(src, "frame generation: ready: key %s"),
+        "cadence": literal(src, "frame generation: applied %llu, skipped %llu"),
+        "held": literal(src, "frame generation: held off, game is on time"),
+        "refresh": literal(src, "frame generation: display refresh not read"),
+        "skipped": literal(src, "frame generation: skipped, %s"),
+        "probe": literal(src, "frame generation: probe dispatch discarded, camera basis identity"),
+        "engaged": literal(src, "frame generation: engaged"),
+        "totals": literal(src, "key %s, applied %llu\""),
+        "totals_never": literal(src, "frame generation totals: ready 1, key %s, applied %llu, NEVER APPLIED"),
+    }
+    if any(value is None for value in pieces.values()):
+        return False
+
+    def line(text, sec=0):
+        return "[10:00:%02d.000] %s" % (sec, text)
+
+    def ready(key):
+        return health_render(pieces["ready"], [key, "4.0.1", 0x10DE, 1920, 1080, 144.0, "on", "dlaa"])
+
+    def cadence(applied, skipped=0):
+        return health_render(pieces["cadence"], [applied, skipped, "", 0, 0.0, 0.0, applied, applied, 6.94])
+
+    def totals(key, applied, never=False):
+        return health_render(pieces["totals_never"] if never else pieces["totals"], [key, applied])
+
+    cases = (
+        ("quiet when off writes nothing", [], 0, None),
+        ("vr refusal", [line(pieces["vr"])], 0, "OK"),
+        ("idle auto held off", [line(ready("auto")), line(pieces["held"], 1), line(cadence(0), 2)], 0, "OK"),
+        ("display refresh not read", [line(pieces["refresh"])], 0, "OK"),
+        ("ready key on applied", [line(ready("on")), line(cadence(4), 1)], 0, "OK"),
+        ("ready key on applied 0", [line(ready("on")), line(cadence(0), 1), line(totals("on", 0, True), 2)], 3, "NEVER APPLIED"),
+        ("engaged auto applied 0", [line(ready("auto")), line(pieces["engaged"], 1), line(cadence(0), 2)], 3, "NEVER APPLIED"),
+        ("stood down", [line(pieces["stood"])], 0, "OK"),
+        ("hdr refusal", [line(pieces["hdr"])], 0, "OK"),
+        ("present wait did not run", [line(ready("auto")), line(health_render(pieces["skipped"], ["present wait did not run"]), 1),
+                                      line(cadence(0, 1), 2)], 0, "OK"),
+        ("probe discarded", [line(pieces["probe"])], 0, "OK"),
+        ("unknown sentence", [line("frame generation: this is not a known sentence")], 4, "UNPARSED"),
+        ("the retired not-built sentence", [line("frame generation: not built")], 4, "UNPARSED"),
+    )
+    for name, rows, want_rc, status in cases:
+        scan = health_scan("\n".join(rows) + ("\n" if rows else ""))
+        report, got = health_report(scan)
+        text = "\n".join(report)
+        named = [row for row in report if H_FRAME_GEN in row]
+        good = got == want_rc and ((status is None and not named) or (named and named[0].lstrip().startswith(status)))
+        if not good:
+            print("frame generation health %s: rc=%s wanted %s status %s\n%s" % (name, got, want_rc, status, text))
+            ok = False
+    if ok:
+        print("frame generation health: ok")
+    return ok
 
 
 def self_test_health():
@@ -26874,6 +27045,8 @@ def self_test():
     if not self_test_switches():
         ok = False
     if not self_test_owner_invoke():
+        ok = False
+    if not self_test_frame_generation():
         ok = False
     if not self_test_health():
         ok = False

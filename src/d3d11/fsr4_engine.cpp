@@ -1174,6 +1174,38 @@ bool probeRuntime(State& state, const char** why) {
 
 bool fsr4BuiltIn() { return EDVR_HAVE_FSR4 != 0; }
 
+bool fsr4ShareDevice(ID3D11Device* dev, Fsr4DeviceShare* out) {
+#if !EDVR_HAVE_FSR4
+    (void)dev;
+    (void)out;
+    return false;
+#else
+    if (!out) return false;
+    *out = {};
+    if (!dev || !g_available || !g_state || g_state->d11.Get() != dev) return false;
+    if (!g_state->d12 || !g_state->queue || !g_state->fence12 || !g_state->fence11) return false;
+    out->device = g_state->d12.Get();
+    out->queue = g_state->queue.Get();
+    out->fence12 = g_state->fence12.Get();
+    out->fence11 = g_state->fence11.Get();
+    out->device->AddRef();
+    out->queue->AddRef();
+    out->fence12->AddRef();
+    out->fence11->AddRef();
+    out->borrowed = true;
+    return true;
+#endif
+}
+
+uint64_t fsr4TakeFenceValue() {
+#if !EDVR_HAVE_FSR4
+    return 0;
+#else
+    if (!g_state) return 0;
+    return ++g_state->nextFenceValue;
+#endif
+}
+
 const char* fsr4VersionLabel() { return g_label; }
 
 bool fsr4Available(ID3D11Device* dev, const char** why) {

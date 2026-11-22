@@ -478,6 +478,12 @@ void uiLayerDoorSeen(uint64_t sequence, uint32_t eye, ID3D11Texture2D* source);
 ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture2D* frame,
                                   const uint32_t region[4], const float layerUv[4],
                                   bool ownedFrame = false, bool resolved = true);
+// The generated frame's own HUD blend. Writes the shield ripple and the weapons/HUD composite into `frame`
+// (UAV, eye 0) and does not mark the real frame's composite or its ripple as already applied. The scope
+// doors are not called: the flat composite is eye 0, and the magnification door does not run on it.
+// The returned texture is AddRef'd when non-null; the caller Releases it.
+ID3D11Texture2D* uiLayerBlendGenerated(uint64_t sequence, ID3D11Texture2D* frame,
+                                       const uint32_t region[4], const float layerUv[4]);
 // The frame that arrived at this eye's door this sequence is exactly the temporal pass's output
 // (EDVR's own, rewritten in full each frame): the `ownedFrame` of a composite over `source`.
 bool uiLayerDoorFromPass(uint32_t eye);

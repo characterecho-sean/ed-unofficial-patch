@@ -15,9 +15,13 @@
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
+struct ID3D11Fence;
 struct ID3D11ShaderResourceView;
 struct ID3D11Texture2D;
 struct ID3D11UnorderedAccessView;
+struct ID3D12Device;
+struct ID3D12CommandQueue;
+struct ID3D12Fence;
 
 namespace edvr {
 
@@ -46,6 +50,21 @@ bool fsr4AcquireDirectViews(ID3D11DeviceContext* ctx, unsigned slot,
 
 // Was the SDK compiled into this build (EDVR_HAVE_FSR4)? Compile-time, initialises nothing.
 bool fsr4BuiltIn();
+
+// The live FSR 4 bridge's device, queue and the one shared fence, when that bridge is already bound to
+// `dev`. Each pointer is AddRef'd; the caller Releases. False when the bridge is not live on this device.
+// Frame generation borrows these so two D3D12 devices are not opened on the one adapter. It does not
+// take a fence value unless `borrowed` is true.
+struct Fsr4DeviceShare {
+    ID3D12Device* device = nullptr;
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12Fence* fence12 = nullptr;
+    ID3D11Fence* fence11 = nullptr;
+    bool borrowed = false;
+};
+bool fsr4ShareDevice(ID3D11Device* dev, Fsr4DeviceShare* out);
+// The next value on the borrowed fence. 0 when the bridge has no state; the caller must not signal 0.
+uint64_t fsr4TakeFenceValue();
 
 // Is FSR 4 usable on this device? The first ask (per D3D11 device) makes the D3D12 device on the same adapter,
 // loads AMD's loader from beside EDVR's module, and asks it which upscaler versions it offers for that device;

@@ -7,6 +7,7 @@
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11ShaderResourceView;
+struct ID3D11Texture2D;
 
 namespace edvr {
 // How the resolver isolates the game's pipeline state (flat_isolation_mode.h has the definition): the context state swap, or
@@ -395,6 +396,27 @@ FlatMonoResolvePreflightResult flatMonoResolvePreflight(
 // (flatMonoResolveSetIsolation). The caller supplies only jitter that was actually rendered into these inputs.
 bool flatMonoResolve(ID3D11Device*, ID3D11DeviceContext*, const FlatMonoResolveFrame&,
                      ID3D11ShaderResourceView** output, const char** reason);
+// The HUD-less colour, depth and motion of the resolve that just succeeded. Pointers are only valid until the
+// caller copies them. False when that resolve did not publish any (a refusal, or a second take). nearPlane is the
+// projection B term; this resolve does not have it, so the field is 0.
+struct FlatMonoFgSources {
+    ID3D11Texture2D* colour = nullptr;
+    ID3D11Texture2D* depth = nullptr;
+    ID3D11Texture2D* motion = nullptr;
+    uint32_t renderW = 0;
+    uint32_t renderH = 0;
+    uint32_t outW = 0;
+    uint32_t outH = 0;
+    float deltaMs = 0;
+    float jitterX = 0;
+    float jitterY = 0;
+    float nearPlane = 0;
+    bool hdr = false;
+    bool reset = false;
+    bool valid = false;
+    uint64_t frame = 0;
+};
+bool flatMonoResolveTakeFgSources(FlatMonoFgSources* out);
 // The GPU census's timestamp pair (flat_cpu.h): begin is called just before the resolver's own
 // dispatches and backend call, end when the call returns by any path. Owner thread. Null (the
 // default, and in every rig) times nothing; installing them changes no command the resolver

@@ -28,6 +28,7 @@
 #include "../../src/common/runtime_profile.h"
 #include "../../src/common/star_glow_bloom.h"
 #include "../../src/d3d11/flat_sharpen.h"
+#include "../../src/d3d11/frame_gen_decision.h"
 #include "../../src/d3d11/menu_flat_rows.h"
 #include "../../src/d3d11/swapchain_probe.h"
 
@@ -1006,6 +1007,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     panelTable(argv[2], argv[3]);
+    g_failures += static_cast<unsigned>(edvr::frameGenDecisionSelfTest());
     swapChainProbeGuard();
     sharpenRowDim();
     hudAntiAliasingRowDimTable();

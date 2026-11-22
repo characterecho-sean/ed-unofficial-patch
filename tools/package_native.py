@@ -90,9 +90,11 @@ _VR, _FLAT, _EITHER, _NVIDIA = {"profile": ["vr"]}, {"profile": ["flat"]}, {"pro
 #   nvngx_dlss.dll   only where the survey found an NVIDIA adapter; a foreign copy is left alone
 #   libxess.dll and its two notices   every install; foreign copies are left alone
 #   libxess_fg.dll, libxell.dll   flat profiles only (XeSS Frame Generation and Xe Low Latency); as libxess.dll
-#   AMD's FSR 4 loader, upscaler and licence   every install; foreign copies are left alone. Unlike XeSS's they are
-#                    REQUIRED in a release (_amd_runtime_problems): AMD's own signed DLLs, never re-signed
+#   AMD's FSR 4 loader, upscaler, frame-generation provider and licence   every install; foreign copies are left
+#                    alone. Unlike XeSS's they are REQUIRED in a release (_amd_runtime_problems): AMD's own signed
+#                    DLLs, never re-signed
 AMD_LOADER, AMD_UPSCALER = "amd_fidelityfx_loader_dx12.dll", "amd_fidelityfx_upscaler_dx12.dll"
+AMD_FRAMEGEN = "amd_fidelityfx_framegeneration_dx12.dll"
 AMD_LICENSE = "AMD-FIDELITYFX-LICENSE.txt"
 FILES = (
     PackagedFile("graphics", "d3d11.dll", "core", "game", "d3d11.dll", _EITHER, "chain"),
@@ -117,6 +119,8 @@ FILES = (
     PackagedFile("xess_ll", "libxell.dll", "xess", "game", "libxell.dll", _FLAT, "owned"),
     PackagedFile("fsr4_loader", "amd_fidelityfx_loader_dx12.dll", "fsr4", "game", "amd_fidelityfx_loader_dx12.dll", None, "owned"),
     PackagedFile("fsr4_upscaler", "amd_fidelityfx_upscaler_dx12.dll", "fsr4", "game", "amd_fidelityfx_upscaler_dx12.dll", None, "owned"),
+    PackagedFile("fsr4_framegen", "amd_fidelityfx_framegeneration_dx12.dll", "fsr4", "game",
+                 "amd_fidelityfx_framegeneration_dx12.dll", None, "owned"),
     PackagedFile("fsr4_license", "AMD-FIDELITYFX-LICENSE.txt", "fsr4", "game", "AMD-FIDELITYFX-LICENSE.txt", None, "owned"),
 )
 # Members that ship in a zip without an entry in the manifest's files: notices, and the profile
@@ -182,11 +186,12 @@ def _files(root, no_dlss):
         for name in ("libxess_fg.dll", "libxell.dll"):
             if (build / name).is_file():
                 result.append((build / name, name))
-    # AMD's FSR 4 runtime: the loader, the upscaler it loads and AMD's licence, always. package() refuses a build that lacks
-    # them (_amd_runtime_problems), so a release never ships a stub-only FSR 4 without saying so. They keep AMD's own
-    # Authenticode signature: nothing here or in the artifact signing step re-signs them.
+    # AMD's FSR 4 runtime: the loader, the upscaler, the frame-generation provider and AMD's licence, always.
+    # package() refuses a build that lacks them (_amd_runtime_problems), so a release never ships a stub-only FSR 4
+    # without saying so. They keep AMD's own Authenticode signature: nothing here or in the artifact signing step
+    # re-signs them.
     result.extend(((build / AMD_LOADER, AMD_LOADER), (build / AMD_UPSCALER, AMD_UPSCALER),
-                   (build / AMD_LICENSE, AMD_LICENSE)))
+                   (build / AMD_FRAMEGEN, AMD_FRAMEGEN), (build / AMD_LICENSE, AMD_LICENSE)))
     # Both settings files ship: edup.ini for VR, and edup-flat.ini for the flat
     # runtime (config.cpp reads edup-flat.ini first). Each keeps its own name.
     result.extend([(root / "edup.ini", "edup.ini"),
@@ -346,10 +351,10 @@ def _embedded_resource(executable, resource_id, required=True):
 
 
 def _amd_runtime_problems(root):
-    """Why build\\ cannot supply AMD's FSR 4 runtime to a release: a list of messages, empty when the two DLLs and the
-    licence are there and the licence is not empty (AMD's licence requires its notice with every copy)."""
+    """Why build\\ cannot supply AMD's FSR 4 runtime to a release: a list of messages, empty when the three DLLs and
+    the licence are there and the licence is not empty (AMD's licence requires its notice with every copy)."""
     build = root / "build"
-    missing = [name for name in (AMD_LOADER, AMD_UPSCALER, AMD_LICENSE) if not (build / name).is_file()]
+    missing = [name for name in (AMD_LOADER, AMD_UPSCALER, AMD_FRAMEGEN, AMD_LICENSE) if not (build / name).is_file()]
     if missing:
         return ["the build has no AMD FSR 4 runtime (missing from build\\: %s). Fetch the SDK with "
                 "tools\\fetch_fsr4.py and run the full build.bat, which copies them; a release must not ship "
@@ -958,7 +963,7 @@ def self_test():
                                  "README.txt", "openvr/READ-ME-FIRST.txt", "edup.ini", "edup-flat.ini",
                                  "LICENSE.txt", "DXBC-HASH-LICENSE.txt", "MINIZ-LICENSE.txt",
                                  "DITTOSR-LICENSE.txt", "DITTOSR-GSR-LICENSE.txt", LAUNCHER_LICENSE_NAME,
-                                 AMD_LOADER, AMD_UPSCALER, AMD_LICENSE}
+                                 AMD_LOADER, AMD_UPSCALER, AMD_FRAMEGEN, AMD_LICENSE}
                 assert not [name for name in names if name.endswith((".exe", ".sh", ".py"))], names
             (root / "build" / "edvr_openxr_runtime.dll").write_bytes(b"payload")
             dlss = root / "build" / "nvngx_dlss.dll"
@@ -1074,7 +1079,7 @@ def self_test():
             dist = root / "dist"
             dlss_names = {"nvngx_dlss.dll", "NVIDIA-DLSS-LICENSE.txt"}
             xess_names = set(xess_files)
-            fsr4_files = [AMD_LOADER, AMD_UPSCALER, AMD_LICENSE]
+            fsr4_files = [AMD_LOADER, AMD_UPSCALER, AMD_FRAMEGEN, AMD_LICENSE]
             fsr4_names = set(fsr4_files)
             core_names = {"d3d11.dll", "openvr/openvr_api.dll", "openvr/openxr_loader.dll",
                           "openvr/OPENXR-LOADER-LICENSE.txt", "edup.ini", "edup-flat.ini",
@@ -1167,8 +1172,8 @@ def self_test():
             assert by_id["xess_fg"]["asset"] == by_id["xess"]["asset"] == by_id["xess_ll"]["asset"]
             # AMD's runtime: always listed, no condition, owned like XeSS's, one zip, and none of it in the schema-1 bridge.
             assert all(by_id[i]["existing"] == "owned" and "when" not in by_id[i] and by_id[i]["asset"] == fsr4_zip.name
-                       for i in ("fsr4_loader", "fsr4_upscaler", "fsr4_license"))
-            assert not {"fsr4_loader", "fsr4_upscaler", "fsr4_license"} & set(sign_manifest.BRIDGE_ITEM_OF_FILE)
+                       for i in ("fsr4_loader", "fsr4_upscaler", "fsr4_framegen", "fsr4_license"))
+            assert not {"fsr4_loader", "fsr4_upscaler", "fsr4_framegen", "fsr4_license"} & set(sign_manifest.BRIDGE_ITEM_OF_FILE)
             lines = []
             assert sign_manifest.verify_directory(dist, allow_unsigned=True, out=lines.append), lines
             assert not sign_manifest.verify_directory(dist, out=lambda line: None), "unsigned dist verified"
@@ -1184,7 +1189,7 @@ def self_test():
             assert json.loads((dist / MANIFEST).read_text(encoding="ascii"))["version"] == "4.0.1"
             # A build without AMD's runtime is refused whole, naming what is missing, and writes nothing; an empty
             # licence is refused too. The files return afterwards.
-            for victim in (AMD_LOADER, AMD_UPSCALER, AMD_LICENSE):
+            for victim in (AMD_LOADER, AMD_UPSCALER, AMD_FRAMEGEN, AMD_LICENSE):
                 held = (root / "build" / victim).read_bytes()
                 (root / "build" / victim).unlink()
                 for dry in (True, False):

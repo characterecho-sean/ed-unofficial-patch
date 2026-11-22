@@ -213,6 +213,7 @@ static const TestTableRow kTestTable[] = {
     {"xess_ll", TargetRoot::Game, "libxell.dll", kProfileFlat, false, ExistingMode::Owned},
     {"fsr4_loader", TargetRoot::Game, "amd_fidelityfx_loader_dx12.dll", 0, false, ExistingMode::Owned},
     {"fsr4_upscaler", TargetRoot::Game, "amd_fidelityfx_upscaler_dx12.dll", 0, false, ExistingMode::Owned},
+    {"fsr4_framegen", TargetRoot::Game, "amd_fidelityfx_framegeneration_dx12.dll", 0, false, ExistingMode::Owned},
     {"fsr4_license", TargetRoot::Game, "AMD-FIDELITYFX-LICENSE.txt", 0, false, ExistingMode::Owned},
 };
 
@@ -7174,12 +7175,14 @@ static void testSchemaReviewFixes(const std::wstring& scratch) {
         PayloadInfo p = testPayload(kNextIni);
         tset(p, "fsr4_loader", "amd-loader-new");
         tset(p, "fsr4_upscaler", "amd-upscaler-new");
+        tset(p, "fsr4_framegen", "amd-framegen-new");
         tset(p, "fsr4_license", "amd-license-new");
         Survey s = baseSurvey(dir);
         s.state.present = true; s.state.scope = "both"; s.state.profile = "vr";
         const Plan fresh = planInstall(s, testOptions(), p);
         check(!fresh.blocked && hasStep(fresh, Action::WritePayload, nullptr, L"amd_fidelityfx_loader_dx12.dll") &&
               hasStep(fresh, Action::WritePayload, nullptr, L"amd_fidelityfx_upscaler_dx12.dll") &&
+              hasStep(fresh, Action::WritePayload, nullptr, L"amd_fidelityfx_framegeneration_dx12.dll") &&
               hasStep(fresh, Action::WritePayload, nullptr, L"AMD-FIDELITYFX-LICENSE.txt") &&
               fresh.nextState.shaOf("fsr4_loader") == tsha(p, "fsr4_loader") && !fresh.nextState.shaOf("fsr4_license").empty(),
               "the FSR 4 runtime and its licence are placed and recorded", unifiedProblems(fresh));
@@ -7192,13 +7195,16 @@ static void testSchemaReviewFixes(const std::wstring& scratch) {
         Survey ours = s;
         trecord(ours.state, "fsr4_loader", "amd-loader-new");
         trecord(ours.state, "fsr4_upscaler", "amd-upscaler-new");
+        trecord(ours.state, "fsr4_framegen", "amd-framegen-new");
         trecord(ours.state, "fsr4_license", "amd-license-new");
         ours.targets.push_back(fakeDll(DllKind::Foreign, joinPath(dir, L"amd_fidelityfx_loader_dx12.dll"), "amd-loader-new"));
         ours.targets.push_back(fakeDll(DllKind::Foreign, joinPath(dir, L"amd_fidelityfx_upscaler_dx12.dll"), "amd-upscaler-new"));
+        ours.targets.push_back(fakeDll(DllKind::Foreign, joinPath(dir, L"amd_fidelityfx_framegeneration_dx12.dll"), "amd-framegen-new"));
         ours.targets.push_back(fakeDll(DllKind::Foreign, joinPath(dir, L"AMD-FIDELITYFX-LICENSE.txt"), "amd-license-new"));
         const Plan un = planUninstall(ours, testOptions());
         check(hasStep(un, Action::Delete, L"amd_fidelityfx_loader_dx12.dll", nullptr) &&
               hasStep(un, Action::Delete, L"amd_fidelityfx_upscaler_dx12.dll", nullptr) &&
+              hasStep(un, Action::Delete, L"amd_fidelityfx_framegeneration_dx12.dll", nullptr) &&
               hasStep(un, Action::Delete, L"AMD-FIDELITYFX-LICENSE.txt", nullptr),
               "an uninstall removes the FSR 4 files EDVR placed, by the hash rule");
         PayloadInfo noNotice = p;

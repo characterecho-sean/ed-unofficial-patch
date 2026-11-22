@@ -33,6 +33,7 @@
 #include "../common/proxy.h"
 #include "../common/system_d3d11.h"   // chooseSystemD3D11: the DllMain handle, checked by path
 #include "device_hook.h"
+#include "frame_gen.h"
 #include "game_vram_hook.h"   // advanced.game_vram: the game's GetDesc answer, installed before its device
 #include "flat_wrapper_note.h"
 #include "format_support_log.h"
@@ -453,16 +454,8 @@ BOOL CALLBACK initOnceCallback(PINIT_ONCE, PVOID, PVOID*) {
     // this.
     edvr::pinGraphicsModuleOnce(reinterpret_cast<const void*>(&initOnceCallback));
     edvr::Log::get().note("%s", edvr::runtimeProfileLogLine().c_str());
-    // fix.frame_generation is read and not built. off writes nothing. A flat session that asks for it says so once;
-    // a VR session that asks for it does not run it. The gate returns "off" for a key this profile does not read.
-    {
-        const std::string frameGeneration = cfg.getString("fix.frame_generation", "off");
-        if (_stricmp(frameGeneration.c_str(), "off") != 0) {
-            edvr::Log::get().note("%s", edvr::runtimeVrProfile()
-                                            ? "frame generation: not started: VR session, flat only"
-                                            : "frame generation: not built");
-        }
-    }
+    // fix.frame_generation. off writes nothing. A VR session logs the flat-only refusal and does not start.
+    edvr::frameGenStartup();
     // The launch's profile, for the runtime's headset-while-flat frames (frame_flag.h).
     edvr::setVrProfileActive(edvr::runtimeVrProfile());
     // The seat memory's setting, before any frame: the runtime's start-up reads it to choose between the stored seat and its own centre.

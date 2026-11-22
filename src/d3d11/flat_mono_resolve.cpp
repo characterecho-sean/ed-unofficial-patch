@@ -1106,6 +1106,35 @@ bool backendAvailable(FlatMonoResolveMode mode,ID3D11Device* device,const char**
 
 FlatMonoResolveStats flatMonoResolveStats() { return stats; }
 bool flatMonoResolveLastReset() { return stats.lastReset; }
+
+namespace {
+FlatMonoFgSources g_fgSnap;
+void publishFgSnap(ID3D11Texture2D* colour, ID3D11Texture2D* depth, ID3D11Texture2D* motion,
+                   const FlatMonoResolveFrame& frame, bool hdr, bool didReset) {
+    g_fgSnap = {};
+    g_fgSnap.colour = colour;
+    g_fgSnap.depth = depth;
+    g_fgSnap.motion = motion;
+    g_fgSnap.renderW = frame.renderWidth;
+    g_fgSnap.renderH = frame.renderHeight;
+    g_fgSnap.outW = frame.outputWidth;
+    g_fgSnap.outH = frame.outputHeight;
+    g_fgSnap.deltaMs = frame.deltaMs;
+    g_fgSnap.jitterX = frame.jitterX;
+    g_fgSnap.jitterY = frame.jitterY;
+    g_fgSnap.hdr = hdr;
+    g_fgSnap.reset = didReset;
+    g_fgSnap.frame = frame.frame;
+    g_fgSnap.valid = colour != nullptr;
+}
+}  // namespace
+
+bool flatMonoResolveTakeFgSources(FlatMonoFgSources* out) {
+    if (!out || !g_fgSnap.valid) return false;
+    *out = g_fgSnap;
+    g_fgSnap.valid = false;
+    return true;
+}
 FlatMonoRefusalCensus flatMonoResolveTakeRefusalCensus() {
     if(g.context)pollRefusalCensus(g.context.Get());
     FlatMonoRefusalCensus out=g_refusal;
@@ -1758,6 +1787,10 @@ bool flatMonoResolve(ID3D11Device* device,ID3D11DeviceContext* context,const Fla
         ++stats.acceptedContinues;
         if(++stats.currentContinueRun>stats.longestContinueRun)stats.longestContinueRun=stats.currentContinueRun;
     }
+    // HUD-less colour, before the caller sharpens or composites. Pointers are copied by the taker immediately.
+    publishFgSnap(hdr ? color.Get() : g.output[taa ? index : 1].texture.Get(),
+                  directFsr4 ? fsr4Direct.depthTex : g.depth[depthIndex].texture.Get(),
+                  directFsr4 ? fsr4Direct.motionTex : g.motion.texture.Get(), f, hdr, reset);
     // The HDR route's result is already in H: nothing for the caller to bind, *output stays null.
     if(hdr) {++stats.hdrResolves;return true;}
     *output=(colorDesc.Format==DXGI_FORMAT_R8G8B8A8_UNORM_SRGB?g.output[taa?index:1].srgb:g.output[taa?index:1].srv).Get();

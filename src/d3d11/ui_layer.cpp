@@ -8145,6 +8145,29 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     return result;
 }
 
+ID3D11Texture2D* uiLayerBlendGenerated(uint64_t sequence, ID3D11Texture2D* frame,
+                                       const uint32_t region[4], const float layerUv[4]) {
+    // The real flat composite has already run for this sequence, so the ripple door would see itself as done.
+    // Clear that mark for this call only. The scope doors are not called: eye 0 is the flat picture.
+    if (!frame || !region || !layerUv) return nullptr;
+    Eye& e = g_eye[0];
+    const uint64_t savedApplied = e.dAppliedSeq;
+    e.dAppliedSeq = sequence == 0 ? 1u : 0u;
+    Ptr<ID3D11Texture2D> rewritten;
+    rippleDoor(e, 0, sequence, frame, region, layerUv, true, true, &rewritten);
+    e.dAppliedSeq = savedApplied;
+    if (rewritten) frame = rewritten.Get();
+    const char* why = nullptr;
+    const bool useMult = e.mSrv && e.mSeq == sequence;
+    ID3D11Texture2D* result = compositeInner(e, 0, frame, region, layerUv, useMult, rewritten.Get() == nullptr, &why,
+                                            HudAaMode::kOff);
+    if (!result) {
+        frame->AddRef();
+        return frame;
+    }
+    return result;
+}
+
 namespace {
 // The fence a failed hologram restore raises (detail::g_uiLayerIssueBlocked,
 // set in restore()) holds for the rest of the frame it failed in and is

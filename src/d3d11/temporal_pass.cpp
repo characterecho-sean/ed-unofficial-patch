@@ -6625,6 +6625,40 @@ bool temporalPassChosenRows(float rows[12], bool* bound) {
     return true;
 }
 
+bool temporalPassLatestAcceptedRows(float rows[12], float proj[2]) {
+    if (!rows || !proj) return false;
+    auto copyWrite = [&](const float src[12], const float projection[2]) {
+        memcpy(rows, src, sizeof(float) * 12);
+        proj[0] = projection[0];
+        proj[1] = projection[1];
+    };
+    if (detail::g_temporalPassWantedFssChrome && g_chosenThisFrame && g_curValid) {
+        copyWrite(g_curRows, g_curProj);
+        return true;
+    }
+    auto frameOk = [](uint32_t frame) { return frame == g_rowsFrame || frame + 1 == g_rowsFrame; };
+    if (g_lastWriteIdx >= 0 && g_lastWriteIdx < kRowsRing) {
+        const RowsWrite& w = g_rowsRing[g_lastWriteIdx];
+        if (w.valid && w.frame == g_rowsFrame) {
+            copyWrite(w.rows, w.proj);
+            return true;
+        }
+    }
+    int best = -1;
+    uint32_t bestSeq = 0;
+    for (int i = 0; i < kRowsRing; ++i) {
+        const RowsWrite& w = g_rowsRing[i];
+        if (!w.valid || !frameOk(w.frame)) continue;
+        if (best < 0 || w.seq >= bestSeq) {
+            best = i;
+            bestSeq = w.seq;
+        }
+    }
+    if (best < 0) return false;
+    copyWrite(g_rowsRing[best].rows, g_rowsRing[best].proj);
+    return true;
+}
+
 bool temporalPassEyeRows(int eye, float rows[12], const void** resource, uint64_t* vsHash) {
     if (!detail::g_temporalPassWantedFssChrome || eye < 0 || eye > 1 || !rows) return false;
     const RigidDrawRows& r = g_rigidDraw[eye];

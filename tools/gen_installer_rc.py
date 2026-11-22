@@ -162,7 +162,8 @@ def versioninfo_lines(version, file_description, internal_name, original_filenam
 
 
 LAUNCHER_VERSION_HEADER = ('src', 'installer', 'launcher_version.h')
-AMD_RUNTIME_FILES = ('amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_dx12.dll')
+AMD_RUNTIME_FILES = ('amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_dx12.dll',
+                     'amd_fidelityfx_framegeneration_dx12.dll')
 AMD_LICENSE_FILE = 'AMD-FIDELITYFX-LICENSE.txt'
 # min-ed-launcher's MIT licence, which direct launch's ported code obliges the launcher to carry.
 # src/installer/launcher_main.cpp reads this id; package_native.py checks the bytes.

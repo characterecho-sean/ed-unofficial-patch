@@ -116,6 +116,10 @@ void temporalPassFrameBoundary();
 // the pass is not wanted, or the frame has not treated yet (the choice is made at the first treat) or chose none; `rows` is then untouched. `bound` says the chosen
 // write was the block bound at the scene's first draw. Valid at any boundary that runs before temporalPassFrameBoundary (the census's does); render thread.
 bool temporalPassChosenRows(float rows[12], bool* bound);
+// The newest world-space camera the pass accepted: the chosen rows when this frame has them, otherwise the
+// latest valid ring write for this frame (or the one before it, once the write was closed). `proj` is that
+// write's projection z row (A, B). False leaves both untouched. Side-effect free; render thread.
+bool temporalPassLatestAcceptedRows(float rows[12], float proj[2]);
 // F52 (TEMPORARY, the native on-foot marker arc; docs\design-native-onfoot-vr-2026-10-13.md): this eye's camera rows as the pass's provenance
 // latched them in its current frame (temporalPassNoteRigidDraw: the scene block's view rows, float 932, view->world [R | c], three float4 rows,
 // in the VS b1 of the eye's first recognised scene draw). False when the pass is not wanted, or the eye has no such draw with valid rows this

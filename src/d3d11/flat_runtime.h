@@ -243,4 +243,17 @@ struct FlatRuntimeDrawScope {
     // binds H for this draw. Declines quietly (the copy route then serves the frame) and never leaves H half-written.
     void treatHdr(const FlatMonoFrame& selected, uint32_t srvSlot);
 };
+
+// The last real frame's GPU milliseconds, as gpuPoll read them. Negative until one has been read.
+// Frame generation's auto rule treats a missing time as missing, not as zero.
+inline double& flatRuntimeGpuFrameMsSlot() {
+    static double ms = -1.0;
+    return ms;
+}
+inline void flatRuntimeNoteGpuFrameMs(double ms) { flatRuntimeGpuFrameMsSlot() = ms; }
+inline bool flatRuntimeLastGpuFrameMs(double* out) {
+    if (!out || !(flatRuntimeGpuFrameMsSlot() >= 0.0)) return false;
+    *out = flatRuntimeGpuFrameMsSlot();
+    return true;
+}
 } // namespace edvr

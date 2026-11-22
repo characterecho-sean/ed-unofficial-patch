@@ -114,6 +114,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 #include "celestial_motion.h"
 #include "desktop_vsync.h"  // in VR Elite's Present goes out with sync interval 0: the headset paces the frame, not the monitor
 #include "xess_fg.h"        // XeSS Frame Generation: the flat swap chain bridged to a D3D12 proxy on Elite's window
+#include "frame_gen.h"      // flat frame generation: our own presenting chain on Elite's window when XeSS did not take it
 
 namespace edvr {
 namespace {
@@ -222,10 +223,14 @@ PFN_GetFullscreenDesc g_realGetFullscreenDesc = nullptr;
 PFN_GetHwnd g_realGetHwnd = nullptr;
 
 HRESULT STDMETHODCALLTYPE hookedFgSetFullscreenState(IDXGISwapChain* self, BOOL fullscreen, IDXGIOutput* target) {
-    return xessFgOwns(self) ? xessFgSetFullscreenState(fullscreen, target) : g_realSetFullscreenState(self, fullscreen, target);
+    if (xessFgOwns(self)) return xessFgSetFullscreenState(fullscreen, target);
+    if (frameGenOwns(self)) return frameGenSetFullscreenState(fullscreen, target);
+    return g_realSetFullscreenState(self, fullscreen, target);
 }
 HRESULT STDMETHODCALLTYPE hookedFgGetFullscreenState(IDXGISwapChain* self, BOOL* fullscreen, IDXGIOutput** target) {
-    return xessFgOwns(self) ? xessFgGetFullscreenState(fullscreen, target) : g_realGetFullscreenState(self, fullscreen, target);
+    if (xessFgOwns(self)) return xessFgGetFullscreenState(fullscreen, target);
+    if (frameGenOwns(self)) return frameGenGetFullscreenState(fullscreen, target);
+    return g_realGetFullscreenState(self, fullscreen, target);
 }
 HRESULT STDMETHODCALLTYPE hookedFgGetDesc(IDXGISwapChain* self, DXGI_SWAP_CHAIN_DESC* desc) {
     const HRESULT hr = g_realGetDesc(self, desc);
@@ -233,32 +238,51 @@ HRESULT STDMETHODCALLTYPE hookedFgGetDesc(IDXGISwapChain* self, DXGI_SWAP_CHAIN_
         desc->OutputWindow = xessFgWindow();
         BOOL fullscreen = FALSE;
         if (SUCCEEDED(xessFgGetFullscreenState(&fullscreen, nullptr))) desc->Windowed = !fullscreen;
+    } else if (SUCCEEDED(hr) && desc && frameGenOwns(self)) {
+        desc->OutputWindow = frameGenWindow();
+        BOOL fullscreen = FALSE;
+        if (SUCCEEDED(frameGenGetFullscreenState(&fullscreen, nullptr))) desc->Windowed = !fullscreen;
     }
     return hr;
 }
 HRESULT STDMETHODCALLTYPE hookedFgResizeTarget(IDXGISwapChain* self, const DXGI_MODE_DESC* mode) {
-    return xessFgOwns(self) ? xessFgResizeTarget(mode) : g_realResizeTarget(self, mode);
+    if (xessFgOwns(self)) return xessFgResizeTarget(mode);
+    if (frameGenOwns(self)) return frameGenResizeTarget(mode);
+    return g_realResizeTarget(self, mode);
 }
 HRESULT STDMETHODCALLTYPE hookedFgGetContainingOutput(IDXGISwapChain* self, IDXGIOutput** output) {
-    return xessFgOwns(self) ? xessFgGetContainingOutput(output) : g_realGetContainingOutput(self, output);
+    if (xessFgOwns(self)) return xessFgGetContainingOutput(output);
+    if (frameGenOwns(self)) return frameGenGetContainingOutput(output);
+    return g_realGetContainingOutput(self, output);
 }
 HRESULT STDMETHODCALLTYPE hookedFgGetFrameStatistics(IDXGISwapChain* self, DXGI_FRAME_STATISTICS* stats) {
-    return xessFgOwns(self) ? xessFgGetFrameStatistics(stats) : g_realGetFrameStatistics(self, stats);
+    if (xessFgOwns(self)) return xessFgGetFrameStatistics(stats);
+    if (frameGenOwns(self)) return frameGenGetFrameStatistics(stats);
+    return g_realGetFrameStatistics(self, stats);
 }
 HRESULT STDMETHODCALLTYPE hookedFgGetLastPresentCount(IDXGISwapChain* self, UINT* count) {
-    return xessFgOwns(self) ? xessFgGetLastPresentCount(count) : g_realGetLastPresentCount(self, count);
+    if (xessFgOwns(self)) return xessFgGetLastPresentCount(count);
+    if (frameGenOwns(self)) return frameGenGetLastPresentCount(count);
+    return g_realGetLastPresentCount(self, count);
 }
 HRESULT STDMETHODCALLTYPE hookedFgGetFullscreenDesc(IDXGISwapChain1* self, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* desc) {
     const HRESULT hr = g_realGetFullscreenDesc(self, desc);
     if (SUCCEEDED(hr) && desc && xessFgOwns(static_cast<IDXGISwapChain*>(self))) {
         BOOL fullscreen = FALSE;
         if (SUCCEEDED(xessFgGetFullscreenState(&fullscreen, nullptr))) desc->Windowed = !fullscreen;
+    } else if (SUCCEEDED(hr) && desc && frameGenOwns(static_cast<IDXGISwapChain*>(self))) {
+        BOOL fullscreen = FALSE;
+        if (SUCCEEDED(frameGenGetFullscreenState(&fullscreen, nullptr))) desc->Windowed = !fullscreen;
     }
     return hr;
 }
 HRESULT STDMETHODCALLTYPE hookedFgGetHwnd(IDXGISwapChain1* self, HWND* window) {
     if (xessFgOwns(static_cast<IDXGISwapChain*>(self)) && window) {
         *window = xessFgWindow();
+        return S_OK;
+    }
+    if (frameGenOwns(static_cast<IDXGISwapChain*>(self)) && window) {
+        *window = frameGenWindow();
         return S_OK;
     }
     return g_realGetHwnd(self, window);
@@ -1257,35 +1281,45 @@ void flatResizeNote(const char* api, UINT count, UINT width, UINT height, DXGI_F
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers(IDXGISwapChain* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
     // The XeSS-FG bridge (xess_fg.h): the hidden swap chain sizes from the real window, and the proxy follows it, in
     // either profile.
-    const bool bridged = xessFgOwns(self);
-    if (bridged) xessFgBeforeResize(&width, &height);
+    const bool xessBridged = xessFgOwns(self);
+    const bool fgBridged = !xessBridged && frameGenOwns(self);
+    if (xessBridged) xessFgBeforeResize(&width, &height);
+    else if (fgBridged) frameGenBeforeResize(&width, &height);
     if (!runtimeFlatProfile()) {
         cross_profile::enterSite(cross_profile::Site::FlatResizeBuffers, true).stop();   // inactive while VR runs (cross_profile_cost.h)
         const HRESULT hr = g_state->realResizeBuffers(self, count, width, height, format, flags);
-        return bridged ? xessFgAfterResize(hr) : hr;
+        if (xessBridged) return xessFgAfterResize(hr);
+        if (fgBridged) return frameGenAfterResize(hr);
+        return hr;
     }
     const bool ours = self == g_state->swapChain;
     long refs = -1;
     if (ours) { menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }
     HRESULT hr = g_state->realResizeBuffers(self, count, width, height, format, flags);
-    if (bridged) hr = xessFgAfterResize(hr);
+    if (xessBridged) hr = xessFgAfterResize(hr);
+    else if (fgBridged) hr = frameGenAfterResize(hr);
     if (ours) flatResizeNote("ResizeBuffers", count, width, height, format, flags, hr, refs);
     return hr;
 }
 
 HRESULT STDMETHODCALLTYPE hookedFlatResizeBuffers1(IDXGISwapChain3* self, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags, const UINT* masks, IUnknown* const* queues) {
-    const bool bridged = xessFgOwns(static_cast<IDXGISwapChain*>(self));
-    if (bridged) xessFgBeforeResize(&width, &height);
+    const bool xessBridged = xessFgOwns(static_cast<IDXGISwapChain*>(self));
+    const bool fgBridged = !xessBridged && frameGenOwns(static_cast<IDXGISwapChain*>(self));
+    if (xessBridged) xessFgBeforeResize(&width, &height);
+    else if (fgBridged) frameGenBeforeResize(&width, &height);
     if (!runtimeFlatProfile()) {
         cross_profile::enterSite(cross_profile::Site::FlatResizeBuffers, true).stop();   // inactive while VR runs (cross_profile_cost.h)
         const HRESULT hr = g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
-        return bridged ? xessFgAfterResize(hr) : hr;
+        if (xessBridged) return xessFgAfterResize(hr);
+        if (fgBridged) return frameGenAfterResize(hr);
+        return hr;
     }
     const bool ours = static_cast<IDXGISwapChain*>(self) == g_state->swapChain;
     long refs = -1;
     if (ours) { menuFlatResize(); flatRuntimeResize(); refs = flatResizeBackBufferRefs(self); }
     HRESULT hr = g_state->realResizeBuffers1(self, count, width, height, format, flags, masks, queues);
-    if (bridged) hr = xessFgAfterResize(hr);
+    if (xessBridged) hr = xessFgAfterResize(hr);
+    else if (fgBridged) hr = frameGenAfterResize(hr);
     if (ours) flatResizeNote("ResizeBuffers1", count, width, height, format, flags, hr, refs);
     return hr;
 }
@@ -1938,6 +1972,7 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
     const int64_t presentT0 = qpcNow();
     // A bridged swap chain (xess_fg.h) lives on a hidden window and is never presented: its frame goes to the XeSS-FG proxy.
     const HRESULT hr = xessFgOwns(self) ? xessFgPresent(self, presentSync, flags)
+                       : frameGenOwns(self) ? frameGenPresent(self, presentSync, flags)
                                         : g_state->realPresent(self, presentSync, flags);
     const int64_t presentT1 = qpcNow();
     // The stall sampler's heartbeat (stall_watch.h): the render thread has just presented. A relaxed store and a
@@ -2044,23 +2079,37 @@ bool createBridged(void* factory, IUnknown* device, HWND realWindow, UINT width,
                    bool fullscreen, SwapChain** out, HRESULT* result, Create create) {
     if (factory != g_state->factory || !out || !realWindow) return false;
     if (xessFgBridged() && realWindow == xessFgWindow()) xessFgRelease();
-    if (g_state->swapChain || xessFgBridged()) return false;
+    if (frameGenBridged() && realWindow == frameGenWindow()) frameGenRelease();
+    if (g_state->swapChain || xessFgBridged() || frameGenBridged()) {
+        if (xessFgBridged()) frameGenNoteXessStandDown();
+        return false;
+    }
     HWND hidden = xessFgBeginCreate(device, realWindow, &width, &height, format);
+    const bool xessBridge = hidden != nullptr;
+    if (!hidden) hidden = frameGenBeginCreate(device, realWindow, &width, &height, format, fullscreen);
     if (!hidden) return false;
     const HRESULT made = create(hidden, width, height);
-    if (SUCCEEDED(made) && *out && xessFgFinishCreate(*out, realWindow)) {
+    const bool finished = SUCCEEDED(made) && *out &&
+        (xessBridge ? xessFgFinishCreate(*out, realWindow) : frameGenFinishCreate(*out, realWindow));
+    if (finished) {
+        if (xessBridge) frameGenNoteXessStandDown();
         hookSwapChain(*out);
         if (g_state->swapChain == *out) {
             // The hidden swap chain was made windowed; a fullscreen creation goes fullscreen on the real window now.
-            if (fullscreen) xessFgSetFullscreenState(TRUE, nullptr);
+            if (fullscreen) {
+                if (xessBridge) xessFgSetFullscreenState(TRUE, nullptr);
+                else frameGenSetFullscreenState(TRUE, nullptr);
+            }
             *result = made;
             return true;
         }
         // Unhooked, nothing would ever reach the real window: undo the bridge.
-        Log::get().note("xess-fg: the bridged swap chain could not be hooked; made the usual way instead");
+        Log::get().note("%s: the bridged swap chain could not be hooked; made the usual way instead",
+                        xessBridge ? "xess-fg" : "fg bridge");
     }
     if (SUCCEEDED(made) && *out) { (*out)->Release(); *out = nullptr; }
-    xessFgAbandon();
+    if (xessBridge) xessFgAbandon();
+    else frameGenAbandon();
     return false;
 }
 
@@ -3302,7 +3351,7 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
             Log::get().note("flat runtime resize hooks: ResizeBuffers could not be hooked; a switch into the flat profile will run passthrough this session");
         }
     }
-    if (xessFgOwns(swapChain)) {
+    if (xessFgOwns(swapChain) || frameGenOwns(swapChain)) {
         // The bridged swap chain's window and present queries (see hookedFgGetDesc). Its Present and resizes already go
         // through the hooks above. GetFullscreenDesc and GetHwnd are IDXGISwapChain1's, present only where the table
         // reaches them.
@@ -3332,7 +3381,8 @@ void hookSwapChain(IDXGISwapChain* swapChain) {
         if (prefix > kSwap1GetHwnd)
             fgHooks += s.swapChainHook.replace(kSwap1GetHwnd, &hookedFgGetHwnd,
                                                reinterpret_cast<void**>(&g_realGetHwnd)) ? 1u : 0u;
-        Log::get().note("xess-fg: window query hooks installed: %u of 9 (table prefix %zu)", fgHooks, prefix);
+        Log::get().note("%s: window query hooks installed: %u of 9 (table prefix %zu)",
+                        xessFgOwns(swapChain) ? "xess-fg" : "fg bridge", fgHooks, prefix);
     }
     if (!s.swapChainHook.commit()) {
         s.swapChainHook.uninstall();

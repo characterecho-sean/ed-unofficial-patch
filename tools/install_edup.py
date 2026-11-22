@@ -82,13 +82,13 @@ the effective ini selects dlss or dlaa and nvngx_dlss.dll is not beside the game
 (NGX then refuses the mode and the log says DLSS is not available on this GPU).
 
 AMD's FSR 4.1 runtime follows the same rules (--fsr4; fix.temporal_aa = fsr4): the
-two signed D3D12 DLLs (amd_fidelityfx_loader_dx12.dll and
-amd_fidelityfx_upscaler_dx12.dll) and AMD-FIDELITYFX-LICENSE.txt, staged into the
-build by build.bat from tools/fetch_fsr4.py. A plain install adds the ones the game
-directory lacks and leaves a foreign one alone; --fsr4 installs all three, backing
-up a foreign one; --all includes them when built; a plain --verify-only fails when
-the effective ini selects fsr4 and the DLLs are missing or differ from the build.
-The release packages carry the three files, and the launcher installs them as it
+signed D3D12 DLLs (amd_fidelityfx_loader_dx12.dll, amd_fidelityfx_upscaler_dx12.dll
+and amd_fidelityfx_framegeneration_dx12.dll) and AMD-FIDELITYFX-LICENSE.txt, staged
+into the build by build.bat from tools/fetch_fsr4.py. A plain install adds the ones
+the game directory lacks and leaves a foreign one alone; --fsr4 installs all four,
+backing up a foreign one; --all includes them when built; a plain --verify-only fails
+when the effective ini selects fsr4 and the DLLs are missing or differ from the build.
+The release packages carry the four files, and the launcher installs them as it
 installs XeSS's; AMD's DLLs keep AMD's own signature and are never re-signed.
 
 Exit 0 when everything asked for landed and verified, 1 otherwise.
@@ -145,10 +145,12 @@ FLAT_KIND = "edvr-flat"
 PROFILE_FILE = "edup_profile.ini"
 
 # AMD's FSR 4.1 runtime, staged into the build by build.bat from tools/fetch_fsr4.py: the loader the engine
-# calls, the upscaler provider beside it, and AMD's licence. (receipt key, file name), in install order. The
-# release packages carry them too (tools/package_native.py), and the launcher installs them as it does XeSS's.
+# calls, the upscaler provider, the frame-generation provider, and AMD's licence. (receipt key, file name), in
+# install order. The release packages carry them too (tools/package_native.py), and the launcher installs them
+# as it does XeSS's.
 FSR4_FILES = (("fsr4_loader", "amd_fidelityfx_loader_dx12.dll"),
               ("fsr4_upscaler", "amd_fidelityfx_upscaler_dx12.dll"),
+              ("fsr4_framegen", "amd_fidelityfx_framegeneration_dx12.dll"),
               ("fsr4_license", "AMD-FIDELITYFX-LICENSE.txt"))
 
 # Backup pruning (see prune_backups, below backup_name): the newest KEEP_BACKUPS
@@ -2145,7 +2147,7 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
         if not os.path.isfile(os.path.join(build_dir(root), name)):
             errors.append("missing XeSS source %s" % os.path.join(build_dir(root), name))
     # AMD's FSR 4.1 runtime, on the XeSS rules, for every scope: the files the game directory lacks are added
-    # when this build has them; --fsr4 installs all three (backing up a foreign one); a plain install leaves a
+    # when this build has them; --fsr4 installs all four (backing up a foreign one); a plain install leaves a
     # foreign one alone.
     explicit_fsr4 = include_fsr4
     fsr4_active = FSR4_FILES if include_fsr4 else tuple(
@@ -3118,7 +3120,7 @@ def _scope_self_test():
         check(code == 0 and tree(g) == before, "a --dry-run that would add the optional runtimes wrote files")
         check("nvngx_dlss.dll was missing from the game directory" in text
               and "libxess.dll, libxess_fg.dll, libxell.dll, INTEL-XESS-LICENSE.txt, INTEL-XESS-THIRD-PARTY.txt missing" in text
-              and "amd_fidelityfx_loader_dx12.dll, amd_fidelityfx_upscaler_dx12.dll, AMD-FIDELITYFX-LICENSE.txt missing" in text,
+              and "amd_fidelityfx_loader_dx12.dll, amd_fidelityfx_upscaler_dx12.dll, amd_fidelityfx_framegeneration_dx12.dll, AMD-FIDELITYFX-LICENSE.txt missing" in text,
               "the dry-run plan did not name the missing optional runtimes: %r" % text)
         code, text = run(args_for(g, "--scope", "vr", tag="optmiss"))
         check(code == 0, "--scope vr with no optional runtimes failed: %r" % text)
@@ -3846,7 +3848,7 @@ def _fsr4_opt_in_self_test():
     import contextlib
     import io
     names = {key: name for key, name in FSR4_FILES}
-    loader, upscaler, licence = (names["fsr4_loader"], names["fsr4_upscaler"], names["fsr4_license"])
+    loader, upscaler, framegen, licence = (names["fsr4_loader"], names["fsr4_upscaler"], names["fsr4_framegen"], names["fsr4_license"])
     tmp = tempfile.mkdtemp(prefix="edvr_fsr4_option_test_")
     old_profile_validate = globals()["validate_elite_game"]
     old_probe = globals()["strict_game_running"]
@@ -3857,7 +3859,8 @@ def _fsr4_opt_in_self_test():
         root = Path(tmp, "repo")
         (root / "build").mkdir(parents=True)
         for name, data in (("d3d11.dll", b"FLAT-GRAPHICS"), (loader, b"PINNED-AMD-LOADER"),
-                           (upscaler, b"PINNED-AMD-UPSCALER"), (licence, b"AMD-LICENSE")):
+                           (upscaler, b"PINNED-AMD-UPSCALER"), (framegen, b"PINNED-AMD-FRAMEGEN"),
+                           (licence, b"AMD-LICENSE")):
             (root / "build" / name).write_bytes(data)
         globals()["validate_elite_game"] = lambda path: None
         globals()["strict_game_running"] = lambda *a: (True, False)
@@ -3893,6 +3896,7 @@ def _fsr4_opt_in_self_test():
         assert code == 0, "plain flat install failed: %r" % text
         assert (game / loader).read_bytes() == b"FOREIGN-AMD-LOADER", "plain install overwrote a foreign FSR 4 loader"
         assert (game / upscaler).read_bytes() == b"PINNED-AMD-UPSCALER" and \
+            (game / framegen).read_bytes() == b"PINNED-AMD-FRAMEGEN" and \
             (game / licence).read_bytes() == b"AMD-LICENSE", "plain install did not add the missing FSR 4 files"
         assert run(args + ["--verify-only"])[0] == 0, "plain verify-only started requiring FSR 4"
         code, text = run(args + ["--fsr4", "--verify-only"])
@@ -3906,7 +3910,8 @@ def _fsr4_opt_in_self_test():
         (game / "edup-flat.ini").unlink()
         assert restore_native(str(game / "edvr_flat_receipt.json")) == 0
         assert (game / loader).read_bytes() == b"FOREIGN-AMD-LOADER" and not (game / upscaler).exists() and \
-            not (game / licence).exists(), "restore did not remove the added files and leave the foreign one"
+            not (game / framegen).exists() and not (game / licence).exists(), \
+            "restore did not remove the added files and leave the foreign one"
         before = snapshot(game)
         code, text = run(args + ["--fsr4", "--dry-run"])
         assert code == 0 and snapshot(game) == before, "explicit FSR 4 dry run wrote files: %r" % text
@@ -3946,7 +3951,7 @@ def _fsr4_opt_in_self_test():
             code, text = run(vr_args + ["--fsr4"])
             assert code == 0, "--scope vr --fsr4 failed: %r" % text
             for name, data in ((loader, b"PINNED-AMD-LOADER"), (upscaler, b"PINNED-AMD-UPSCALER"),
-                               (licence, b"AMD-LICENSE")):
+                               (framegen, b"PINNED-AMD-FRAMEGEN"), (licence, b"AMD-LICENSE")):
                 assert (vr / name).read_bytes() == data, "--scope vr --fsr4 did not install " + name
             receipt = str(vr / "edvr_native_receipt.json")
             keys = {e["key"] for e in json.loads(Path(receipt).read_text(encoding="utf-8"))["files"]}
@@ -4051,6 +4056,7 @@ def _compile_only_self_test():
                     "INTEL-XESS-LICENSE.txt": b"LICENSE", "INTEL-XESS-THIRD-PARTY.txt": b"THIRD-PARTY",
                     "amd_fidelityfx_loader_dx12.dll": b"COMPILE-AMD-LOADER",
                     "amd_fidelityfx_upscaler_dx12.dll": b"COMPILE-AMD-UPSCALER",
+                    "amd_fidelityfx_framegeneration_dx12.dll": b"COMPILE-AMD-FRAMEGEN",
                     "AMD-FIDELITYFX-LICENSE.txt": b"AMD-LICENSE"}
         for name, data in products.items():
             (cbuild / name).write_bytes(data)

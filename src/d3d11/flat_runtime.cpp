@@ -24,6 +24,7 @@
 #include "fsr4_engine.h"
 #include "dittosr_engine.h"
 #include "xess_fg.h"   // xessFgWanted: the resolver keeps the edge strip's motion for frame generation
+#include "frame_gen.h"
 #include "flat_projection_recipes.h"
 #include "flat_shader_classifier.h"
 #include "flat_projection_ownership.h"
@@ -3499,7 +3500,7 @@ void gpuPoll(State& s) {
     for (int i = 0; i < State::kGpuFrameTimers; ++i) {
         if (!s.gpuFrameBusy[i] || i == s.gpuFrameOpen) continue;
         switch (s.gpuFrameTimer[i].poll(ctx, ms)) {
-        case GpuTimerPoll::Ready: s.census.noteGpuFrame(ms); s.gpuFrameBusy[i] = false; break;
+        case GpuTimerPoll::Ready: s.census.noteGpuFrame(ms); flatRuntimeNoteGpuFrameMs(ms); s.gpuFrameBusy[i] = false; break;
         case GpuTimerPoll::Invalid: s.census.noteGpuInvalid(); s.gpuFrameBusy[i] = false; break;
         case GpuTimerPoll::Pending: break;
         }
@@ -4798,6 +4799,7 @@ void flatRuntimePresent(IDXGISwapChain* swap, uint64_t frame, HRESULT hr, UINT f
         // render thread adopts the replacement device. DittoSR's shutdown only
         // releases its shaders and histories; it does not wait on the GPU.
         // FSR 4's bridge is bound the same way as XeSS and does wait.
+        frameGenOnDeviceLost();
         xessShutdown();
         fsr4Shutdown();
         dittoShutdown();
@@ -8184,6 +8186,12 @@ FlatRuntimeDrawScope::FlatRuntimeDrawScope(ID3D11DeviceContext* context, uint32_
         return;
     }
     s.reason = nonzeroPhase(s)?"treated-jittered":"treated-zero-jitter";
+    {
+        FlatMonoFgSources fg;
+        if (flatMonoResolveTakeFgSources(&fg))
+            frameGenNoteResolved(ctx, fg.colour, fg.depth, fg.motion, fg.renderW, fg.renderH, fg.outW, fg.outH,
+                                 fg.deltaMs, fg.jitterX, fg.jitterY, fg.nearPlane, fg.hdr, fg.reset, fg.frame);
+    }
     // fix.render_sharpness: the resolve's output through the shared RCAS pass, before the game's own copy
     // samples it (flat_sharpen.h). The interface is drawn after that copy, so it is never sharpened. At 0,
     // after a refusal or for a view the pass cannot use this is the resolve's own view; never in place.
@@ -8539,6 +8547,12 @@ void FlatRuntimeDrawScope::treatHdr(const FlatMonoFrame& selected, uint32_t srvS
         return;
     }
     s.reason = nonzeroPhase(s) ? "treated-jittered-hdr" : "treated-zero-jitter-hdr";
+    {
+        FlatMonoFgSources fg;
+        if (flatMonoResolveTakeFgSources(&fg))
+            frameGenNoteResolved(ctx, fg.colour, fg.depth, fg.motion, fg.renderW, fg.renderH, fg.outW, fg.outH,
+                                 fg.deltaMs, fg.jitterX, fg.jitterY, fg.nearPlane, fg.hdr, fg.reset, fg.frame);
+    }
     if(protectedOverlay) ++s.overlayIsolatedWindow;
     if(selected.mixedCamera) {
         ++s.untrustedTreated;
