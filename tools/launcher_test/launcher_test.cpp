@@ -447,7 +447,7 @@ void testShapes() {
     }
     const std::wstring tableBase = P(P(g_fixtures, L"shapes"), widenUtf8(tableLabel));
     Manifest table;
-    check(loadVerifiedManifest(readAll(tableBase + L".json"), readAll(tableBase + L".sig"), g_testKeys, &table, &err) && table.files.size() == 17,
+    check(loadVerifiedManifest(readAll(tableBase + L".json"), readAll(tableBase + L".sig"), g_testKeys, &table, &err) && table.files.size() == 18,
           "the packager's file table is read whole: " + err);
     auto byId = [&](const char* id) -> const ManifestFile* {
         for (const ManifestFile& f : table.files) if (f.id == id) return &f;
@@ -471,6 +471,10 @@ void testShapes() {
         check(f && f->when.profiles == kProfileFlat && !f->when.adapterNvidia && f->existing == ExistingMode::Owned && f->target.root == TargetRoot::Game,
               std::string(id) + " is placed for the flat profile only, and owned");
     }
+    const ManifestFile* framegen = byId("fsr4_framegen");
+    check(framegen && !framegen->when.present && framegen->existing == ExistingMode::Owned && framegen->target.root == TargetRoot::Game &&
+              framegen->target.path == "amd_fidelityfx_framegeneration_dx12.dll",
+          "the frame-generation provider is placed with the FSR 4 runtime, and owned");
 
     // The `when` evaluation: the installed profiles and the survey's adapter.
     ManifestWhen always;
