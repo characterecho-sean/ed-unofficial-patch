@@ -1236,8 +1236,9 @@ static void vsyncWiring(const std::string& root) {
     auto wired = [](const std::string& t) {
         const size_t mine = at(t, "if (self != g_state->swapChain) {\n        return g_state->realPresent(self, syncInterval, flags);");
         const size_t decide = at(t, "const UINT presentSync = desktopVsyncPresented(flatProfileNow, syncInterval);");
-        // The XeSS-FG bridge (xess_fg.h) takes a bridged swap chain's Present with the same decided interval.
+        // XeSS frame generation and flat frame generation each take a bridged swap chain's Present with the same decided interval.
         const size_t call = at(t, "const HRESULT hr = xessFgOwns(self) ? xessFgPresent(self, presentSync, flags)\n"
+                                  "                       : frameGenOwns(self) ? frameGenPresent(self, presentSync, flags)\n"
                                   "                                        : g_state->realPresent(self, presentSync, flags);");
         return mine != std::string::npos && decide != std::string::npos && call != std::string::npos && mine < decide && decide < call &&
                count(t, "g_state->realPresent(self, syncInterval, flags)") == 1 && at(t, "GetCurrentThreadId(), syncInterval, flags, static_cast<int32_t>(hr)};") != std::string::npos;
