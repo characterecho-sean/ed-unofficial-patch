@@ -1,4 +1,4 @@
-"""Fetch and verify EDVR's pinned AMD FidelityFX (FSR 4.1) SDK subset.
+"""Fetch and verify EDVR's pinned AMD FidelityFX (FSR 4.1.2) SDK subset.
 
     python tools/fetch_fsr4.py [--dest DIR] [--dry-run]
     python tools/fetch_fsr4.py --verify DIR
@@ -6,13 +6,13 @@
 
 Downloads the ffx-api headers (loader, types, DX12, upscale, frame generation)
 and AMD's three signed D3D12 runtime DLLs (amd_fidelityfx_loader_dx12.dll, the
-one the app calls; amd_fidelityfx_upscaler_dx12.dll, the FSR 4.1.1 provider;
+one the app calls; amd_fidelityfx_upscaler_dx12.dll, the FSR 4.1.2 provider;
 amd_fidelityfx_framegeneration_dx12.dll, the frame-generation provider) and
 the SDK licence from AMD's official FidelityFX-SDK repository at one pinned
-commit (tag v2.3.0). Every file is checked against its pinned SHA-256 before
+commit (tag v2.4.0). Every file is checked against its pinned SHA-256 before
 it is installed. No import library is staged: EDVR loads the loader
 dynamically. The frame-generation effect version is whatever ffxQuery reports
-at runtime; this pin's header constant is 4.0.1.
+at runtime; this pin's header constant is 4.0.2.
 
 The repository stores the DLLs as ordinary git blobs (no Git LFS), so
 raw.githubusercontent.com serves the binaries themselves; the SHA-256 pins
@@ -51,19 +51,19 @@ import urllib.request
 from pathlib import Path
 
 URL = "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK"
-COMMIT = "60f4ea81909200d8542eca14dccb2628b763a9a3"  # FidelityFX SDK v2.3.0 (tag v2.3.0, 2026-06-24)
-SDK_VERSION = "2.3.0"
-RUNTIME_VERSION = "FSR 4.1.1"  # amd_fidelityfx_upscaler_dx12.dll FileVersion 4.1.1.2740; the loader is 2.3.0.2740
+COMMIT = "7539ae8b6568ad29ed78a753404351daf3b5cca7"  # FidelityFX SDK v2.4.0 (tag v2.4.0, 2026-10-28)
+SDK_VERSION = "2.4.0"
+RUNTIME_VERSION = "FSR 4.1.2"  # amd_fidelityfx_upscaler_dx12.dll FileVersion 4.1.2.4555; the loader is 2.3.0.4555
 DLLS = ("bin/amd_fidelityfx_loader_dx12.dll",
         "bin/amd_fidelityfx_upscaler_dx12.dll",
         "bin/amd_fidelityfx_framegeneration_dx12.dll")
 FILES = {
     "include/FidelityFX/api/include/ffx_api.h": (
         "Kits/FidelityFX/api/include/ffx_api.h",
-        "e1a9d1b559eaf75f4cb401f1c43a66e2f3dc9621abfeb58b9c6fac56443177fd"),
+        "4d9dcf243ef5efbf03340a02f16b51a22053243a22e8a9a0b3ce91c26982b4bf"),
     "include/FidelityFX/api/include/ffx_api_types.h": (
         "Kits/FidelityFX/api/include/ffx_api_types.h",
-        "cc0adc0ffc804dd7cd03c39c15581b575e416383177ffe95060201d52cc0fc49"),
+        "53f07c113a9ba493f297656e4481b6539aed0afc9f3cc8da682aa477d270c46c"),
     "include/FidelityFX/api/include/ffx_api_loader.h": (
         "Kits/FidelityFX/api/include/ffx_api_loader.h",
         "18d1901dbbc881e8131b91c65ad44bb3b4a1de6c31435d5b75236f16727ba80e"),
@@ -72,28 +72,28 @@ FILES = {
         "c9afbc3c4c673723e9e5369a666f0ff54560543b5a93537f8ff453bf1c3bf530"),
     "include/FidelityFX/upscalers/include/ffx_upscale.h": (
         "Kits/FidelityFX/upscalers/include/ffx_upscale.h",
-        "65be36d5653eb71c10379e0204f7bb7cd6a8aeec96e6f8cffc5f59ffeb1f89bf"),
+        "13091e7fe5fd9c82b1fb7c044b9f08f664d9653f599d2ea500738709236fca4d"),
     "bin/amd_fidelityfx_loader_dx12.dll": (
         "Kits/FidelityFX/signedbin/amd_fidelityfx_loader_dx12.dll",
-        "e2d85aa05a9bd9ed8b38935fdf5199372cca6f74c12015143bb6f945ee1608aa"),
+        "e2191d3c0828be45eb8affd4e3ec0378f2293adc345b772a7170edcf3b021ecb"),
     "bin/amd_fidelityfx_upscaler_dx12.dll": (
         "Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll",
-        "d0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46"),
+        "aad4fccccb29084a655f9a4f9f613bd22c8c03fb4a0f8840148cc6543b4ccace"),
     "include/FidelityFX/framegeneration/include/ffx_framegeneration.h": (
         "Kits/FidelityFX/framegeneration/include/ffx_framegeneration.h",
-        "e6c42f8a38aab2c7c4fc6931545a8e5463fdf87349902ec9687d9fe4949a0566"),
+        "bc78a18aa95f5157b4699b0602700592b624788c5bc55d1762cb46a1b6557ca1"),
     "include/FidelityFX/framegeneration/include/ffx_framegeneration_api_types.h": (
         "Kits/FidelityFX/framegeneration/include/ffx_framegeneration_api_types.h",
         "396596af3df63310674e8036abd2ad0fcd061e61334e7a2c76653a2be3c686b4"),
     "include/FidelityFX/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h": (
         "Kits/FidelityFX/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h",
-        "d533810bbd6fd4f87dfa2c1657c1457c7b1597b66345827d375b081d67127f66"),
+        "8ddb1cb78f83caf3598509df4968e84c851504cd6c00d9923261a5fc2c7ef0ed"),
     "bin/amd_fidelityfx_framegeneration_dx12.dll": (
         "Kits/FidelityFX/signedbin/amd_fidelityfx_framegeneration_dx12.dll",
-        "02297beedd285e822d3a64f314cf00faf378dcec0edc47ff0c4dd71b3a8c2f18"),
+        "e6843252f58b0341a0d80f6a20bc0d840643ee95bc48c22cac08745344577bb6"),
     "LICENSE.txt": (
         "docs/license.md",
-        "6757f2fec461238da6f84f83536ec195e8c036b1773a06f6f34301b9ed8c0963"),
+        "410f9c138e766e846acf2dc93db768198def0293a017d7e3296815b451688dbe"),
 }
 
 
