@@ -77,15 +77,14 @@ struct GetSleepStatus {
     uint32_t sleepIntervalUs;
     uint8_t useGameSleep;
     uint8_t fullscreenIFlip;
-    uint8_t frameGenerationMultiplier;
-    uint8_t dynamicFrameGeneration;
-    uint32_t dynamicFrameGenerationTargetUs;
+    uint8_t otherStatus[6];  // Unread NVAPI output at bytes 14–19.
     uint8_t reserved[114];
 };
 
 static_assert(sizeof(SetSleepMode) == 44 && offsetof(SetSleepMode, minimumIntervalUs) == 8 &&
               offsetof(SetSleepMode, reserved) == 14, "NV_SET_SLEEP_MODE_PARAMS_VER1 layout");
-static_assert(sizeof(GetSleepStatus) == 136 && offsetof(GetSleepStatus, sleepIntervalUs) == 8 &&
+static_assert(sizeof(GetSleepStatus) == 136 && offsetof(GetSleepStatus, lowLatencyMode) == 4 &&
+              offsetof(GetSleepStatus, sleepIntervalUs) == 8 &&
               offsetof(GetSleepStatus, useGameSleep) == 12 && offsetof(GetSleepStatus, reserved) == 20,
               "NV_GET_SLEEP_STATUS_PARAMS_VER1 layout");
 
