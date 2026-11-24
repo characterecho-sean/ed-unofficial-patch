@@ -7,6 +7,7 @@
 #include "../common/flat_profile_keys.h"
 #include "../common/hotkey.h"
 #include "../common/iniedit.h"
+#include "../common/native_reflex_setting.h"
 #include "state.h"
 
 namespace edvr::installer {
@@ -268,6 +269,8 @@ void SettingsModel::refreshRows() {
                 break;
             }
         }
+        if (dotted == "fix.nvidia_reflex")
+            row.value = native_reflex::modeWord(native_reflex::parseMode(row.value));
         row.isRecommended = sameValue(def, row.value, def.recommended);
         m_rows.push_back(row);
     }

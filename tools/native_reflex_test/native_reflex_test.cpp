@@ -50,14 +50,13 @@ void presents(ModeHistory& history, unsigned count) {
 }
 
 void modeSelection() {
-    check(driverModeForSelection("Auto", false, true) == Mode::Off, "Auto leaves unavailable native generation off");
-    check(driverModeForSelection("AuTo", true, true) == Mode::On, "Auto follows the saved native generation selection");
-    check(driverModeForSelection("oN", false, true) == Mode::On &&
-          driverModeForSelection("bOOsT", false, true) == Mode::Boost, "explicit requests work independently of native generation");
-    check(driverModeForSelection("off", true, true) == Mode::Off &&
-          driverModeForSelection("invalid", true, true) == Mode::Off, "Off and unknown choices remain off");
-    check(driverModeForSelection("on", true, false) == Mode::Off &&
-          driverModeForSelection("auto", true, false) == Mode::Off, "flat never requests NVIDIA low latency");
+    check(parseMode("oN") == Mode::On && parseMode("bOOsT") == Mode::Boost &&
+          parseMode("Off") == Mode::Off, "the three driver modes accept existing case-insensitive values");
+    check(parseMode("AuTo") == Mode::On, "retired Auto profiles use On");
+    check(parseMode("invalid") == Mode::Off && parseMode("") == Mode::Off,
+          "unknown and empty settings make no driver request");
+    for (Mode mode : {Mode::Off, Mode::On, Mode::Boost})
+        check(parseMode(modeWord(mode)) == mode, "each displayed setting round-trips to its driver mode");
 }
 
 void modeParameters() {

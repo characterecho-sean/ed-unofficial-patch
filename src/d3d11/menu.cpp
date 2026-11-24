@@ -27,6 +27,7 @@
 #include "../common/iniedit.h"
 #include "../common/log.h"
 #include "../common/mirror_location.h"
+#include "../common/native_reflex_setting.h"
 #include "../common/native_render_settings.h"
 #include "../common/openxr_resolution_entries.h"
 #include "../common/parallel_projection_notice.h"
@@ -437,7 +438,10 @@ std::string rowValue(const MenuRowDef& d) {
     if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
         strcmp(d.key, "temporal_aa") == 0)
         return Config::get().requestedTemporalMode();
-    return Config::get().getString(dottedOf(d).c_str(), d.shipped);
+    const std::string key = dottedOf(d);
+    const std::string value = Config::get().getString(key.c_str(), d.shipped);
+    if (key == "fix.nvidia_reflex") return native_reflex::modeWord(native_reflex::parseMode(value));
+    return value;
 }
 
 bool flatDlssSelected() {

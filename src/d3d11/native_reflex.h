@@ -2,31 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <string_view>
+#include "../common/native_reflex_setting.h"
 
 struct ID3D11Device;
 
 namespace edvr::native_reflex {
-
-enum class Mode : uint8_t { Off, On, Boost };
-
-// Auto uses the saved native VR frame-generation selection, so a temporary
-// pause in generation does not turn off a driver request.
-constexpr Mode driverModeForSelection(std::string_view choice, bool nativeFrameGenerationSelected,
-                                      bool vr) noexcept {
-    if (!vr) return Mode::Off;
-    const auto matches = [choice](std::string_view expected) {
-        if (choice.size() != expected.size()) return false;
-        for (size_t i = 0; i < choice.size(); ++i) {
-            const char c = choice[i];
-            if ((c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c) != expected[i]) return false;
-        }
-        return true;
-    };
-    if (matches("on")) return Mode::On;
-    if (matches("boost")) return Mode::Boost;
-    return nativeFrameGenerationSelected && matches("auto") ? Mode::On : Mode::Off;
-}
 
 // Per native frame session. The provider serializes config updates, Presents
 // and close. Cleanup ownership begins when an enable request is accepted.

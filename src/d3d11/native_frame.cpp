@@ -82,9 +82,7 @@ void refreshLowLatency(State& state, uint64_t cached, bool fromPresent) {
     if (stamp != (cached & ~kLowLatencyObservationPending)) {
         Mode mode = Mode::Off;
         if ((stamp & 1) && !edvr::graphicsRuntimeDisabled()) {
-            const auto choice = edvr::Config::get().getString("fix.nvidia_reflex", "auto");
-            // This build does not provide native VR frame generation.
-            mode = driverModeForSelection(choice, false, true);
+            mode = parseMode(edvr::Config::get().getString("fix.nvidia_reflex", "on"));
         }
         if (stamp != lowLatencyConfigStamp()) return;
         changed = updateMode(state.lowLatency, state.device, mode, state.generation);

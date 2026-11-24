@@ -137,7 +137,7 @@ Result observe(ID3D11Device* device, Mode mode) {
 }
 
 void logMode(Mode mode, const char* event, uint64_t session, const Result& result, unsigned presents) {
-    const char* requested = mode == Mode::Boost ? "boost" : mode == Mode::On ? "on" : "off";
+    const char* requested = modeWord(mode);
     const auto set = statusWord(result.setStatus), get = statusWord(result.getStatus);
     const auto readbackBit = [&](uint8_t value) {
         return result.getStatus != 0 ? "unknown" : value != 0 ? "1" : "0";

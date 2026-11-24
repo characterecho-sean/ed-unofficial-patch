@@ -290,10 +290,10 @@ window, VR view, still lists the row.
 ### NVIDIA low latency
 
 The VR Performance page offers **NVIDIA low latency** (`fix.nvidia_reflex`).
-**On** requests NVIDIA's driver low latency mode for the game's D3D11 device.
-**On + Boost** also requests higher GPU clocks. **Off** withdraws a request
-ED-UP owns. **Auto** is the default and leaves the driver unchanged when
-native VR frame generation is unavailable.
+**On** is the default and requests NVIDIA's driver low latency mode for the
+game's D3D11 device. **On + Boost** also requests higher GPU clocks. **Off**
+withdraws a request ED-UP owns. Older profiles saved with Auto use On.
+[NVIDIA Reflex programming guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideReflex.md#80-nvidia-reflex-qa-checklist)
 
 ED-UP checks the device's existing low latency and sleep state before it
 changes the mode. A reported existing policy or an unreadable baseline
