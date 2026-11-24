@@ -9,8 +9,11 @@
 #include "../common/frame_flag.h"
 #include "../common/log.h"
 #include "../common/openxr_resolution_entries.h"
+#include "../common/runtime_profile.h"
+#include "graphics_runtime.h"
 #include "journal_watch.h"
 #include "native_on_foot.h"
+#include "native_reflex.h"
 #include "native_render_labels.h"
 
 #include <algorithm>
@@ -32,6 +35,8 @@ std::atomic<uint64_t> g_heldLatches{0};   // TEMPORARY (concourse vr probe): lat
 struct State {
     ID3D11Device* device = nullptr; // borrowed; the host owns its lifetime
     uint64_t generation = 0;
+    edvr::native_reflex::ModeHistory lowLatency;
+    DWORD lowLatencyProducerThread = 0;
     uint64_t sequenceFloor = 0;
     bool active = false;
     bool invalidated = false;
@@ -57,6 +62,39 @@ State g_pool[kPoolSize];
 unsigned g_used = 0;
 State* g_current = nullptr;
 std::mutex g_mutex;
+// Config generation and VR profile fit in the low 33 bits. The common path
+// needs no provider lock when there is no session or no work for this one.
+constexpr uint64_t kLowLatencyObservationPending = uint64_t{1} << 63;
+constexpr uint64_t kLowLatencyNeedsRefresh = uint64_t{1} << 62;
+constexpr uint64_t kLowLatencyNoSession = UINT64_MAX;
+std::atomic<uint64_t> g_lowLatencyStamp{kLowLatencyNoSession};
+
+uint64_t lowLatencyConfigStamp() {
+    return (uint64_t(edvr::Config::get().generation()) << 1) | uint64_t(edvr::runtimeVrProfile());
+}
+
+// g_mutex protects the session. Reading the stamp again after the settings
+// avoids issuing a mode request from a config change in flight.
+void refreshLowLatency(State& state, uint64_t cached, bool fromPresent) {
+    using namespace edvr::native_reflex;
+    const uint64_t stamp = lowLatencyConfigStamp();
+    bool changed = false;
+    if (stamp != (cached & ~kLowLatencyObservationPending)) {
+        Mode mode = Mode::Off;
+        if ((stamp & 1) && !edvr::graphicsRuntimeDisabled()) {
+            const auto choice = edvr::Config::get().getString("fix.nvidia_reflex", "auto");
+            // This build does not provide native VR frame generation.
+            mode = driverModeForSelection(choice, false, true);
+        }
+        if (stamp != lowLatencyConfigStamp()) return;
+        changed = updateMode(state.lowLatency, state.device, mode, state.generation);
+    }
+    // The Present that changed the mode precedes the new request.
+    if (fromPresent && !changed) notePresent(state.lowLatency, state.device, state.generation);
+    g_lowLatencyStamp.store(stamp | (state.lowLatency.observing() ? kLowLatencyObservationPending : 0),
+                            std::memory_order_release);
+}
+
 // F22: the look-to-aim total and the game frame it was taken at, for version 6 (set by nativeFrameSetLookYaw; guarded by g_mutex).
 float g_lookYaw = 0.0f;
 uint32_t g_lookYawFrame = 0;
@@ -642,6 +680,8 @@ HRESULT WINAPI close(void* context) {
         edvr::retireGlitchConsumer();
         state->consumerAnnounced = false;
     }
+    edvr::native_reflex::closeMode(state->lowLatency, state->device, state->generation);
+    g_lowLatencyStamp.store(kLowLatencyNoSession, std::memory_order_release);
     state->active = false;
     state->device = nullptr;
     state->invalidated = true;
@@ -658,6 +698,16 @@ HRESULT WINAPI close(void* context) {
 } // namespace
 
 namespace edvr {
+
+void native_reflex::updateOnGamePresent(ID3D11Device* device) {
+    if (!device) return;
+    const auto cached = g_lowLatencyStamp.load(std::memory_order_acquire);
+    if (cached == kLowLatencyNoSession || cached == lowLatencyConfigStamp()) return;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_current || GetCurrentThreadId() != g_current->lowLatencyProducerThread ||
+        (device != g_current->device && !sameDevice(g_current->device, device))) return;
+    refreshLowLatency(*g_current, g_lowLatencyStamp.load(std::memory_order_relaxed), true);
+}
 
 // For temporal_pass.cpp's edges-mode fovea (same DLL, no table needed):
 // the cached triple beginFrame already resolved above, vertical/outer/
@@ -779,6 +829,10 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     state.generation = request->generation;
     state.active = true;
     g_current = &state;
+    // NativeRuntimeHost acquires through the game producer dispatcher.
+    state.lowLatencyProducerThread = GetCurrentThreadId();
+    g_lowLatencyStamp.store(kLowLatencyNeedsRefresh, std::memory_order_release);
+    refreshLowLatency(state, kLowLatencyNeedsRefresh, false);
     table->context = &state;
     table->beginFrame = beginFrame;
     table->reservedCall = retiredCall;

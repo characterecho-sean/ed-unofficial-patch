@@ -784,7 +784,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\desktop_window.cpp" "src\d3d11\desktop_window_cursor.cpp" ^
 
     "src\d3d11\native_sharpen.cpp" ^
-    "src\d3d11\native_frame.cpp" ^
+    "src\d3d11\native_frame.cpp" "src\d3d11\native_reflex.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" ^
@@ -1269,6 +1269,17 @@ if errorlevel 1 ( echo [edup] ERROR: weapon UI getter probe fixture assembly bui
 if errorlevel 1 ( echo [edup] ERROR: native frame provider test build failed & exit /b 1 )
 "%BUILD%\native_frame_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_frame_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_native_reflex_test
+echo [edup] === native_reflex_test.exe ===
+if not exist "%OBJ%\native_reflex" mkdir "%OBJ%\native_reflex"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\native_reflex\\" /Fe"%BUILD%\native_reflex_test.exe" ^
+    "tools\native_reflex_test\native_reflex_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 ( echo [edup] ERROR: NVIDIA low latency policy test build failed & exit /b 1 )
+"%BUILD%\native_reflex_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_reflex_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_fss_reveal_test

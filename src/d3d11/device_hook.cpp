@@ -5,6 +5,7 @@
 #include "gpu_frame_timing.h"
 #include "flat_cpu_trace.h"   // the flat profile's CPU markers: event 5 per owned Present, spans 0x200-0x207
 #include "gpu_census.h"   // gpuCensusFrameWorkOpen/End: the frame's GPU work span's door end (2026-10-14)
+#include "native_reflex.h"
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
 
@@ -2031,6 +2032,9 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         presentFrameBoundary();
         span.finishVoid(0);
     }
+    // The boundary has committed any settings reload or profile transition.
+    if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))
+        native_reflex::updateOnGamePresent(dev);
     const int64_t boundaryT1 = qpcNow();
     // Whatever the boundary did after its last tick (all of it, when
     // graphicsRuntimeDisabled cut it short), and the end of the boundary's ticks.

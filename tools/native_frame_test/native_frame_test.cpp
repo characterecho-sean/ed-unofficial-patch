@@ -8,6 +8,7 @@
 #include "../../src/d3d11/native_on_foot.h"   // F36: weapon stability steps aside while native on foot is active
 #include "../../src/d3d11/native_on_foot_optic_capture.h"  // F76: bounded exact-image optic capture ledger
 #include "../../src/d3d11/native_on_foot_ads_incident.h"
+#include "../../src/d3d11/native_reflex.h"
 
 #include <d3d11.h>
 #include <immintrin.h>
@@ -139,6 +140,32 @@ bool journalOnFoot() { return g_onFoot; }
 
 using Microsoft::WRL::ComPtr;
 
+// Observe provider wiring without loading the system NVIDIA driver in the rig.
+namespace {
+struct LatencyDriverCall {
+    ID3D11Device* device;
+    edvr::native_reflex::Mode mode;
+    bool alreadyOwned;
+};
+std::vector<LatencyDriverCall> g_latencyCalls;
+std::vector<unsigned> g_latencySamples;
+}
+
+namespace edvr::native_reflex::detail {
+Result apply(ID3D11Device* device, Mode mode, bool alreadyOwned) {
+    g_latencyCalls.push_back({device, mode, alreadyOwned});
+    return {"fixture", true, 0, 0};
+}
+Result observe(ID3D11Device*, Mode mode) {
+    Result result{"fixture", true, kUnavailable, 0};
+    result.readback.lowLatencyMode = mode != Mode::Off;
+    return result;
+}
+void logMode(Mode, const char*, uint64_t, const Result&, unsigned count) {
+    if (count) g_latencySamples.push_back(count);
+}
+}
+
 extern "C" uintptr_t g_weaponUiGetterTarget = 0;
 extern "C" uint64_t g_weaponUiProbeCalls = 0;
 extern "C" uint64_t g_weaponUiProbeArgs[2] = {};
@@ -262,6 +289,43 @@ int wmain(int argc, wchar_t** argv) {
                                       EDVR_NATIVE_FRAME_VERSION_1};
     check(edvrAcquireNativeFrame(&request, &blockedTable) == E_PENDING,
           "only one active provider session");
+    {
+        using edvr::native_reflex::Mode;
+        using edvr::native_reflex::updateOnGamePresent;
+        auto& cfg = edvr::Config::get();
+        const auto profile = edvr::runtimeProfileValue();
+        check(g_latencyCalls.empty(), "missing NVIDIA low latency setting leaves the driver untouched");
+
+        cfg.set("fix.nvidia_reflex", "BoOsT");
+        std::thread otherThread([&] { updateOnGamePresent(device.Get()); });
+        otherThread.join();
+        ComPtr<ID3D11Device> otherDevice;
+        check(SUCCEEDED(createDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                                     nullptr, 0, D3D11_SDK_VERSION, &otherDevice, nullptr, nullptr)),
+              "second WARP device for low latency ownership fence");
+        updateOnGamePresent(otherDevice.Get());
+        updateOnGamePresent(nullptr);
+        check(g_latencyCalls.empty(), "live change requires the acquired producer and device");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 1 && g_latencyCalls.back().device == device.Get() &&
+              g_latencyCalls.back().mode == Mode::Boost && !g_latencyCalls.back().alreadyOwned,
+              "the enrolled producer applies the live choice to the acquired device");
+
+        for (unsigned i = 0; i < 3; ++i) updateOnGamePresent(device.Get());
+        check(g_latencySamples.empty(), "the Present applying the mode is outside the new observation window");
+        for (unsigned i = 3; i < 64; ++i) updateOnGamePresent(device.Get());
+        check(g_latencySamples == std::vector<unsigned>{4, 16, 64},
+              "accepted mode readback runs on the scheduled producer Presents");
+
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 2 && g_latencyCalls.back().mode == Mode::Off &&
+              g_latencyCalls.back().alreadyOwned, "switching to flat withdraws the VR mode");
+        edvr::runtimeProfileSet(profile);
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 3 && g_latencyCalls.back().mode == Mode::Boost,
+              "switching back to VR restores the saved request");
+    }
     edvr::publishGameDevice(device.Get());
     edvr::announceSceneArrived();
 
@@ -6458,6 +6522,10 @@ int wmain(int argc, wchar_t** argv) {
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");
     check(table.close(table.context) == S_FALSE, "close is idempotent");
+    check(g_latencyCalls.size() == 4 && g_latencyCalls.back().device == device.Get() &&
+          g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off && g_latencyCalls.back().alreadyOwned,
+          "closing the XR session withdraws its driver request once");
+    edvr::Config::get().set("fix.nvidia_reflex", "auto");
     check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
           "closed context rejects callbacks");
 
