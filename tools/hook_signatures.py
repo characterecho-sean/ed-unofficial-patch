@@ -1999,6 +1999,8 @@ AUDIT_EXACT_ONLY = (
 )
 # Literals in the image's range that are not game addresses: (path glob, values or None for all, why).
 AUDIT_NOT_ADDRESSES = (
+    ("d3d11/native_reflex.cpp", (0x0150E828,),
+     "public NvAPI_Initialize function ID from NVIDIA nvapi_interface.h"),
     ("*", (0x100000, 0x1FFFFF, 0x7FFFFE, 0x7FFFFF, 0x800000, 0xFFFFFF, 0x1000193),
      "bit masks, a 1 MiB bound and the FNV-1a-32 prime"),
     ("d3d11/dxbc_*.h", None, "DXBC shader tokens"),
