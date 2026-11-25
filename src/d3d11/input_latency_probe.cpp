@@ -1,6 +1,7 @@
 #include "input_latency_probe.h"
 #include "input_latency_state.h"
 #include "../common/log.h"
+#include "../common/native_reflex_frame.h"
 
 #include <windows.h>
 #include <d3d11_4.h>
@@ -40,6 +41,7 @@ const char* reasonWord(Refusal reason) noexcept {
     case Refusal::Stopped: return "stopped";
     case Refusal::BaselineMismatch: return "baseline_mismatch";
     case Refusal::CandidateOverflow: return "candidate_overflow";
+    case Refusal::InputReadLost: return "input_read_lost";
     }
     return "invalid_reason";
 }
@@ -47,6 +49,7 @@ const char* reasonWord(Refusal reason) noexcept {
 constexpr size_t kUiCandidates = 4;
 struct UiFrame {
     UiCandidateReceipt receipt;
+    EdvrNativeReflexSource nativeSource{};
     ComPtr<ID3D11Texture2D> source[2], staging[2];
     uint32_t width[2]{}, height[2]{};
     DXGI_FORMAT format[2]{};
@@ -55,7 +58,11 @@ struct UiFrame {
 };
 struct UiRequest {
     bool active = false, baseline = false, released = false, prepared = false;
+    bool primingAcknowledged = false;
     uint64_t request = 0, beganQpc = 0, baselineSequence = 0;
+    uint64_t primeFence = 0, releaseFloorTick = 0, sourceGeneration = 0;
+    uintptr_t keyboardDevice = 0;
+    uint64_t keyboardReads = 0, qualifiedKeyboardReads = 0, unqualifiedKeyboardReads = 0, lastKeyboardToken = 0;
     uint64_t scanCode = 0, roi[2]{}, lowPpm = 0, highPpm = 0, targetOn = 0;
     uint32_t sourceWidth[2]{}, sourceHeight[2]{};
     DXGI_FORMAT sourceFormat[2]{};
@@ -71,12 +78,13 @@ struct Probe {
     ComPtr<ID3D11Texture2D> responseTextures[2];
     HANDLE mapping = nullptr, stopEvent = nullptr, fenceEvent = nullptr, worker = nullptr;
     Shared* shared = nullptr;
-    DWORD ownerThread = 0;
+    DWORD ownerThread = 0, keyboardThread = 0;
     uint64_t frequency = 0, generation = 0, fenceValue = 0;
     uint64_t pendingFence = 0, pendingRequest = 0, reservationAt = 0;
     native_reflex::Mode mode = native_reflex::Mode::Off;
     Pulse pulse;
     ButtonEdges buttons;
+    KeyboardReleaseCache keyboard;
     PairBoundary pairs;
     UiRequest ui;
     unsigned textureNotes = 0;
@@ -108,6 +116,7 @@ bool attempted = false;
 void clearUiFrames(UiRequest& ui) noexcept {
     for (auto& frame : ui.frames) {
         frame.receipt = {}; frame.fenceValue = 0;
+        frame.nativeSource = {};
         frame.source[0].Reset(); frame.source[1].Reset();
     }
     ui.head = ui.count = 0;
@@ -115,6 +124,7 @@ void clearUiFrames(UiRequest& ui) noexcept {
 void clearUiRequest(Probe& probe) noexcept {
     clearUiFrames(probe.ui);
     probe.ui.active = probe.ui.baseline = probe.ui.released = probe.ui.prepared = false;
+    probe.ui.primingAcknowledged = false;
 }
 bool uiSettingsMatch(const Probe& probe) noexcept {
     const auto& s = *probe.shared;
@@ -172,6 +182,21 @@ void publishLocked(Probe& probe) noexcept {
 }
 
 void rejectLocked(Probe& probe, Refusal reason) noexcept {
+    if (probe.ui.active && !probe.pulse.active() && probe.reports < 256) {
+        const auto& ui = probe.ui;
+        const UiFrame* frame = ui.count ? &ui.frames[ui.head] : nullptr;
+        const uint64_t eyes = frame ? frame->receipt.eyeMask : 0;
+        const uint64_t submits = frame ? frame->receipt.submitMask : 0;
+        const uint64_t gpu = frame ? frame->receipt.gpuQpc : 0;
+        Log::get().note("input_latency_ui_preparation,request=%llu,reason=%s,stage=%s,baseline=%u,"
+            "baseline_sequence=%llu,key_released=%u,keyboard_reads=%llu,qualified_keyboard_reads=%llu,last_input_tick=%llu,"
+            "queued=%u,eye_mask=%llu,submit_mask=%llu,gpu_notification_qpc=%llu",
+            ui.request, reasonWord(reason), !ui.primingAcknowledged ? "priming_cycles" :
+                uiPreparationStage(ui.baseline, ui.released, eyes, submits, gpu != 0),
+            unsigned(ui.baseline), ui.baselineSequence, unsigned(ui.released), ui.keyboardReads,
+            ui.qualifiedKeyboardReads, ui.lastKeyboardToken,
+            unsigned(ui.count), eyes, submits, gpu);
+    }
     if (probe.pulse.active()) {
         probe.pulse.reject(reason);
         publishLocked(probe);
@@ -200,7 +225,7 @@ void prepareUiLocked(Probe& probe, uint64_t now) noexcept {
     const auto roiValid = [](uint64_t roi) {
         return uint16_t(roi) < uint16_t(roi >> 32) && uint16_t(roi >> 16) < uint16_t(roi >> 48);
     };
-    if (!s.request || s.sentQpc || s.responseKind != uint64_t(ResponseKind::GameUi) ||
+    if (!s.request || !s.sentQpc || s.sentQpc > now || s.responseKind != uint64_t(ResponseKind::GameUi) ||
         (s.inputScanCode != 0xC8 && s.inputScanCode != 0xD0) || s.targetOn > 1 ||
         s.orangeLowPpm >= s.orangeHighPpm || s.orangeHighPpm > 1000000 ||
         !roiValid(s.roiLeft) || !roiValid(s.roiRight)) {
@@ -208,12 +233,13 @@ void prepareUiLocked(Probe& probe, uint64_t now) noexcept {
     }
     clearUiRequest(probe);
     ui.active = true; ui.request = s.request; ui.beganQpc = now;
+    ui.primeFence = s.sentQpc; ui.releaseFloorTick = ui.sourceGeneration = 0; ui.keyboardDevice = 0;
+    ui.keyboardReads = ui.qualifiedKeyboardReads = ui.unqualifiedKeyboardReads = ui.lastKeyboardToken = 0;
     ui.scanCode = s.inputScanCode; ui.roi[0] = s.roiLeft; ui.roi[1] = s.roiRight;
     ui.lowPpm = s.orangeLowPpm; ui.highPpm = s.orangeHighPpm; ui.targetOn = s.targetOn;
     for (unsigned eye = 0; eye < 2; ++eye) {
         ui.sourceWidth[eye] = ui.sourceHeight[eye] = 0; ui.sourceFormat[eye] = DXGI_FORMAT_UNKNOWN;
     }
-    probe.buttons.reset(); probe.pairs.reset();
     auto& shared = *probe.shared;
     shared.consumedQpc = shared.renderSequence = shared.eyeMask = shared.submitMask = 0;
     shared.gpuCompleteQpc = shared.submitCompleteQpc = shared.reason = shared.source = 0;
@@ -228,8 +254,34 @@ void publishPreparedLocked(Probe& probe) noexcept {
     ui.prepared = true;
     probe.shared->renderSequence = ui.baselineSequence;
     probe.shared->eyeMask = probe.shared->submitMask = 3;
+    probe.shared->sentQpc = 0; // switch from priming fence to measured-stamp ownership
     writeWord(probe.shared->ready, 1);
     writeWord(probe.shared->state, uint64_t(Phase::Prepared));
+}
+
+void refreshKeyboardReadyLocked(Probe& probe) noexcept {
+    auto& ui = probe.ui;
+    if (!ui.active) return;
+    if (!ui.primingAcknowledged) {
+        const uintptr_t device = probe.keyboard.acknowledge(ui.primeFence, unsigned(ui.scanCode));
+        if (device) {
+            ui.keyboardDevice = device; ui.primingAcknowledged = true;
+            ui.releaseFloorTick = probe.keyboard.releaseTick(device);
+            probe.pairs.consumed(); // no half-pair baseline across acknowledgement
+            if (probe.reports < 256)
+                Log::get().note("input_latency_ui_priming,request=%llu,fence_qpc=%llu,device=%p,release_tick=%llu,state=observed",
+                    ui.request, ui.primeFence, reinterpret_cast<void*>(device), ui.releaseFloorTick);
+        }
+    }
+    ui.released = ui.primingAcknowledged && probe.keyboard.released(ui.keyboardDevice, ui.primeFence);
+    if (!ui.prepared && ui.released) {
+        const uint64_t releasedAt = probe.keyboard.releaseTick(ui.keyboardDevice);
+        if (releasedAt > ui.releaseFloorTick) {
+            ui.releaseFloorTick = releasedAt; ui.baseline = false;
+            clearUiFrames(ui); probe.pairs.consumed();
+        }
+    }
+    writeWord(probe.shared->ready, ui.released && ui.prepared ? 1 : 0);
 }
 
 // Import one release-published external request and bound its entire lifetime
@@ -261,12 +313,13 @@ void synchronizeLocked(Probe& probe, uint64_t now) noexcept {
             prepareUiLocked(probe, now);
         }
         if (!probe.ui.active) return;
-        if (!uiSettingsMatch(probe) || (phase == Phase::Preparing && probe.shared->sentQpc) ||
+        if (!uiSettingsMatch(probe) || (phase == Phase::Preparing && probe.shared->sentQpc != probe.ui.primeFence) ||
             (phase == Phase::Prepared && !probe.ui.prepared)) {
             rejectLocked(probe, Refusal::InvalidRequest); return;
         }
         if (!now || now < probe.ui.beganQpc || now - probe.ui.beganQpc > probe.frequency * 2)
             rejectLocked(probe, Refusal::Timeout);
+        else refreshKeyboardReadyLocked(probe);
         return;
     }
     if (probe.ui.active && !uiSettingsMatch(probe)) { rejectLocked(probe, Refusal::InvalidRequest); return; }
@@ -453,24 +506,38 @@ void pollUiLocked(Probe& probe, uint64_t now) noexcept {
         const auto right = orangeState(ppm[1], uint32_t(ui.lowPpm), uint32_t(ui.highPpm));
         if (!ui.prepared) {
             probe.shared->baselineLeftPpm = ppm[0]; probe.shared->baselineRightPpm = ppm[1];
-            probe.shared->renderSequence = frame.receipt.sequence;
-            if (left != opposite || right != opposite) { rejectLocked(probe, Refusal::BaselineMismatch); return; }
-            ui.baseline = true; ui.baselineSequence = frame.receipt.sequence;
-            clearUiFrames(ui);
-            publishPreparedLocked(probe);
-            return;
-        }
-        probe.shared->responseLeftPpm = ppm[0]; probe.shared->responseRightPpm = ppm[1];
-        if (uiTargetMatches(frame.receipt, ui.baselineSequence, ppm[0], ppm[1], uint32_t(ui.lowPpm),
-                            uint32_t(ui.highPpm), ui.targetOn != 0)) {
-            if (probe.pulse.uiResponse(frame.receipt.sequence, frame.receipt.gpuQpc, frame.receipt.submitQpc, now))
-                publishLocked(probe);
-            else if (probe.pulse.terminal()) publishLocked(probe);
-            return;
+            if (left == opposite && right == opposite && frame.receipt.renderedTick > ui.releaseFloorTick) {
+                probe.shared->renderSequence = frame.receipt.sequence;
+                ui.baseline = true; ui.baselineSequence = frame.receipt.sequence;
+                if (probe.reports < 256)
+                    Log::get().note("input_latency_ui_baseline,request=%llu,sequence=%llu,left_ppm=%u,right_ppm=%u,"
+                        "prime_release_tick=%llu,baseline_render_tick=%llu,source_generation=%llu,keyboard_reads=%llu",
+                        ui.request, ui.baselineSequence, ppm[0], ppm[1], ui.releaseFloorTick,
+                        frame.receipt.renderedTick, ui.sourceGeneration, ui.keyboardReads);
+                clearUiFrames(ui); publishPreparedLocked(probe); return;
+            }
+            // A completed priming key cycle can precede its UI update. Wait
+            // for fresh opposite-state pixels instead of arming on old OFF.
+        } else {
+            probe.shared->responseLeftPpm = ppm[0]; probe.shared->responseRightPpm = ppm[1];
+            if (uiTargetMatches(frame.receipt, ui.baselineSequence, ppm[0], ppm[1], uint32_t(ui.lowPpm),
+                                uint32_t(ui.highPpm), ui.targetOn != 0, probe.pulse.result().consumedTickToken)) {
+                if (probe.pulse.uiResponse(frame.receipt.sequence, frame.receipt.gpuQpc, frame.receipt.submitQpc, now,
+                                          frame.receipt.renderedTick, frame.receipt.renderedPose)) {
+                    if (probe.reports < 256)
+                        Log::get().note("input_latency_ui_response,request=%llu,input_tick=%llu,render_tick=%llu,render_pose=%llu,"
+                            "source_generation=%llu,native_sequence=%llu,scope=actual_ui_pixel_response_not_world_frame_identity",
+                            ui.request, probe.pulse.result().consumedTickToken, frame.receipt.renderedTick,
+                            frame.receipt.renderedPose, frame.receipt.sourceGeneration, frame.receipt.sequence);
+                    publishLocked(probe);
+                } else if (probe.pulse.terminal()) publishLocked(probe);
+                return;
+            }
         }
         // No synthetic response and no zero-valued success: retain the input
         // receipt, discard only this completed pre-change candidate and retry.
         frame.receipt = {}; frame.fenceValue = 0;
+        frame.nativeSource = {};
         frame.source[0].Reset(); frame.source[1].Reset();
         ui.head = (ui.head + 1) % kUiCandidates; --ui.count;
     }
@@ -479,10 +546,19 @@ void pollUiLocked(Probe& probe, uint64_t now) noexcept {
 void copyUiEyeLocked(Probe& probe, ID3D11Texture2D* texture, const D3D11_TEXTURE2D_DESC& desc,
                      uint64_t sequence, unsigned eye) noexcept {
     auto& ui = probe.ui;
+    EdvrNativeReflexSource source{};
+    if (!native_reflex::readSource(texture, source)) { rejectLocked(probe, Refusal::MixedFrame); return; }
+    if (ui.sourceGeneration && ui.sourceGeneration != source.generation) { rejectLocked(probe, Refusal::GenerationChanged); return; }
+    ui.sourceGeneration = source.generation;
+    if (!ui.prepared && source.frameToken <= ui.releaseFloorTick) return;
     bool bgra = false;
     const DXGI_FORMAT format = uiCopyFormat(desc.Format, bgra);
     PixelRoi roi{};
     if (format == DXGI_FORMAT_UNKNOWN || !decodeRoi(ui.roi[eye], desc.Width, desc.Height, roi)) {
+        if (probe.reports < 256)
+            Log::get().note("input_latency_ui_refusal,request=%llu,eye=%u,reason=%s,format=%u,width=%u,height=%u",
+                ui.request, eye, format == DXGI_FORMAT_UNKNOWN ? "byte_format_unsupported" : "roi_unsupported",
+                unsigned(desc.Format), desc.Width, desc.Height);
         rejectLocked(probe, Refusal::TextureUnsupported); return;
     }
     if (ui.sourceWidth[eye] && (ui.sourceWidth[eye] != desc.Width || ui.sourceHeight[eye] != desc.Height ||
@@ -499,7 +575,11 @@ void copyUiEyeLocked(Probe& probe, ID3D11Texture2D* texture, const D3D11_TEXTURE
         }
         frame = &ui.frames[(ui.head + ui.count++) % kUiCandidates];
         frame->receipt = {}; frame->fenceValue = 0; frame->receipt.sequence = sequence;
+        frame->nativeSource = source;
+        frame->receipt.sourceGeneration = source.generation;
+        frame->receipt.renderedTick = source.frameToken; frame->receipt.renderedPose = source.poseSequence;
     }
+    if (!native_reflex::sameSource(frame->nativeSource, source)) { rejectLocked(probe, Refusal::MixedFrame); return; }
     if (frame->source[1u - eye].Get() == texture) { rejectLocked(probe, Refusal::TextureUnsupported); return; }
     if (!frame->receipt.copyEye(eye)) { rejectLocked(probe, Refusal::DuplicateEye); return; }
     const uint32_t width = roi.right - roi.left, height = roi.bottom - roi.top;
@@ -546,6 +626,8 @@ void configure(ID3D11Device* device, bool wanted, native_reflex::Mode mode, uint
             if (replace || current->mode != mode || current->generation != generation) {
                 rejectLocked(*current, Refusal::GenerationChanged);
                 current->buttons.reset(); current->pairs.reset();
+                current->keyboard.reset();
+                current->keyboardThread = 0;
                 writeWord(current->shared->ready, 0);
                 current->mode = mode; current->generation = generation;
                 writeWord(current->shared->mode, uint64_t(mode));
@@ -593,28 +675,66 @@ void mouseButton(void* device, bool pressed, unsigned source) noexcept {
     }
 }
 
-void keyboardState(void* device, const uint8_t* state256, uint64_t inputTickToken) noexcept {
-    if (!enabled() || !device || !state256 || !inputTickToken) return;
-    // Timestamp the returned API receipt before possible classifier-lock
-    // contention. No GPU context command runs on this input thread.
-    const uint64_t received = nowQpc();
-    std::lock_guard<std::mutex> lock(callbacks);
-    if (!current) return;
-    auto& probe = *current;
-    const uint64_t now = nowQpc();
-    synchronizeLocked(probe, now);
+namespace {
+void keyboardEventLocked(Probe& probe, void* device, unsigned scanCode, bool pressed,
+                         unsigned source, uint64_t received, uint64_t inputTickToken) noexcept {
     auto& ui = probe.ui;
-    if (!ui.active) return;
-    const bool pressed = (state256[ui.scanCode] & 0x80) != 0;
+    if (scanCode != 0xC8 && scanCode != 0xD0) return;
+    if (ui.active) { ++ui.keyboardReads; ui.lastKeyboardToken = inputTickToken; }
+    if (!inputTickToken) {
+        if (ui.active && ++ui.unqualifiedKeyboardReads == 1 && probe.reports < 256)
+            Log::get().note("input_latency_ui_keyboard,request=%llu,input_tick=0,scan_code=%u,source=%u,qualified=0",
+                ui.request, scanCode, source);
+        return; // diagnostics only: never borrow an unqualified release or edge
+    }
+    const DWORD thread = GetCurrentThreadId();
+    if (probe.keyboardThread && probe.keyboardThread != thread) {
+        probe.keyboard.reset(); probe.keyboardThread = thread;
+        if (ui.active) rejectLocked(probe, Refusal::InputReadLost);
+        return;
+    }
+    probe.keyboardThread = thread;
+    if (ui.active && ++ui.qualifiedKeyboardReads == 1 && probe.reports < 256)
+        Log::get().note("input_latency_ui_keyboard,request=%llu,input_tick=%llu,scan_code=%u,pressed=%u,source=%u,qualified=1",
+            ui.request, inputTickToken, scanCode, unsigned(pressed), source);
     const uintptr_t identity = reinterpret_cast<uintptr_t>(device);
-    const bool edge = probe.buttons.press(identity, pressed);
-    ui.released = !pressed && probe.buttons.released(identity);
-    writeWord(probe.shared->ready, ui.released && ui.prepared ? 1 : 0);
+    const bool edge = probe.keyboard.observe(identity, scanCode, pressed, received, inputTickToken);
+    if (!ui.active) return; // priming/readiness is retained before Preparing
+    refreshKeyboardReadyLocked(probe);
     publishPreparedLocked(probe);
-    if (edge && probe.pulse.consume(received, 4, inputTickToken)) {
+    if (identity == ui.keyboardDevice && scanCode == ui.scanCode && edge &&
+        probe.pulse.consume(received, source, inputTickToken)) {
         probe.pairs.consumed();
         publishLocked(probe);
     }
+}
+}
+
+void keyboardState(void* device, const uint8_t* state256, uint64_t inputTickToken) noexcept {
+    if (!enabled() || !device || !state256) return;
+    const uint64_t received = nowQpc();
+    std::lock_guard<std::mutex> lock(callbacks);
+    if (!current) return;
+    synchronizeLocked(*current, nowQpc());
+    for (unsigned dik : {0xC8u, 0xD0u})
+        keyboardEventLocked(*current, device, dik, (state256[dik] & 0x80) != 0, 4, received, inputTickToken);
+}
+
+void keyboardBuffered(void* device, unsigned scanCode, bool pressed, uint64_t inputTickToken, uint64_t received) noexcept {
+    if (!enabled() || !device) return;
+    if (!received) { keyboardReadLost(device); return; }
+    std::lock_guard<std::mutex> lock(callbacks);
+    if (!current) return;
+    synchronizeLocked(*current, nowQpc());
+    keyboardEventLocked(*current, device, scanCode, pressed, 5, received, inputTickToken);
+}
+
+void keyboardReadLost(void* device) noexcept {
+    if (!enabled() || !device) return;
+    std::lock_guard<std::mutex> lock(callbacks);
+    if (!current) return;
+    const bool known = current->keyboard.invalidate(reinterpret_cast<uintptr_t>(device));
+    if (known && current->ui.active) rejectLocked(*current, Refusal::InputReadLost);
 }
 
 void eyeRendered(ID3D11Device* device, ID3D11Texture2D* texture, uint64_t sequence, unsigned eye) noexcept {
@@ -632,10 +752,11 @@ void eyeRendered(ID3D11Device* device, ID3D11Texture2D* texture, uint64_t sequen
     if (probe.shared->responseKind == uint64_t(ResponseKind::GameUi) && !probe.ui.active) return;
     const bool uiMode = probe.ui.active;
     if (uiMode) {
+        if (!probe.ui.primingAcknowledged || (!probe.ui.prepared && !probe.ui.released)) return;
         pollUiLocked(probe, now);
         if (!probe.ui.active || (probe.ui.baseline && !probe.ui.prepared)) return;
         if (probe.ui.prepared && probe.pulse.phase() != Phase::Consumed) return;
-        if (probe.ui.prepared && !probe.pairs.allowsResponse(sequence)) return;
+        if (!probe.pairs.allowsResponse(sequence)) return;
     } else {
         if (probe.pulse.phase() != Phase::Consumed && probe.pulse.phase() != Phase::Rendering) return;
         if (probe.pulse.phase() == Phase::Consumed && !probe.pairs.allowsResponse(sequence)) return;
@@ -711,6 +832,11 @@ void eyeSubmitted(uint64_t sequence, unsigned eye, bool accepted) noexcept {
         auto* frame = findUiFrame(probe.ui, sequence);
         if (!frame) return; // a pre-consumption or partial-pair boundary
         if (eye > 1) { rejectLocked(probe, Refusal::InvalidRequest); return; }
+        EdvrNativeReflexSource liveSource{};
+        if (!native_reflex::readSource(frame->source[eye].Get(), liveSource) ||
+            !native_reflex::sameSource(frame->nativeSource, liveSource)) {
+            rejectLocked(probe, Refusal::MixedFrame); return;
+        }
         const bool duplicate = (frame->receipt.submitMask & (uint64_t(1) << eye)) != 0;
         if (!frame->receipt.submit(eye, accepted, now))
             rejectLocked(probe, duplicate ? Refusal::DuplicateEye : Refusal::SubmitFailed);

@@ -2,21 +2,24 @@
 
 ## Status
 
-The diagnostic is implemented behind `advanced.input_latency_probe` and is off
-by default. Native Windows validation passed for code commit `68ef8538`. The
-stationary comparison completed all 180 pulses with no rejected or missing
-endpoints. It does not establish a consistent latency improvement across the
-enabled modes. The temporary setting remains while this latency-validation
-investigation is open. A successful driver-mode readback and ordinary frame
-timings are not input latency measurements.
+The per-frame native Reflex integration and v3 real-UI diagnostic passed full
+native Windows validation. In a six-pass GPU-saturated stationary VR
+comparison, median keyboard injection to observed UI GPU completion was 104.64
+ms with Reflex Off, 86.39 ms On and 85.60 ms On + Boost. Each enabled pass
+improved both median and p95 against both bracketing Off passes. A lighter
+workload and an earlier head-pose comparison showed no useful, repeatable
+improvement. These are software endpoints, not physical HMD latency; Boost did
+not establish an additional benefit over On. See the comparisons below for
+scope and limits.
 
-The current per-frame Reflex integration is under native validation. Its
-engine/source checks are separate from the earlier synthetic response probe;
-the earlier comparison does not validate this implementation. A new VR
-comparison is required before claiming an improvement.
-The engine hooks support game build 334925, using its exact PE identity and
-entry, callsite and scheduler-protocol pins. Other builds leave Reflex
-unavailable. This support does not extend the existing address resolver.
+The optional response diagnostic, `advanced.input_latency_probe`, remains off
+by default. Its earlier 180-pulse synthetic comparison used code commit
+`68ef8538`; it does not validate the current per-frame integration. A
+successful driver-mode readback and ordinary frame timings are not input
+latency measurements. The engine hooks support game build 334925, using its
+exact PE identity and entry, callsite and scheduler-protocol pins. Other builds
+leave Reflex unavailable. This support does not extend the existing address
+resolver.
 
 ## Reflex frame timing
 
@@ -29,44 +32,57 @@ submission. Its end waits for both the render job and the eye-mirror draw.
 Simulation, rendering and Present can overlap.
 
 The optional source capability is shared by the graphics and native runtime
-modules. It checks device, session, job, pose sequence and actual acceptance
-of both eyes. The finished texture carries that source into the desktop
-mirror. Mixed, reused, backward or unqualified sources emit no Present
-markers. Present markers surround the real DXGI call on its calling thread.
-The game's original mirror route has no qualified source yet.
+modules. It checks device, session, job, pose sequence and actual acceptance of
+both eyes. The finished texture carries that source into the desktop mirror.
+Mixed, reused, backward or unqualified sources emit no Present markers. Present
+markers surround the real DXGI call on its calling thread. The game's original
+mirror route has no qualified source yet.
 
 PCL statistics remain active in every mode and on other GPU vendors. Removed
-PCL ping messages wait for the next actual InputManager boundary. Normal
-game shutdown stops the SDK worker outside loader teardown. The pinned
-NVIDIA SDK license ships with binaries using its statistics header.
-Removed game-window left-button presses, including double-clicks, also queue
-the SDK flash marker for the next actual InputManager boundary. This does not
-depend on the optional response probe or a flash-indicator setting.
+PCL ping messages wait for the next actual InputManager boundary. Normal game
+shutdown stops the SDK worker outside loader teardown. The pinned NVIDIA SDK
+license ships with binaries using its statistics header. Removed game-window
+left-button presses, including double-clicks, also queue the SDK flash marker
+for the next actual InputManager boundary. This does not depend on the optional
+response probe or a flash-indicator setting.
 
-The graphics log's `native_reflex_frame` rows use QPC for the interval from
-the game's HMD pose receipt to desktop Present return. This is a CPU interval.
+The graphics log's `native_reflex_frame` rows use QPC for the interval from the
+game's HMD pose receipt to desktop Present return. This is a CPU interval.
 `native_reflex_latency` rows retain NVIDIA's separate microsecond clock for
 simulation-to-GPU completion. Neither is physical head-motion-to-photon
-latency. The integration follows the
-[native Reflex SDK guide](https://github.com/NVIDIA-RTX/REFLEX/blob/main/NVIDIA%20Reflex%20SDK%20Integration%20Guide.pdf)
+latency. The integration follows the [native Reflex SDK
+guide](https://github.com/NVIDIA-RTX/REFLEX/blob/main/NVIDIA%20Reflex%20SDK%20Integration%20Guide.pdf)
 and [NVAPI interfaces](https://docs.nvidia.com/nvapi/group__dx.html).
 
 ## Real UI response probe
 
-The optional v2 keyboard route uses `--input-key UP` or `DOWN` and configured
-per-eye response regions. It verifies an opposite-state stereo baseline and
-released key before injection. Only a successful, standard keyboard read
-inside the guarded InputManager supplies the consuming tick token. The
-receiver then checks the actual UI pixels in both accepted eye images; it
-does not paint a response. Unsupported formats, failed input ownership,
-unchanged pixels and mixed sequences reject the sample.
+The optional v3 keyboard route uses `--input-key UP` or `DOWN` and configured
+per-eye response regions. State receipts use source 4; ordinary buffered
+keyboard receipts use source 5. Both require the captured game device and a
+successful standard read inside the guarded InputManager. Peeked events,
+overflow, read loss and unsupported layouts cannot certify a receipt. An empty
+buffer does not prove release.
 
-This is a fallback for a controlled UI response. VR head motion is supplied
-by the existing testing framework's pose controls. Framework command receipt,
-game pose receipt, software rendering and physical display remain distinct
+The sender first performs an untimed cycle of the requested key and its
+opposite. These preparation inputs are recorded separately from latency
+samples. Fresh, ordered press/release observations and a later opposite-state
+stereo baseline must be acknowledged before the measured injection. Older
+receivers are refused before priming. The measured receipt retains the actual
+InputManager tick; a later rendered tick can qualify when the changed pixels
+first appear. The request's input tick, rendered tick and pose are logged. The
+receiver then checks the actual UI pixels in both accepted eye images; it does
+not paint a response. Unsupported formats, failed input ownership, unchanged
+pixels and mixed sequences reject the sample. Captured keyboard reads outside
+the guarded invocation provide diagnostics only. They cannot satisfy release
+readiness or consume the request. The preparation log distinguishes missing
+pixel baseline from missing qualified keyboard release.
+
+This is a fallback for a controlled UI response. VR head motion is supplied by
+the existing testing framework's pose controls. Framework command receipt, game
+pose receipt, software rendering and physical display remain distinct
 endpoints.
 
-## What is measured
+## Synthetic response route
 
 A test sender publishes a unique pulse in a process-specific shared-memory
 mapping and timestamps a mouse-button injection with QueryPerformanceCounter.
@@ -94,8 +110,8 @@ in either order. Neither endpoint measures the monitor or HMD's photons.
 The response belongs to the diagnostic. This does not establish how quickly
 Elite's gameplay simulation, weapons or physics respond to that input. The
 earlier comparison build did not implement per-frame Reflex Sleep or NVIDIA
-markers. The probe itself does not change the selected driver policy;
-identical instrumentation is used for Off, On and On + Boost.
+markers. The probe itself does not change the selected driver policy; identical
+instrumentation is used for Off, On and On + Boost.
 
 ## Collection and rejection
 
@@ -121,7 +137,133 @@ The IPC layout and ownership rules live in
 results through Windows Interlocked operations. Mapping names include both PID
 and process creation time to reject stale senders after PID reuse.
 
-## Stationary software comparison
+## Stationary real-UI comparison
+
+On 2026-11-25, the validated working tree based on `f09604f8` included the v3
+keyboard diagnostic, the stable-Present reporting fix and the preparation
+eye-pair fix in this change. The tested `d3d11.dll` SHA-256 was
+`0e588b279957b6dec9d85add743d84ebec5ce2a7fac177084f633b14bdef62e5`. The game
+was build 334925, stationary in Pilot Assessment at Mawson Dock, awaiting Auto
+Launch. The hardware was an Intel Core i9-14900KS, RTX 3080 Ti, driver 560.94
+and Windows 11 build 26200. Mod Linker's existing MCP controlled navigation and
+held its virtual HMD at a fixed reference pose through SteamVR 2.18.4/OpenXR.
+No custom movement controller was added.
+
+The public input sender alternated Up and Down to change an existing game UI
+selection. Successful buffered keyboard reads inside InputManager supplied
+source 5 receipts. The receiver required opposite-state preparation followed by
+changed pixels in both accepted eyes. It painted no response. Each workload
+used six passes in Off, On, On + Boost, On + Boost, On, Off order, with 30
+measured inputs per pass after at least 90 new source frames and a successful
+64-Present driver readback. Within each workload the profiles differed only in
+Reflex mode. DLL, sender, protocol, INI and graphics-file hashes were checked;
+preparation inputs and correctness preflights were excluded from measurements.
+
+| Workload | Mode | Samples | Injection to observed UI GPU completion median / p95 (ms) | Injection to paired submit median / p95 (ms) |
+| --- | --- | ---: | ---: | ---: |
+| Lighter: DLSS K, 1484 by 835 input, 2560 by 1440 output per eye | Off | 60 | 87.16 / 92.43 | 83.51 / 89.08 |
+| Same | On | 60 | 87.43 / 92.83 | 83.76 / 89.18 |
+| Same | On + Boost | 60 | 86.85 / 92.34 | 82.99 / 88.88 |
+| GPU-saturated: DLAA K, 4096 by 2304 input and output per eye | Off | 60 | 104.64 / 108.96 | 59.53 / 65.20 |
+| Same | On | 60 | 86.39 / 92.68 | 60.51 / 66.48 |
+| Same | On + Boost | 60 | 85.60 / 94.84 | 61.23 / 67.08 |
+
+Both workloads completed all 180 measured inputs with no rejected, missing or
+error samples and no discrepancy between raw QPC endpoints and sender metrics.
+Each had 180 logged UI receipts and 177 logged native-source joins; the final
+three source rows were not flushed in the per-pass captures. The raw IPC
+endpoints for those inputs were complete and did not depend on that log join.
+GPU utilization medians were 39 to 42 percent in the lighter workload and 98
+percent in every GPU-saturated pass. Sampled graphics clocks did not show a
+consistent Boost increase.
+
+In the GPU-saturated workload, the two Off medians were 104.99 and 104.33 ms;
+On was 85.03 and 86.84 ms; On + Boost was 85.44 and 85.60 ms. Every enabled
+pass had a lower median and p95 than both Off passes. Pooled medians improved
+17.4 percent On and 18.2 percent On + Boost. This is a repeatable descriptive
+reduction for this workload. It does not demonstrate an extra Boost benefit, an
+improvement in input API receipt or CPU submit time, or a benefit under the
+lighter workload.
+
+Matching UI source IDs to NVIDIA's driver records covered 175 of the 180
+GPU-saturated inputs: 58 Off, 57 On and 60 On + Boost. The other five lacked
+the final driver rows in the captured log. Median render-submission start to
+GPU start was 26.58 ms Off, 4.65 ms On and 4.32 ms On + Boost. GPU execution
+medians were 31.86, 32.56 and 33.00 ms respectively. This independent clock
+supports reduced time waiting for GPU work to begin rather than faster shader
+execution. The logged interval also includes submission work; it is not an
+isolated measurement of the operating-system render queue.
+
+The GPU endpoint is the CPU observer's fence-completion notification after the
+actual changed UI pixels in both eyes. It includes notification and
+thread-scheduling delay. It is not a calibrated GPU timestamp, photon
+measurement or head-motion response. The two workloads also use different
+resolution and antialiasing settings; compare modes within a workload rather
+than attributing differences between workloads to Reflex. The scene remained
+docked throughout. Temporary test graphics and INI changes were restored.
+
+Full native Windows validation passed all 207 jobs for the tested source,
+including the 284-check real-UI probe rig, the 4,366-check native-frame rig,
+input ownership, sender, atomic-helper, menu, engine, Reflex and OpenXR gates.
+The preparation race fixture failed four assertions before its one-condition
+fix; the reporting fixture failed two assertions before its fix. Both passed
+afterward. Optional FSR SDKs and archived executables for builds 332841 and
+334473 were unavailable. The current build's 338 address resolutions passed.
+
+## Native head-pose comparison
+
+On 2026-11-25, code commit `f09604f8a63ec05c0bb74c51fbb65f41938c534d` ran Pilot
+Assessment at Mawson Dock, awaiting Auto Launch. The hardware and rendering
+setup matched the earlier comparison below. The existing Mod Linker MCP
+supplied identical, bounded head yaw between minus and plus four degrees every
+500 ms, restoring the saved pose after each pass. No custom movement controller
+or painted response probe was used.
+
+Each pass measured 30 seconds after at least 90 new qualified source frames and
+a successful final 64-Present driver readback. The order was Off, On, On +
+Boost, On + Boost, On, Off. The profiles differed only in Reflex mode. All
+passes restored the head pose and released their owned simulator lease.
+
+| Mode | Frames across two passes | Pose receipt to desktop Present median / p95 (ms) | NVIDIA simulation start to GPU end median / p95 (ms) |
+| --- | ---: | ---: | ---: |
+| Off | 1,920 | 12.01 / 14.49 | 35.04 / 37.41 |
+| On | 1,918 | 12.40 / 14.77 | 34.90 / 37.24 |
+| On + Boost | 1,949 | 12.48 / 14.90 | 35.05 / 37.49 |
+
+The two GPU medians were 35.20 and 34.93 ms for Off, 34.88 and 34.92 ms for On,
+and 35.18 and 34.93 ms for On + Boost. The first Off pose-to-Present median was
+11.37 ms; the final Off median was 12.51 ms. This drift and the small
+between-mode differences do not establish a repeatable benefit or a systematic
+head-pose latency regression. The endpoints exclude physical display latency.
+The tutorial also raises its launch platform automatically while awaiting Auto
+Launch; this collection did not timestamp that transition. Startup scene drift
+is therefore an additional limitation of this comparison.
+
+Accepted NVIDIA Sleep calls averaged about six microseconds. OpenXR owner wait
+medians were about 13 to 15 ms, while GPU utilization was about 38 to 40
+percent. These observations support a workload paced mainly by the runtime and
+CPU. They do not establish a fixed frame-rate cap. The advertised display rate
+was 90 Hz; application cadence was about 32 frames per second. Sampled graphics
+clocks did not demonstrate a higher clock with Boost.
+
+A separate read-only inspection of the existing completed engine history joined
+256 records to their exact rendered-source tokens. InputManager had returned
+before pose receipt in all 256 records, with a median gap of 14.07 ms. This
+establishes an input-phase-to-pose gap, not the precise entry and return of
+each OpenXR wait or a keyboard-to-pixel response. The actual keyboard-to-UI
+comparison is reported above; a shorter marker interval alone would not
+demonstrate a real response improvement.
+
+The full native Windows build passed all 207 jobs before the exact source was
+committed and promoted through its matching full-build receipt. The engine
+relay rig passed 55 checks. Optional FSR SDKs and the archived executables for
+builds 332841 and 334473 were unavailable; their optional checks were skipped.
+The current build's 338 address resolutions passed. A private collector parser
+initially mistook quoted tags in a log-volume summary for frame records. The
+original captures were preserved, the four completed passes were independently
+reparsed and validated, and only the remaining two passes were then collected.
+
+## Earlier synthetic software comparison
 
 On 2026-11-24, code commit `68ef8538a21e0ee86bc6e439635852dd685193a4` ran Pilot
 Assessment at Mawson Dock. The ship stayed on the launch pad, waiting for Auto
@@ -154,8 +296,8 @@ On did not lower the median or p95 in this run. Boost's median was 1.25 ms
 below Off, while its p95 was only 0.34 ms below Off. One sequential comparison
 with these mixed results does not demonstrate a consistent benefit or qualify
 actual gameplay input lag. Optical/HMD latency and Elite's simulation response
-remain unmeasured. The branch still uses the driver mode API without per-frame
-Reflex sleep or NVIDIA latency markers.
+remain unmeasured. That comparison build used the driver mode API without
+per-frame Reflex Sleep or NVIDIA latency markers.
 
 Use an interval longer than Windows' double-click threshold for source 3. This
 run used 1000 ms with an observed 500 ms threshold and 80 ms button holds. A

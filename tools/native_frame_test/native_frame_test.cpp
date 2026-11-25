@@ -11,6 +11,7 @@
 #include "../../src/d3d11/native_reflex.h"
 #include "../../src/d3d11/native_reflex_session.h"
 #include "../../src/d3d11/input_gate.h"
+#include "../../src/d3d11/input_latency_probe.h"
 
 #include <d3d11.h>
 #include <immintrin.h>
@@ -153,6 +154,9 @@ struct LatencyDriverCall {
 };
 std::vector<LatencyDriverCall> g_latencyCalls;
 std::vector<unsigned> g_latencySamples;
+unsigned g_latencyObservations = 0;
+std::vector<uint64_t> g_frameReports;
+bool g_reportFrameAvailable = true;
 bool g_frameTransportAvailable = true;
 std::shared_ptr<edvr::native_reflex::FrameDriver> g_frameTransport;
 }
@@ -166,6 +170,7 @@ Result apply(ID3D11Device* device, Mode mode, bool alreadyOwned) {
     return {"fixture", true, 0, 0};
 }
 Result observe(ID3D11Device*, Mode mode) {
+    ++g_latencyObservations;
     Result result{"fixture", true, kUnavailable, 0};
     result.readback.lowLatencyMode = mode != Mode::Off;
     return result;
@@ -193,7 +198,10 @@ void stopFrameSession(uint64_t) noexcept {
     fullFrameAvailable.store(false);
     g_frameTransport.reset();
 }
-void reportFrameSession(uint64_t) noexcept {}
+void reportFrameSession(uint64_t generation) noexcept {
+    g_frameReports.push_back(generation);
+    fullFrameAvailable.store(g_reportFrameAvailable);
+}
 }
 
 extern "C" uintptr_t g_weaponUiGetterTarget = 0;
@@ -347,6 +355,39 @@ int wmain(int argc, wchar_t** argv) {
         for (unsigned i = 3; i < 64; ++i) updateOnGamePresent(device.Get());
         check(g_latencySamples == std::vector<unsigned>{4, 16, 64},
               "accepted mode readback runs on the scheduled producer Presents");
+
+        // Reproduce the live failure after the mode's 64-frame observation
+        // window: the enabled receiver keeps Presents off the cheap path,
+        // while reporting still owns source/capability publication.
+        const size_t stableDriverCalls = g_latencyCalls.size();
+        const unsigned stableReadbacks = g_latencyObservations;
+        size_t reports = g_frameReports.size();
+        cfg.set("advanced.input_latency_probe", "on");
+        updateOnGamePresent(device.Get());
+        check(edvr::input_latency_probe::enabled() && g_frameReports.size() == reports + 1 &&
+              g_frameReports.back() == request.generation,
+              "enabling the response probe reports exactly once through the config-refresh path");
+        reports = g_frameReports.size();
+        for (unsigned i = 0; i < 3; ++i) updateOnGamePresent(device.Get());
+        check(g_frameReports.size() == reports + 3 && g_frameReports.back() == request.generation,
+              "probe-enabled Presents keep reporting after the mode cache and 64-frame readbacks stabilize");
+        g_reportFrameAvailable = false;
+        reports = g_frameReports.size();
+        updateOnGamePresent(device.Get());
+        check(g_frameReports.size() == reports + 1 && !edvr::native_reflex::availableForUser(),
+              "stable probe-enabled reporting still publishes the session's updated capability");
+        // Restore the controlled callback result before the next Present so
+        // this reporting check does not request a separate mode transition.
+        g_reportFrameAvailable = true;
+        edvr::native_reflex::fullFrameAvailable.store(true);
+        reports = g_frameReports.size();
+        cfg.set("advanced.input_latency_probe", "off");
+        updateOnGamePresent(device.Get());
+        check(!edvr::input_latency_probe::enabled() && g_frameReports.size() == reports + 1,
+              "disabling the probe retires its receiver and keeps refresh reporting single");
+        check(g_latencyCalls.size() == stableDriverCalls && g_latencyObservations == stableReadbacks &&
+              g_latencySamples == std::vector<unsigned>{4, 16, 64},
+              "continued session reporting does not duplicate driver mode requests or completed readbacks");
 
         edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
         updateOnGamePresent(device.Get());

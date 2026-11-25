@@ -46,6 +46,14 @@ void keyboardState(void* device, const uint8_t* state256, uint64_t token) noexce
         memcpy(read.state.data(), state256, read.state.size());
     }
 }
+struct TestBufferedKey { void* device; unsigned dik; bool pressed; uint64_t token, received; };
+std::array<TestBufferedKey, 64> testBufferedKeys{};
+size_t testBufferedKeyCount = 0, testKeyboardLossCount = 0;
+void* testLastKeyboardLoss = nullptr;
+void keyboardBuffered(void* device, unsigned dik, bool pressed, uint64_t token, uint64_t received) noexcept {
+    if (testBufferedKeyCount < testBufferedKeys.size()) testBufferedKeys[testBufferedKeyCount++] = {device, dik, pressed, token, received};
+}
+void keyboardReadLost(void* device) noexcept { ++testKeyboardLossCount; testLastKeyboardLoss = device; }
 }
 
 namespace edvr::native_reflex::pcl {
@@ -1254,13 +1262,14 @@ static void keyboardInputLatencyCases() {
               native_reflex::testInputTokenCalls == tokenCalls && memcmp(observed, keyboard.keys, 256) == 0,
               "disabled keyboard probe preserves state and does not query engine scope");
         live.store(true); native_reflex::testInputFrameToken = 0;
-        check(readState(keyboard, observed) == DI_OK && testKeyboardReadCount == 0 &&
-              memcmp(observed, keyboard.keys, 256) == 0,
-              "a captured keyboard read outside qualified InputManager scope stays unobserved");
-        native_reflex::testInputFrameToken = 901;
         check(readState(keyboard, observed) == DI_OK && testKeyboardReadCount == 1 &&
-              testKeyboardReads[0].device == &keyboard && testKeyboardReads[0].token == 901 &&
-              memcmp(testKeyboardReads[0].state.data(), observed, 256) == 0 &&
+              testKeyboardReads[0].token == 0 &&
+              memcmp(observed, keyboard.keys, 256) == 0,
+              "an out-of-scope captured keyboard read reports token zero for diagnostic-only receiver handling");
+        native_reflex::testInputFrameToken = 901;
+        check(readState(keyboard, observed) == DI_OK && testKeyboardReadCount == 2 &&
+              testKeyboardReads[1].device == &keyboard && testKeyboardReads[1].token == 901 &&
+              memcmp(testKeyboardReads[1].state.data(), observed, 256) == 0 &&
               memcmp(observed, keyboard.keys, 256) == 0,
               "successful owned standard keyboard read reports unchanged bytes with the exact engine token");
         const size_t before = testKeyboardReadCount;
@@ -1300,9 +1309,55 @@ static void keyboardInputLatencyCases() {
               observed[DIK_UP] == 0 && observed[DIK_A] == 0x80 &&
               memcmp(testKeyboardReads[before + 1].state.data(), observed, sizeof(observed)) == 0,
               "summon-key filtering precedes keyboard receipt and preserves unrelated returned keys");
+        g_summon.store(0);
+        keyboard.events[0] = {DIK_DOWN, 0x80, 1, 1, 0};
+        keyboard.events[1] = {DIK_DOWN, 0, 2, 2, 0};
+        keyboard.events[2] = {DIK_UP, 0x80, 3, 3, 0};
+        keyboard.events[3] = {DIK_UP, 0, 4, 4, 0};
+        keyboard.count = 4;
+        DIDEVICEOBJECTDATA bufferedRows[4]{};
+        DWORD bufferedCount = 4;
+        auto buffered = reinterpret_cast<PFN_GetDeviceData>(keyboard.table[10]);
+        testBufferedKeyCount = 0;
+        const size_t losses = testKeyboardLossCount;
+        check(buffered(&keyboard, sizeof(bufferedRows[0]), bufferedRows, &bufferedCount, DIGDD_PEEK) == DI_OK &&
+              testBufferedKeyCount == 0 && testKeyboardLossCount == losses && keyboard.count == 4,
+              "a buffered keyboard peek leaves the queue intact and supplies no consumed release evidence");
+        bufferedCount = 4;
+        check(buffered(&keyboard, sizeof(bufferedRows[0]), bufferedRows, &bufferedCount, 0) == DI_OK &&
+              bufferedCount == 4 && testBufferedKeyCount == 4 && testBufferedKeys[0].dik == DIK_DOWN &&
+              testBufferedKeys[0].pressed && !testBufferedKeys[1].pressed && testBufferedKeys[2].dik == DIK_UP &&
+              testBufferedKeys[2].pressed && !testBufferedKeys[3].pressed && testBufferedKeys[3].token == 901 &&
+              testBufferedKeys[0].received && testBufferedKeys[0].received == testBufferedKeys[3].received &&
+              memcmp(bufferedRows, keyboard.events, sizeof(bufferedRows)) == 0,
+              "standard consumed keyboard rows preserve bytes and report ordered real UP/DOWN press-release receipts");
+        bufferedCount = 4;
+        check(buffered(&keyboard, sizeof(bufferedRows[0]), bufferedRows, &bufferedCount, 0) == DI_OK &&
+              bufferedCount == 0 && testBufferedKeyCount == 4,
+              "an empty consumed keyboard buffer never fabricates a released row");
+        keyboard.count = 4; bufferedCount = 4; keyboard.result = DI_BUFFEROVERFLOW;
+        check(buffered(&keyboard, sizeof(bufferedRows[0]), bufferedRows, &bufferedCount, 0) == DI_BUFFEROVERFLOW &&
+              testBufferedKeyCount == 4 && testKeyboardLossCount == losses + 1 && testLastKeyboardLoss == &keyboard,
+              "buffer overflow preserves the driver status and invalidates cached keyboard evidence");
+        keyboard.result = DIERR_INPUTLOST; bufferedCount = 4;
+        check(buffered(&keyboard, sizeof(bufferedRows[0]), bufferedRows, &bufferedCount, 0) == DIERR_INPUTLOST &&
+              testBufferedKeyCount == 4 && testKeyboardLossCount == losses + 2,
+              "failed buffered reads invalidate observation without inventing a source5 event");
+        keyboard.result = DI_OK; keyboard.count = 4; bufferedCount = 4;
+        check(buffered(&keyboard, sizeof(bufferedRows[0]) - 4, bufferedRows, &bufferedCount, 0) == DIERR_INVALIDPARAM &&
+              testBufferedKeyCount == 4 && testKeyboardLossCount == losses + 3,
+              "custom buffered strides remain uninterpreted and erase cached release knowledge");
+        keyboard.count = 4; bufferedCount = 4; g_private.store(1);
+        check(buffered(&keyboard, sizeof(bufferedRows[0]), bufferedRows, &bufferedCount, 0) == DI_OK &&
+              bufferedCount == 2 && testBufferedKeyCount == 6 && !testBufferedKeys[4].pressed && !testBufferedKeys[5].pressed &&
+              bufferedRows[0].dwOfs == DIK_DOWN && bufferedRows[1].dwOfs == DIK_UP,
+              "buffered observation receives only the post-filtered release rows actually returned to the game");
+        g_private.store(0);
+        const size_t beforeForget = testKeyboardLossCount;
         keyboardForget(&keyboard);
         check(!keyboardRegistered(&keyboard) && readState(keyboard, observed) == DI_OK &&
-              testKeyboardReadCount == before + 3 && testKeyboardReads[before + 2].device == &keyboard,
+              testKeyboardReadCount == before + 3 && testKeyboardReads[before + 2].device == &keyboard &&
+              testKeyboardLossCount == beforeForget + 1,
               "the retained captured door remains positive keyboard ownership after registry eviction");
         live.store(false); native_reflex::testInputFrameToken = 0;
         inputGateShutdown();

@@ -419,6 +419,7 @@ FaultBudget g_budgetPump("inputGate.pump", 4);
 FaultBudget g_budgetJoy("inputGate.joystick", 4);
 FaultBudget g_budgetMouse("inputGate.mouseObservation", 4);
 FaultBudget g_budgetKeyboardProbe("inputGate.keyboardObservation", 4);
+std::atomic<unsigned> g_keyboardDiagnosticNotes{0};
 // Five first observations per process, only while the diagnostic is enabled.
 // Keep missing capture, unsupported layouts and a silent route distinguishable
 // without logging every input read.
@@ -511,6 +512,9 @@ void keyboardForget(void* device) {
         if (k.device == device) k = KeyboardEntry();
     }
     ReleaseSRWLockExclusive(&g_keyboardsLock);
+    // The same address may now identify a newly created device. Do not carry
+    // a prior keyboard's release/priming certificate across that lifetime.
+    if (input_latency_probe::enabled()) input_latency_probe::keyboardReadLost(device);
 }
 
 void keyboardRemember(void* device) {
@@ -627,6 +631,27 @@ DeviceClass classifyDevice(const void* self) {
     DeviceEntry e;
     if (watchedEntry(self, &e)) return DeviceClass::Controller;
     return DeviceClass::Unknown;
+}
+
+bool observedGameKeyboard(const void* self) {
+    return self && self != g_diW.dummy && self != g_diA.dummy && classifyDevice(self) == DeviceClass::Keyboard;
+}
+
+// Only two notes per process while the latency probe is enabled. The ordinary
+// input probe counts fallback doors; these identify the captured keyboard's
+// actual state/buffered path without interpreting a new input layout.
+void noteKeyboardRead(void* self, HRESULT result, DWORD bytes, bool buffered,
+                      DWORD flags = 0, const DWORD* count = nullptr) {
+    if (!input_latency_probe::enabled() || !observedGameKeyboard(self)) return;
+    const unsigned bit = buffered ? 2u : 1u;
+    if (g_keyboardDiagnosticNotes.fetch_or(bit, std::memory_order_relaxed) & bit) return;
+    guardedBudget(g_budgetKeyboardProbe, [&] {
+        Log::get().note("input_latency_keyboard_read,method=%s,device=%p,result=0x%08lX,bytes=%lu,"
+            "flags=0x%lX,returned=%lu,input_tick=%llu", buffered ? "data" : "state", self,
+            static_cast<unsigned long>(result), static_cast<unsigned long>(bytes),
+            static_cast<unsigned long>(flags), static_cast<unsigned long>(count ? *count : 0),
+            native_reflex::currentInputFrameToken());
+    });
 }
 
 // ---- the joystick watch ---------------------------------------------------
@@ -806,9 +831,13 @@ void noteMouseDataRead(void* device, HRESULT result, DWORD bytes, const DIDEVICE
 template <bool Wide>
 HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     const HRESULT hr = d.origState(self, cb, data);
+    noteKeyboardRead(self, hr, cb, false);
     d.stateCalls.fetch_add(1, std::memory_order_relaxed);
     if (self != d.dummy) d.stateForeign.fetch_add(1, std::memory_order_relaxed);
     noteMouseStateRead(self, hr, cb);
+    if (input_latency_probe::enabled() && observedGameKeyboard(self) &&
+        (d.retired || hr != DI_OK || cb != 256 || !data))
+        guardedBudget(g_budgetKeyboardProbe, [&] { input_latency_probe::keyboardReadLost(self); });
     if (d.retired || FAILED(hr) || !data) return hr;
     bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
     guardedBudget(g_budgetDi, [&] {
@@ -887,10 +916,10 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     // summon-key and release-tail filtering. Our fallback devices, unknown
     // layouts and calls outside the original InputManager cannot own a pulse.
     if (input_latency_probe::enabled() && hr == DI_OK && cb == 256 &&
-        self != g_diW.dummy && self != g_diA.dummy && classifyDevice(self) == DeviceClass::Keyboard) {
+        observedGameKeyboard(self)) {
         guardedBudget(g_budgetKeyboardProbe, [&] {
             const uint64_t token = native_reflex::currentInputFrameToken();
-            if (token) input_latency_probe::keyboardState(self, static_cast<const uint8_t*>(data), token);
+            input_latency_probe::keyboardState(self, static_cast<const uint8_t*>(data), token);
         });
     }
     return hr;
@@ -900,12 +929,21 @@ template <bool Wide>
 HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rgdod,
                          LPDWORD inOut, DWORD flags) {
     DWORD observationCapacity = 0;
-    if (input_latency_probe::enabled() && isGameMouse(self) && inOut &&
+    const bool keyboardObservation = input_latency_probe::enabled() && observedGameKeyboard(self);
+    if (input_latency_probe::enabled() && (isGameMouse(self) || keyboardObservation) && inOut &&
         cbObj == sizeof(DIDEVICEOBJECTDATA) && !(flags & DIGDD_PEEK))
-        guardedBudget(g_budgetMouse, [&] { observationCapacity = *inOut; });
+        guardedBudget(keyboardObservation ? g_budgetKeyboardProbe : g_budgetMouse,
+                      [&] { observationCapacity = *inOut; });
     const HRESULT hr = d.origData(self, cbObj, rgdod, inOut, flags);
+    LARGE_INTEGER keyboardReceipt{};
+    if (keyboardObservation) QueryPerformanceCounter(&keyboardReceipt);
+    noteKeyboardRead(self, hr, cbObj, true, flags, inOut);
     d.dataCalls.fetch_add(1, std::memory_order_relaxed);
     noteMouseDataRead(self, hr, cbObj, rgdod, inOut, flags, observationCapacity);
+    if (keyboardObservation && (d.retired || hr != DI_OK || cbObj != sizeof(DIDEVICEOBJECTDATA) || !inOut))
+        guardedBudget(g_budgetKeyboardProbe, [&] { input_latency_probe::keyboardReadLost(self); });
+    if (keyboardObservation && !rgdod && inOut)
+        guardedBudget(g_budgetKeyboardProbe, [&] { if (*inOut) input_latency_probe::keyboardReadLost(self); });
     if (d.retired || FAILED(hr) || !rgdod || !inOut) return hr;
     if (cbObj != sizeof(DIDEVICEOBJECTDATA)) return hr;   // a layout this was not written for
     bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
@@ -980,6 +1018,20 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
         guardedBudget(g_budgetJoy, [&] { observeControllerData(self, rgdod, *inOut); });
     }
     observeMouseData(self, hr, cbObj, rgdod, inOut, flags, observationCapacity);
+    if (keyboardObservation && hr == DI_OK && !(flags & DIGDD_PEEK)) {
+        guardedBudget(g_budgetKeyboardProbe, [&] {
+            if (*inOut > observationCapacity || *inOut > 1024) {
+                input_latency_probe::keyboardReadLost(self); return;
+            }
+            const uint64_t token = native_reflex::currentInputFrameToken();
+            for (DWORD i = 0; i < *inOut; ++i) {
+                const auto& event = rgdod[i];
+                if (event.dwOfs == DIK_UP || event.dwOfs == DIK_DOWN)
+                    input_latency_probe::keyboardBuffered(self, event.dwOfs, (event.dwData & 0x80) != 0, token,
+                        keyboardReceipt.QuadPart > 0 ? uint64_t(keyboardReceipt.QuadPart) : 0);
+            }
+        });
+    }
     return hr;
 }
 

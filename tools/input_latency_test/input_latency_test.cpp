@@ -3,10 +3,24 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <cwchar>
+#include "../../src/common/system_d3d11.h"
+#include "../../src/common/log.h"
+namespace edvr {
+Log& Log::get() { static Log sink; return sink; }
+Log::~Log() = default;
+void Log::note(const char* format, ...) {
+    va_list arguments; va_start(arguments, format);
+    std::vprintf(format, arguments); std::putchar('\n'); va_end(arguments);
+}
+}
+// Exercise the real owner, worker, format conversion and staging readback.
+// The native rig compiles this TU alone; do not also link the probe separately.
+#include "../../src/d3d11/input_latency_probe.cpp"
 #endif
 
 using namespace edvr::input_latency_probe;
@@ -43,6 +57,40 @@ void edges() {
           "generation reset and missing device both require new real release");
     for (uintptr_t device = 1; device <= 16; ++device) buttons.press(device, false);
     check(!buttons.press(17, false) && !buttons.press(17, true), "bounded device table fails closed when full");
+}
+
+void keyboardCache() {
+    KeyboardReleaseCache cache;
+    cache.observe(1, 0xC8, false, 110, 1); cache.observe(1, 0xD0, false, 110, 1);
+    check(!cache.acknowledge(100, 0xD0), "released states alone cannot acknowledge a fresh priming cycle");
+    check(!cache.observe(1, 0xD0, true, 120, 0) && !cache.acknowledge(100, 0xD0),
+          "unqualified input cannot update keyboard release or cycle knowledge");
+    cache.observe(1, 0xD0, true, 120, 2); cache.observe(1, 0xD0, true, 121, 2);
+    cache.observe(1, 0xD0, false, 130, 3); cache.observe(1, 0xC8, true, 140, 4); cache.observe(1, 0xC8, false, 150, 5);
+    check(cache.acknowledge(100, 0xD0) == 1 && cache.released(1, 100) && cache.releaseTick(1) == 5,
+          "actual ordered DOWN then UP cycles acknowledge one device and retain the final release tick");
+    cache.observe(1, 0xD0, true, 160, 6); cache.observe(1, 0xD0, false, 170, 7);
+    check(cache.acknowledge(100, 0xC8) == 1 && cache.releaseTick(1) == 7,
+          "measured alternating requests reuse the acknowledged run fence while keeping later release freshness");
+    check(!cache.acknowledge(200, 0xD0), "an old release certificate cannot acknowledge a new program's priming fence");
+    check(cache.invalidate(1) && !cache.released(1, 100) && !cache.acknowledge(100, 0xD0),
+          "device or read loss erases its priming certificate and release knowledge");
+    KeyboardReleaseCache batch;
+    for (auto event : {std::pair<unsigned,bool>{0xD0,true}, {0xD0,false}, {0xC8,true}, {0xC8,false}})
+        batch.observe(2, event.first, event.second, 500, 99);
+    check(batch.acknowledge(499, 0xD0) == 2 && batch.releaseTick(2) == 99,
+          "one coalesced buffered read with equal QPC and token retains actual row order for fresh acknowledgement");
+    KeyboardReleaseCache reverse;
+    for (auto event : {std::pair<unsigned,bool>{0xC8,true}, {0xC8,false}, {0xD0,true}, {0xD0,false}})
+        reverse.observe(2, event.first, event.second, 500, 99);
+    check(!reverse.acknowledge(499, 0xD0) && reverse.acknowledge(499, 0xC8) == 2,
+          "equal timestamps cannot hide reversed priming order and UP-first remains supported");
+    KeyboardReleaseCache split;
+    split.observe(1, 0xD0, true, 500, 99); split.observe(1, 0xD0, false, 500, 99);
+    split.observe(2, 0xC8, true, 500, 99); split.observe(2, 0xC8, false, 500, 99);
+    check(!split.acknowledge(499, 0xD0), "different devices cannot combine their released keys into a priming certificate");
+    split.observe(1, 0xC8, true, 510, 100); split.invalidate(1); split.observe(1, 0xC8, false, 520, 101);
+    check(!split.acknowledge(499, 0xD0), "a release after read loss cannot borrow a discarded press");
 }
 
 void pairBoundary() {
@@ -156,7 +204,7 @@ void clocksAndRequests() {
     check(!pulse.consume(110, 4) && pulse.result().reason == Refusal::InvalidRequest,
           "keyboard source without a qualified InputManager token is rejected");
     pulse = Pulse{}; pulse.arm(1, 100, 100, 1000);
-    check(!pulse.consume(110, 5) && pulse.result().reason == Refusal::InvalidRequest,
+    check(!pulse.consume(110, 6) && pulse.result().reason == Refusal::InvalidRequest,
           "unrecognized input source is rejected");
     pulse = consumed();
     check(!pulse.render(0, 0, 120) && pulse.result().reason == Refusal::InvalidRequest,
@@ -201,31 +249,41 @@ void uiResponseEvidence() {
     check(pulse.consume(110, 4, 8765) && pulse.result().consumedTickToken == 8765,
           "actual keyboard receipt retains its qualified engine tick token");
     UiCandidateReceipt frame; frame.sequence = 77;
+    frame.sourceGeneration = 8; frame.renderedTick = 8765; frame.renderedPose = 990;
     check(frame.copyEye(0) && !frame.copyEye(0) && !frame.copyEye(2) &&
           !frame.submit(1, true, 120) && !frame.ready(), "duplicate eyes and an uncopied submit cannot qualify a candidate");
     check(frame.submit(0, true, 120) && frame.copyEye(1) && !frame.submit(1, false, 125) &&
           frame.submit(1, true, 130) && !frame.ready(), "accepted stereo alone is insufficient without a fence receipt");
-    check(!uiTargetMatches(frame, 76, 900000, 900000, 200000, 600000, true),
+    check(!uiTargetMatches(frame, 76, 900000, 900000, 200000, 600000, true, 8765),
           "matching pixels without GPU completion cannot complete UI latency");
     frame.gpuQpc = 140;
-    check(frame.ready() && !uiTargetMatches(frame, 76, 100000, 100000, 200000, 600000, true) &&
+    check(frame.ready() && !uiTargetMatches(frame, 76, 100000, 100000, 200000, 600000, true, 8765) &&
           pulse.phase() == Phase::Consumed && pulse.result().sentQpc == 100 && pulse.result().consumedQpc == 110,
           "an unchanged completed candidate leaves the original input timestamps pending for a retry");
-    check(!uiTargetMatches(frame, 76, 900000, 100000, 200000, 600000, true) &&
-          !uiTargetMatches(frame, 77, 900000, 900000, 200000, 600000, true),
+    check(!uiTargetMatches(frame, 76, 900000, 100000, 200000, 600000, true, 8765) &&
+          !uiTargetMatches(frame, 77, 900000, 900000, 200000, 600000, true, 8765),
           "mixed stereo states and the baseline frame cannot become a response");
     frame.sequence = 78; frame.gpuQpc = 150; frame.submitQpc = 145;
-    check(uiTargetMatches(frame, 76, 900000, 900000, 200000, 600000, true) &&
-          pulse.uiResponse(frame.sequence, frame.gpuQpc, frame.submitQpc, 160) && pulse.phase() == Phase::Complete &&
+    frame.renderedTick = 8764;
+    check(!uiTargetMatches(frame, 76, 900000, 900000, 200000, 600000, true, 8765) &&
+          pulse.phase() == Phase::Consumed && pulse.result().consumedQpc == 110,
+          "older rendered ticks retry without dropping or shortening the actual UI latency");
+    frame.renderedTick = 8766;
+    check(uiTargetMatches(frame, 76, 900000, 900000, 200000, 600000, true, 8765) &&
+          pulse.uiResponse(frame.sequence, frame.gpuQpc, frame.submitQpc, 160, frame.renderedTick, frame.renderedPose) && pulse.phase() == Phase::Complete &&
           pulse.result().sequence == 78 && pulse.result().gpuCompleteQpc == 150 && pulse.result().consumedQpc == 110,
           "pixel-proven retry uses that candidate's GPU endpoint and preserves actual input receipt");
-    check(uiTargetMatches(frame, 76, 100000, 100000, 200000, 600000, false),
+    check(uiTargetMatches(frame, 76, 100000, 100000, 200000, 600000, false, 8765),
           "the same evidence path verifies a real deselection response");
     pulse = Pulse{}; pulse.arm(1, 100, 101, 1000); pulse.consume(110, 4, 1);
-    check(!pulse.uiResponse(78, 150, 145, 2101) && pulse.result().reason == Refusal::Timeout,
+    check(!pulse.uiResponse(78, 150, 145, 2101, 2, 990) && pulse.result().reason == Refusal::Timeout,
           "retry keeps the original absolute timeout instead of extending unavailable latency");
     pulse = consumed();
-    check(!pulse.uiResponse(78, 150, 145, 160), "mouse marker receipt cannot masquerade as game UI keyboard evidence");
+    check(!pulse.uiResponse(78, 150, 145, 160, 2, 990), "mouse marker receipt cannot masquerade as game UI keyboard evidence");
+    pulse = Pulse{}; pulse.arm(1, 100, 101, 1000);
+    check(pulse.consume(110, 5, 44) && pulse.result().source == 5 && pulse.result().consumedTickToken == 44 &&
+          pulse.uiResponse(79, 150, 145, 160, 45, 991) && pulse.result().renderedTickToken == 45,
+          "qualified buffered source5 accepts a real UI response in the following render tick");
 }
 
 #ifdef _WIN32
@@ -267,6 +325,294 @@ void mappingPublication() {
     if (receive) UnmapViewOfFile(receive);
     CloseHandle(receiver);
 }
+
+struct UiGraphics {
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> eyes[2];
+    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> unordered[2];
+    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> targets[2];
+};
+bool makeUiGraphics(UiGraphics& graphics, DXGI_FORMAT sourceFormat) {
+    const auto create = edvr::systemD3D11CreateDevice();
+    const HRESULT result = create ? create(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+        &graphics.device, nullptr, &graphics.context) : E_FAIL;
+    check(SUCCEEDED(result) && graphics.device && graphics.context, "UI readback rig creates a private system WARP device");
+    if (FAILED(result) || !graphics.device || !graphics.context) return false;
+    const bool rgbaTypeless = sourceFormat == DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    bool bgra = false;
+    DXGI_FORMAT viewFormat = uiCopyFormat(sourceFormat, bgra);
+    if (viewFormat == DXGI_FORMAT_UNKNOWN) viewFormat = sourceFormat;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = desc.Height = 64; desc.MipLevels = desc.ArraySize = 1;
+    desc.Format = sourceFormat; desc.SampleDesc.Count = 1;
+    // Match the live RGBA8 typeless source's UAV+SRV-only bind0x88 exactly.
+    // BGRA8 and the explicit unsupported case use their valid typed RTVs.
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | (rgbaTypeless ? D3D11_BIND_UNORDERED_ACCESS : D3D11_BIND_RENDER_TARGET);
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        HRESULT hr = graphics.device->CreateTexture2D(&desc, nullptr, &graphics.eyes[eye]);
+        if (SUCCEEDED(hr) && rgbaTypeless) {
+            D3D11_UNORDERED_ACCESS_VIEW_DESC view{};
+            view.Format = viewFormat; view.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+            hr = graphics.device->CreateUnorderedAccessView(graphics.eyes[eye].Get(), &view, &graphics.unordered[eye]);
+        } else if (SUCCEEDED(hr)) {
+            D3D11_RENDER_TARGET_VIEW_DESC view{};
+            view.Format = viewFormat; view.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            hr = graphics.device->CreateRenderTargetView(graphics.eyes[eye].Get(), &view, &graphics.targets[eye]);
+        }
+        check(SUCCEEDED(hr), "real source texture exposes its allowed typed byte-family view");
+        if (FAILED(hr)) return false;
+    }
+    return true;
+}
+void fillUi(UiGraphics& graphics, bool orange) {
+    const FLOAT selected[]{0.9f, 0.55f, 0.0f, 1.0f}, unselected[]{0.15f, 0.15f, 0.15f, 1.0f};
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        if (graphics.unordered[eye]) graphics.context->ClearUnorderedAccessViewFloat(graphics.unordered[eye].Get(), orange ? selected : unselected);
+        else graphics.context->ClearRenderTargetView(graphics.targets[eye].Get(), orange ? selected : unselected);
+    }
+}
+void primeBufferedFixture(UiGraphics& graphics, uint64_t token = 4310) {
+    const uint64_t receipt = nowQpc();
+    for (auto event : {std::pair<unsigned,bool>{0xD0,true}, {0xD0,false}, {0xC8,true}, {0xC8,false}})
+        keyboardBuffered(graphics.device.Get(), event.first, event.second, token, receipt);
+}
+Shared* prepareUiFixture(UiGraphics& graphics, bool buffered = false, bool prime = true) {
+    configure(graphics.device.Get(), true, edvr::native_reflex::Mode::Off, 17);
+    check(enabled() && current, "production probe creates its real GPU-fence observer and owned IPC");
+    if (!enabled() || !current) return nullptr;
+    Shared* shared = current->shared;
+    const bool reserved = exchange(shared->state, LONG64(Phase::Reserved), LONG64(Phase::Idle)) == LONG64(Phase::Idle);
+    check(reserved, "UI fixture reserves request words through the published IPC contract");
+    if (!reserved) return nullptr;
+    const uint64_t fence = nowQpc();
+    if (prime) {
+        if (buffered) primeBufferedFixture(graphics);
+        else {
+            uint8_t keyboard[256]{};
+            keyboard[0xD0] = 0x80; keyboardState(graphics.device.Get(), keyboard, 4310);
+            keyboard[0xD0] = 0; keyboardState(graphics.device.Get(), keyboard, 4310);
+            keyboard[0xC8] = 0x80; keyboardState(graphics.device.Get(), keyboard, 4310);
+            keyboard[0xC8] = 0; keyboardState(graphics.device.Get(), keyboard, 4310);
+        }
+    }
+    shared->request = 1; shared->sentQpc = fence;
+    shared->responseKind = uint64_t(ResponseKind::GameUi); shared->inputScanCode = 0xD0;
+    shared->roiLeft = shared->roiRight = uint64_t(0xFFFFFFFF) << 32;
+    shared->orangeLowPpm = 100000; shared->orangeHighPpm = 900000; shared->targetOn = 1;
+    check(exchange(shared->state, LONG64(Phase::Preparing), LONG64(Phase::Reserved)) == LONG64(Phase::Reserved),
+          "UI fixture publishes complete baseline parameters before receiver ownership");
+    return shared;
+}
+void stampUiPair(UiGraphics& graphics, uint64_t sequence, uint64_t sourceTick) {
+    const EdvrNativeReflexSource source{sizeof(source), EDVR_NATIVE_REFLEX_FRAME_VERSION_1, 81, sourceTick, sequence + 9000};
+    for (auto& eye : graphics.eyes) check(edvr::native_reflex::writeSource(eye.Get(), source), "private WARP eye retains its actual paired source GUID");
+}
+void copyUiPair(UiGraphics& graphics, uint64_t sequence, bool secondAccepted = true, uint64_t sourceTick = 4311) {
+    stampUiPair(graphics, sequence, sourceTick);
+    for (unsigned eye = 0; eye < 2; ++eye) {
+        eyeRendered(graphics.device.Get(), graphics.eyes[eye].Get(), sequence, eye);
+        if (eye == 0 || secondAccepted) eyeSubmitted(sequence, eye, true);
+    }
+    // Test-only submission: there is deliberately no swap chain or real game
+    // Present here to flush queued WARP commands. Production never calls Flush.
+    graphics.context->Flush();
+}
+bool waitUiFence() {
+    const ULONGLONG until = GetTickCount64() + 1000;
+    do {
+        // Read-only snapshot of the worker's actual notification receipt. No
+        // synthetic fence timestamp or producer-side GetData polling is used.
+        {
+            std::lock_guard<std::mutex> lock(callbacks);
+            if (current && current->ui.count && current->ui.frames[current->ui.head].receipt.gpuQpc) return true;
+        }
+        Sleep(1);
+    } while (GetTickCount64() < until);
+    return false;
+}
+void preparingPairBoundary() {
+    for (bool releaseBetweenEyes : {false, true}) {
+        UiGraphics graphics;
+        if (!makeUiGraphics(graphics, DXGI_FORMAT_R8G8B8A8_TYPELESS)) continue;
+        Shared* shared = prepareUiFixture(graphics, true, releaseBetweenEyes);
+        if (!shared) { stop(); continue; }
+        fillUi(graphics, false); stampUiPair(graphics, 350, 4320);
+        eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 350, 0);
+        if (releaseBetweenEyes) {
+            // A newer real release clears an unfinished baseline and marks
+            // its entire stereo sequence ineligible, just like priming ack.
+            keyboardBuffered(graphics.device.Get(), 0xD0, true, 4312, nowQpc());
+            keyboardBuffered(graphics.device.Get(), 0xD0, false, 4312, nowQpc());
+        } else {
+            // First eye arrived while fresh priming receipts were pending.
+            // The acknowledgment lands before the matching second eye.
+            primeBufferedFixture(graphics);
+        }
+        eyeRendered(graphics.device.Get(), graphics.eyes[1].Get(), 350, 1);
+        eyeSubmitted(350, 1, true);
+        bool skippedWholePair = false;
+        {
+            std::lock_guard<std::mutex> lock(callbacks);
+            skippedWholePair = current && !current->ui.count;
+        }
+        check(skippedWholePair && Phase(exchange(shared->state, 0, 0)) == Phase::Preparing && !shared->ready,
+              releaseBetweenEyes ? "a release between eyes skips the whole Preparing pair instead of retaining its second eye" :
+                                   "priming acknowledgment between eyes skips the whole Preparing pair instead of retaining its second eye");
+        copyUiPair(graphics, 351, true, 4321);
+        if (Phase(exchange(shared->state, 0, 0)) != Phase::Rejected) {
+            check(waitUiFence(), "the next complete Preparing pair finishes a real WARP staging copy");
+            eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 352, 0);
+        }
+        check(Phase(exchange(shared->state, 0, 0)) == Phase::Prepared && shared->ready == 1 &&
+              shared->renderSequence == 351 && shared->baselineLeftPpm == 0 && shared->baselineRightPpm == 0,
+              releaseBetweenEyes ? "the first whole pair after a release qualifies without a false MixedFrame rejection" :
+                                   "the first whole pair after priming acknowledgment qualifies without a false MixedFrame rejection");
+        stop();
+    }
+}
+void realTypelessUiResponse() {
+    for (DXGI_FORMAT format : {DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_B8G8R8A8_TYPELESS}) {
+        const bool buffered = format == DXGI_FORMAT_B8G8R8A8_TYPELESS;
+        UiGraphics graphics;
+        if (!makeUiGraphics(graphics, format)) continue;
+        Shared* shared = prepareUiFixture(graphics, buffered);
+        if (!shared) { stop(); continue; }
+        fillUi(graphics, false); copyUiPair(graphics, 100);
+        check(waitUiFence(), "actual typeless baseline copies complete through the production fence worker");
+        eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 101, 0);
+        check(Phase(exchange(shared->state, 0, 0)) == Phase::Prepared && shared->ready == 1 && !shared->sentQpc &&
+              shared->renderSequence == 100 && shared->baselineLeftPpm == 0 && shared->baselineRightPpm == 0,
+              "fresh real key cycles plus a later opposite stereo baseline qualify and clear the priming fence");
+        shared->sentQpc = nowQpc();
+        check(exchange(shared->state, LONG64(Phase::Armed), LONG64(Phase::Prepared)) == LONG64(Phase::Prepared),
+              "only the acquired Prepared state admits a measured injection stamp");
+        uint8_t keyboard[256]{}; keyboard[0xD0] = 0x80;
+        if (buffered) keyboardBuffered(graphics.device.Get(), 0xD0, true, 0, nowQpc());
+        else keyboardState(graphics.device.Get(), keyboard, 0);
+        check(Phase(exchange(shared->state, 0, 0)) == Phase::Armed && !shared->consumedQpc,
+              "zero-token pressed receipts remain diagnostic-only after priming");
+        if (buffered) keyboardBuffered(graphics.device.Get(), 0xD0, true, 4322, nowQpc());
+        else keyboardState(graphics.device.Get(), keyboard, 4322);
+        const uint64_t consumedAt = shared->consumedQpc;
+        check(Phase(exchange(shared->state, 0, 0)) == Phase::Consumed && consumedAt &&
+              shared->source == (buffered ? 5u : 4u) && shared->consumedTickToken == 4322,
+              "state4 and buffered5 retain distinct qualified API receipts and exact consuming ticks");
+        copyUiPair(graphics, 102, true, 4322);
+        check(waitUiFence(), "unchanged pixels have their own actual completed GPU candidate");
+        fillUi(graphics, true); stampUiPair(graphics, 103, 4321);
+        eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 103, 0);
+        check(Phase(exchange(shared->state, 0, 0)) == Phase::Consumed && shared->consumedQpc == consumedAt,
+              "unchanged candidates do not shorten the measured input latency");
+        eyeSubmitted(103, 0, true);
+        eyeRendered(graphics.device.Get(), graphics.eyes[1].Get(), 103, 1); eyeSubmitted(103, 1, true);
+        graphics.context->Flush(); check(waitUiFence(), "an older source's real changed pixels complete their staging copy");
+        stampUiPair(graphics, 104, 4323);
+        eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 104, 0);
+        check(Phase(exchange(shared->state, 0, 0)) == Phase::Consumed && shared->consumedQpc == consumedAt && !shared->gpuCompleteQpc,
+              "older source ticks retry even with target pixels instead of manufacturing a response frame");
+        eyeSubmitted(104, 0, true);
+        eyeRendered(graphics.device.Get(), graphics.eyes[1].Get(), 104, 1); eyeSubmitted(104, 1, true);
+        graphics.context->Flush(); check(waitUiFence(), "the genuine following-tick response completes its own GPU copy");
+        eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 105, 0);
+        check(Phase(exchange(shared->state, 0, 0)) == Phase::Complete && shared->renderSequence == 104 &&
+              shared->eyeMask == 3 && shared->submitMask == 3 && shared->consumedTickToken == 4322 &&
+              shared->responseLeftPpm == 1000000 && shared->responseRightPpm == 1000000 && shared->gpuCompleteQpc >= consumedAt,
+              "real paired typeless pixels from render tick N+1 complete the actual input response without same-world-frame claims");
+        stop();
+    }
+    {
+        UiGraphics graphics;
+        if (makeUiGraphics(graphics, DXGI_FORMAT_R8G8B8A8_TYPELESS)) {
+            Shared* shared = prepareUiFixture(graphics, false, false);
+            if (shared) {
+                uint8_t keyboard[256]{};
+                keyboardState(graphics.device.Get(), keyboard, 0);
+                keyboardState(graphics.device.Get(), keyboard, 4310);
+                fillUi(graphics, false); copyUiPair(graphics, 150);
+                check(Phase(exchange(shared->state, 0, 0)) == Phase::Preparing && !shared->ready && !shared->renderSequence,
+                      "released state and old OFF pixels cannot acknowledge queued or absent priming cycles");
+                primeBufferedFixture(graphics);
+                copyUiPair(graphics, 152); check(waitUiFence(), "late observed buffered priming permits a fresh GPU baseline");
+                eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 153, 0);
+                check(Phase(exchange(shared->state, 0, 0)) == Phase::Prepared && shared->renderSequence == 152 && !shared->sentQpc,
+                      "fresh ordered buffered cycles arriving during Preparing still require a newly copied opposite baseline");
+                shared->sentQpc = nowQpc();
+                exchange(shared->state, LONG64(Phase::Armed), LONG64(Phase::Prepared));
+                keyboardBuffered(graphics.device.Get(), 0xD0, true, 4322, nowQpc());
+                check(Phase(exchange(shared->state, 0, 0)) == Phase::Consumed && shared->source == 5,
+                      "a real buffered measured press consumes only after fresh priming and pixels");
+                keyboardReadLost(graphics.device.Get());
+                check(Phase(exchange(shared->state, 0, 0)) == Phase::Rejected && shared->reason == uint64_t(Refusal::InputReadLost) &&
+                      shared->consumedTickToken == 4322 && !shared->gpuCompleteQpc,
+                      "read loss invalidates cached release proof and an active consumed pulse without inventing completion");
+            }
+            stop();
+        }
+    }
+    {
+        UiGraphics graphics;
+        if (makeUiGraphics(graphics, DXGI_FORMAT_R8G8B8A8_TYPELESS)) {
+            Shared* shared = prepareUiFixture(graphics, true);
+            if (shared) {
+                fillUi(graphics, false); copyUiPair(graphics, 160, false); check(waitUiFence(), "both ROI copies complete despite a missing accepted submit");
+                eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 161, 0);
+                check(Phase(exchange(shared->state, 0, 0)) == Phase::Preparing && !shared->ready,
+                      "fresh priming and pixels cannot qualify a baseline without both accepted eyes");
+            }
+            stop();
+        }
+    }
+    {
+        UiGraphics graphics;
+        if (makeUiGraphics(graphics, DXGI_FORMAT_R8G8B8A8_TYPELESS)) {
+            Shared* shared = prepareUiFixture(graphics, true);
+            if (shared) {
+                fillUi(graphics, true); copyUiPair(graphics, 200); check(waitUiFence(), "transient priming UI state uses real staging bytes");
+                fillUi(graphics, false); stampUiPair(graphics, 201, 4312);
+                eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 201, 0);
+                check(Phase(exchange(shared->state, 0, 0)) == Phase::Preparing && !shared->ready,
+                      "transient selected pixels after priming retry instead of arming against an old OFF baseline");
+                eyeSubmitted(201, 0, true); eyeRendered(graphics.device.Get(), graphics.eyes[1].Get(), 201, 1); eyeSubmitted(201, 1, true);
+                graphics.context->Flush(); check(waitUiFence(), "restored opposite UI pixels complete a later actual copy");
+                eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 202, 0);
+                check(Phase(exchange(shared->state, 0, 0)) == Phase::Prepared && shared->renderSequence == 201,
+                      "only the fresh restored opposite-state pair enables measured input");
+            }
+            stop();
+        }
+    }
+    for (bool generationChanged : {false, true}) {
+        UiGraphics graphics;
+        if (!makeUiGraphics(graphics, DXGI_FORMAT_R8G8B8A8_TYPELESS)) continue;
+        Shared* shared = prepareUiFixture(graphics, true);
+        if (shared) {
+            stampUiPair(graphics, 250, 4311);
+            eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 250, 0); eyeSubmitted(250, 0, true);
+            EdvrNativeReflexSource wrong{sizeof(wrong), EDVR_NATIVE_REFLEX_FRAME_VERSION_1,
+                generationChanged ? 82u : 81u, 4311, generationChanged ? 9250u : 9251u};
+            edvr::native_reflex::writeSource(graphics.eyes[1].Get(), wrong);
+            eyeRendered(graphics.device.Get(), graphics.eyes[1].Get(), 250, 1);
+            check(Phase(exchange(shared->state, 0, 0)) == Phase::Rejected && shared->reason == uint64_t(
+                    generationChanged ? Refusal::GenerationChanged : Refusal::MixedFrame),
+                  "changed source generation or mixed stereo pose rejects instead of attributing pixels to a guessed frame");
+        }
+        stop();
+    }
+    {
+        UiGraphics graphics;
+        if (makeUiGraphics(graphics, DXGI_FORMAT_R16G16B16A16_FLOAT)) {
+            Shared* shared = prepareUiFixture(graphics, true);
+            if (shared) {
+                stampUiPair(graphics, 300, 4311); eyeRendered(graphics.device.Get(), graphics.eyes[0].Get(), 300, 0);
+                check(Phase(exchange(shared->state, 0, 0)) == Phase::Rejected && shared->reason == uint64_t(Refusal::TextureUnsupported),
+                      "an unimplemented byte family explicitly refuses instead of guessing pixel values");
+            }
+            stop();
+        }
+    }
+}
 #endif
 } // namespace
 
@@ -274,9 +620,11 @@ int main(int argc, char** argv) {
     if (argc > 1 && !std::strcmp(argv[1], "--dry-run")) {
         std::puts("input_latency_test: dry-run (no device, mapping, or worker)"); return 0;
     }
-    edges(); pairBoundary(); completeOrders(); refusals(); clocksAndRequests(); uiResponseEvidence();
+    edges(); keyboardCache(); pairBoundary(); completeOrders(); refusals(); clocksAndRequests(); uiResponseEvidence();
 #ifdef _WIN32
     mappingPublication();
+    preparingPairBoundary();
+    realTypelessUiResponse();
 #endif
     std::printf("input_latency_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;

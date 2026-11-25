@@ -36,6 +36,80 @@ private:
     std::array<Entry, 16> entries_{};
 };
 
+// Only qualified, actually returned game reads enter this cache. Unknown or
+// repeated released state cannot invent a press/release cycle. An acknowledged
+// priming certificate survives measured key cycles until device/read loss or
+// generation change, allowing the sender's alternating requests to share it.
+class KeyboardReleaseCache final {
+public:
+    bool observe(uintptr_t device, unsigned dik, bool pressed, uint64_t now, uint64_t token) noexcept {
+        const int key = index(dik);
+        if (!device || key < 0 || !now || !token) return false;
+        Entry* entry = find(device, true);
+        if (!entry) return false;
+        if (entry->ordinal == (std::numeric_limits<uint64_t>::max)()) { *entry = {}; return false; }
+        const uint64_t ordinal = ++entry->ordinal;
+        const unsigned bit = 1u << key;
+        const bool known = (entry->known & bit) != 0, down = (entry->down & bit) != 0;
+        auto& state = entry->key[size_t(key)];
+        if (pressed && (!known || !down)) {
+            state.press = now; state.pressOrdinal = ordinal;
+            state.release = state.releaseTick = state.releaseOrdinal = 0;
+        }
+        if (!pressed && known && down) { state.release = now; state.releaseTick = token; state.releaseOrdinal = ordinal; }
+        entry->known |= bit;
+        if (pressed) entry->down |= bit; else entry->down &= ~bit;
+        return pressed && known && !down;
+    }
+    uintptr_t acknowledge(uint64_t fence, unsigned firstDik) noexcept {
+        const int first = index(firstDik);
+        if (!fence || first < 0) return 0;
+        for (auto& entry : entries_) {
+            if (!entry.device || entry.known != 3 || entry.down) continue;
+            if (entry.ackFence == fence) return entry.device;
+            const auto& a = entry.key[size_t(first)];
+            const auto& b = entry.key[1u - unsigned(first)];
+            if (a.press >= fence && a.release >= a.press && a.releaseTick &&
+                b.press >= a.release && b.release >= b.press && b.releaseTick &&
+                a.releaseOrdinal > a.pressOrdinal && b.pressOrdinal > a.releaseOrdinal &&
+                b.releaseOrdinal > b.pressOrdinal) {
+                entry.ackFence = fence; return entry.device;
+            }
+        }
+        return 0;
+    }
+    bool released(uintptr_t device, uint64_t fence) const noexcept {
+        for (const auto& entry : entries_)
+            if (entry.device == device && device)
+                return entry.ackFence == fence && entry.known == 3 && !entry.down;
+        return false;
+    }
+    uint64_t releaseTick(uintptr_t device) const noexcept {
+        for (const auto& entry : entries_) if (entry.device == device && device)
+            return (entry.key[0].releaseTick > entry.key[1].releaseTick ? entry.key[0].releaseTick : entry.key[1].releaseTick);
+        return 0;
+    }
+    bool invalidate(uintptr_t device) noexcept {
+        for (auto& entry : entries_) if (entry.device == device && device) { entry = {}; return true; }
+        return false;
+    }
+    void reset() noexcept { entries_ = {}; }
+private:
+    static int index(unsigned dik) noexcept { return dik == 0xC8 ? 0 : dik == 0xD0 ? 1 : -1; }
+    struct Key { uint64_t press = 0, release = 0, releaseTick = 0, pressOrdinal = 0, releaseOrdinal = 0; };
+    struct Entry { uintptr_t device = 0; unsigned known = 0, down = 0; Key key[2]{}; uint64_t ackFence = 0, ordinal = 0; };
+    Entry* find(uintptr_t device, bool create) noexcept {
+        Entry* empty = nullptr;
+        for (auto& entry : entries_) {
+            if (entry.device == device) return &entry;
+            if (!entry.device && !empty) empty = &entry;
+        }
+        if (create && empty) { empty->device = device; return empty; }
+        return nullptr;
+    }
+    std::array<Entry, 16> entries_{};
+};
+
 // Input may arrive between two eye callbacks. Remember every observed pair,
 // even while idle, and skip that whole sequence when a pulse is consumed.
 class PairBoundary final {
@@ -59,7 +133,7 @@ struct PulseResult {
     uint64_t request = 0, sentQpc = 0, consumedQpc = 0, sequence = 0;
     uint64_t eyeMask = 0, submitMask = 0, gpuCompleteQpc = 0, submitCompleteQpc = 0;
     unsigned source = 0;
-    uint64_t consumedTickToken = 0;
+    uint64_t consumedTickToken = 0, renderedTickToken = 0, renderedPoseSequence = 0;
     Refusal reason = Refusal::None;
 };
 
@@ -91,8 +165,9 @@ public:
     bool consume(uint64_t now, unsigned source, uint64_t inputTickToken = 0) noexcept {
         if (phase_ != Phase::Armed) return false;
         if (expire(now)) return false;
-        if ((source != 1 && source != 2 && source != 3 && source != 4) ||
-            (source == 4 && !inputTickToken)) { reject(Refusal::InvalidRequest); return false; }
+        if ((source < 1 || source > 5) || (source >= 4 && !inputTickToken)) {
+            reject(Refusal::InvalidRequest); return false;
+        }
         result_.consumedQpc = now; result_.source = source;
         result_.consumedTickToken = inputTickToken;
         phase_ = Phase::Consumed;
@@ -133,13 +208,16 @@ public:
     // UI evidence is qualified outside Pulse: one FIFO candidate has both
     // accepted submissions and pixel proof in both immutable staging copies.
     // Rejected/unchanged candidates never rewrite the original input clock.
-    bool uiResponse(uint64_t sequence, uint64_t gpuQpc, uint64_t submitQpc, uint64_t now) noexcept {
-        if (phase_ != Phase::Consumed || result_.source != 4 || !result_.consumedTickToken) return false;
+    bool uiResponse(uint64_t sequence, uint64_t gpuQpc, uint64_t submitQpc, uint64_t now,
+                    uint64_t renderedTick, uint64_t renderedPose) noexcept {
+        if (phase_ != Phase::Consumed || result_.source < 4 || result_.source > 5 || !result_.consumedTickToken) return false;
         if (expire(now)) return false;
+        if (renderedTick < result_.consumedTickToken || !renderedPose) return false;
         if (!sequence || gpuQpc < result_.consumedQpc || submitQpc < result_.consumedQpc ||
             gpuQpc > now || submitQpc > now) { reject(Refusal::InvalidRequest); return false; }
         result_.sequence = sequence; result_.eyeMask = result_.submitMask = 3;
         result_.gpuCompleteQpc = gpuQpc; result_.submitCompleteQpc = submitQpc;
+        result_.renderedTickToken = renderedTick; result_.renderedPoseSequence = renderedPose;
         complete();
         return true;
     }
@@ -212,6 +290,7 @@ inline OrangeState orangeState(uint32_t ppm, uint32_t low, uint32_t high) noexce
 // only add its fence timestamp; producer-thread classification supplies proof.
 struct UiCandidateReceipt {
     uint64_t sequence = 0, eyeMask = 0, submitMask = 0, gpuQpc = 0, submitQpc = 0;
+    uint64_t sourceGeneration = 0, renderedTick = 0, renderedPose = 0;
     bool copyEye(unsigned eye) noexcept {
         if (eye > 1 || (eyeMask & (uint64_t(1) << eye))) return false;
         eyeMask |= uint64_t(1) << eye; return true;
@@ -228,10 +307,21 @@ struct UiCandidateReceipt {
 
 inline bool uiTargetMatches(const UiCandidateReceipt& frame, uint64_t baselineSequence,
                             uint32_t leftPpm, uint32_t rightPpm, uint32_t low, uint32_t high,
-                            bool targetOn) noexcept {
+                            bool targetOn, uint64_t inputTick) noexcept {
     const auto target = targetOn ? OrangeState::On : OrangeState::Off;
-    return frame.ready() && frame.sequence > baselineSequence &&
+    return frame.ready() && frame.sourceGeneration && frame.renderedPose && inputTick &&
+        frame.renderedTick >= inputTick && frame.sequence > baselineSequence &&
         orangeState(leftPpm, low, high) == target && orangeState(rightPpm, low, high) == target;
+}
+
+// Timeout diagnostics name the missing receipt rather than mistaking a valid
+// black/gray (zero-orange) baseline for absent image evidence.
+inline const char* uiPreparationStage(bool baseline, bool released, uint64_t eyes,
+                                      uint64_t submits, bool gpuComplete) noexcept {
+    if (baseline) return released ? "arm" : "keyboard_release";
+    if (eyes != 3) return "eye_pair";
+    if (submits != 3) return "accepted_submits";
+    return gpuComplete ? "pixel_readback" : "gpu_fence";
 }
 
 } // namespace edvr::input_latency_probe

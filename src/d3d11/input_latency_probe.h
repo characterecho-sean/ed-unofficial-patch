@@ -32,9 +32,21 @@ void mouseButton(void* device, bool pressed, unsigned source) noexcept;
 
 // source4: the input gate supplies an unchanged, successful 256-byte state
 // from its captured game keyboard, within a qualified InputManager invocation.
-// Only the requested UP/DOWN key is read. Missing engine ownership is rejected
-// by the caller; its token is retained with the actual pressed receipt.
+// Both UP/DOWN states update the optional per-device cache. A zero token supplies diagnostics
+// only; it cannot certify release or consume a pulse. A qualified token is
+// retained with the actual pressed receipt.
 void keyboardState(void* device, const uint8_t* state256, uint64_t inputTickToken) noexcept;
+
+// source5: one actual post-filtered UP/DOWN event from a successful standard,
+// non-peek GetDeviceData read. An empty buffer supplies no events or release.
+// Qualified reads cache real key cycles even while no UI request is active.
+// apiReturnQpc is captured once immediately after GetDeviceData, before hook
+// filtering/logging; all rows from that call share it and retain event order.
+void keyboardBuffered(void* device, unsigned scanCode, bool pressed, uint64_t inputTickToken,
+                      uint64_t apiReturnQpc) noexcept;
+// Failed/overflowed/uninterpretable reads and replaced device identities erase
+// cached knowledge; an affected active UI request explicitly rejects.
+void keyboardReadLost(void* device) noexcept;
 
 // After all eye treatments, immediately before transfer: owned-marker mode
 // paints a diagnostic rectangle; opt-in GameUi mode only copies configured

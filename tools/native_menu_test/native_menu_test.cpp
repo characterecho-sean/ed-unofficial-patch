@@ -55,6 +55,8 @@ void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 namespace input_latency_probe {
 void mouseButton(void*, bool, unsigned) noexcept {}
 void keyboardState(void*, const uint8_t*, uint64_t) noexcept {}
+void keyboardBuffered(void*, unsigned, bool, uint64_t, uint64_t) noexcept {}
+void keyboardReadLost(void*) noexcept {}
 }
 namespace native_reflex {
 void shutdownFrameTelemetry() noexcept {}

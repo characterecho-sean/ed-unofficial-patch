@@ -742,6 +742,10 @@ void native_reflex::updateOnGamePresent(ID3D11Device* device) {
     const bool probeActive = wanted || input_latency_probe::enabled();
     if (cached != kLowLatencyNoSession && cached != stamp)
         refreshLowLatency(*g_current, g_lowLatencyStamp.load(std::memory_order_relaxed), true);
+    else
+        // Probe activity keeps stable Presents on this path. Reporting must
+        // still publish source/capability changes; refresh already reports.
+        reportFrameSession(g_current->generation);
     // Install the game import observer even when the settings menu has never
     // opened. The existing input owner installs each door once.
     if (wanted) inputGateInstall();
