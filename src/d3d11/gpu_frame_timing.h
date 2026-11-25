@@ -1,6 +1,7 @@
 #pragma once
 #include "../common/gpu_span_state.h"
 #include "../common/native_present_trace.h"   // edvrNativeTraceNowUs: the flat first-command stamp
+#include "native_reflex_command.h"
 #include <atomic>
 
 struct ID3D11Device;
@@ -90,6 +91,7 @@ __declspec(noinline) inline void flatTraceFirstCommandSlow(ID3D11DeviceContext* 
 
 // __forceinline: it was `inline` and still an out-of-line call at the draw thunk (build 3 profile).
 __forceinline void gpuFrameCommandIfLive(ID3D11DeviceContext* ctx) noexcept {
+    native_reflex::observeFrameCommand(ctx);
     if (gpuFrameCommandMightAct()) gpuFrameCommand(ctx);
     if (detail::g_frameWorkArmed.load(std::memory_order_relaxed)) frameWorkFirstCommand(ctx);
     if (detail::g_flatTraceFirstCommandArmed.load(std::memory_order_relaxed)) flatTraceFirstCommandSlow(ctx);

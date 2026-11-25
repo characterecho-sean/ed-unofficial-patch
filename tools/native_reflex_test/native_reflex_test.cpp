@@ -10,6 +10,73 @@ using namespace edvr::native_reflex;
 
 namespace {
 
+void check(bool condition, const char* name);
+
+void frameTransport() {
+    detail::FrameSleepHistory history;
+    unsigned calls = 0;
+    const auto accept = [&] { ++calls; return true; };
+    const auto refuse = [&] { ++calls; return false; };
+    check(!history.sleep(0, accept) && history.sleep(4, accept) && !history.sleep(4, accept) &&
+          !history.sleep(3, accept) && !history.sleep(5, refuse) && !history.sleep(5, accept) &&
+          history.sleep(6, accept) && calls == 3, "Sleep attempts each increasing source ID at most once");
+    check(history.contains(4) && !history.contains(5) && history.contains(6),
+          "overlapping render frames retain only their own accepted sleep IDs");
+    check(!history.sleep(134, refuse) && !history.contains(6),
+          "an old source loses admission even when a new sleep attempt is refused");
+    history.retire();
+    check(!history.sleep(135, accept) && !history.contains(6) && calls == 4,
+          "a retired frame transport refuses new sleeps and markers");
+
+    constexpr auto marker = detail::markerParameters(0x100000004ull, Marker::PresentStart);
+    check(marker.version == 0x10058 && marker.frameId == 0x100000004ull &&
+          marker.markerType == 4 && !marker.reserved0 && !marker.reserved[55],
+          "marker ABI encodes the same 64-bit source ID and zeroes reserved fields");
+
+    detail::LatencyResult report{};
+    LatencyBatch batch;
+    check(detail::version1(sizeof(report)) == 0x13c28 &&
+          !detail::collectLatency(report, 1, 100, 0, batch) && batch.count == 0,
+          "an all-zero driver batch provides no latency evidence");
+    auto& completed = report.frames[63].timing;
+    completed.frameId = 90;
+    completed.simStartUs = 700000;
+    completed.simEndUs = 703000;
+    completed.renderSubmitStartUs = 702000;
+    completed.renderSubmitEndUs = 719000;
+    completed.presentStartUs = 714000;
+    completed.presentEndUs = 716000;
+    completed.gpuRenderStartUs = 712000;
+    completed.gpuRenderEndUs = 723000;
+    report.frames[59].timing = completed;
+    report.frames[59].timing.frameId = 86;
+    report.frames[59].timing.gpuRenderEndUs = 0;
+    report.frames[60].timing = completed;
+    report.frames[60].timing.frameId = 87;
+    report.frames[60].timing.presentStartUs = 0;
+    report.frames[61].timing = completed;
+    report.frames[61].timing.frameId = 89;
+    report.frames[62].timing = completed;
+    check(detail::collectLatency(report, 1, 100, 85, batch) && batch.count == 2 &&
+          batch.frames[0].frameId == 89 && batch.frames[1].frameId == 90 &&
+          batch.frames[1].simStartUs == 700000 && batch.frames[1].gpuRenderEndUs == 723000,
+          "driver timing batches omit missing, stale and duplicate records and keep exact timestamps");
+    check(detail::collectLatency(report, 1, 100, 89, batch) && batch.count == 1 &&
+          batch.frames[0].frameId == 90, "a caller watermark skips driver results already sampled");
+    check(!detail::collectLatency(report, 91, 100, 0, batch) && !batch.count,
+          "driver reports from an earlier session cannot leak into this session");
+
+    ModeHistory mode;
+    check(mode.change(Mode::Off, true) && mode.requiresDriver(),
+          "full frame transport applies the initial Off driver mode");
+    mode.acceptRequest();
+    check(mode.observing() && !mode.needsReset(), "an accepted initial Off creates no enable cleanup ownership");
+    check(detail::modeParameters(Mode::On, true).useMarkersToOptimize &&
+          !detail::modeParameters(Mode::Off, true).useMarkersToOptimize &&
+          !detail::modeParameters(Mode::On).useMarkersToOptimize,
+          "only an enabled mode with frame transport opts into marker optimization");
+}
+
 unsigned checks = 0;
 unsigned failures = 0;
 
@@ -87,6 +154,86 @@ void preserveExternalPolicy() {
               std::strcmp(driver.last.reason, i == 3 ? "baseline_unknown" : "existing_driver_policy") == 0,
               "existing or unreadable policy prevents a write, delayed read, and close cleanup");
     }
+    driver = {};
+    driver.status.useGameSleep = 1;
+    const auto read = [](detail::GetSleepStatus& status) { return driver.read(status); };
+    const auto set = [](detail::SetSleepMode& params) { return driver.set(params); };
+    auto result = detail::requestMode(Mode::On, false, read, set, true, true);
+    check(result.setStatus == 0 && driver.writes == std::vector<Mode>{Mode::On},
+          "an Off session's own accepted Sleep does not block live enable");
+    driver.status.lowLatencyMode = 0;
+    driver.status.sleepIntervalUs = 16000;
+    result = detail::requestMode(Mode::On, false, read, set, true, true);
+    check(std::strcmp(result.reason, "existing_driver_policy") == 0 && driver.writes.size() == 1,
+          "own Sleep does not override an observed existing interval");
+}
+
+void reenrollOwnedSleepDevice() {
+    struct Device {
+        detail::GetSleepStatus baseline{};
+        bool ownSleepProof = false;
+    } first, unrelated;
+    detail::FrameSleepHistory previousSession;
+    const bool slept = previousSession.sleep(20, [] { return true; });
+    first.ownSleepProof = slept;
+    previousSession.retire();
+    first.baseline.useGameSleep = 1;  // Remains set after the first session's Off cleanup.
+    unrelated.baseline = first.baseline;
+    check(slept && !detail::hasExternalDriverPolicy(first.baseline, first.ownSleepProof) &&
+          detail::hasExternalDriverPolicy(unrelated.baseline, unrelated.ownSleepProof),
+          "stale ED-UP Sleep permits reenrollment only on its own device");
+
+    unsigned acceptedWrites = 0;
+    const auto read = [&](detail::GetSleepStatus& out) { out = first.baseline; return 0; };
+    const auto set = [&](detail::SetSleepMode&) { ++acceptedWrites; return 0; };
+    auto result = detail::requestMode(Mode::Off, false, read, set, first.ownSleepProof, true);
+    check(result.setStatus == 0 && acceptedWrites == 1,
+          "the reopened session can issue its initial Off with the retained Sleep proof");
+
+    first.baseline.lowLatencyMode = 1;
+    check(detail::hasExternalDriverPolicy(first.baseline, first.ownSleepProof),
+          "reenrollment never ignores an observed enabled mode");
+    first.baseline.lowLatencyMode = 0;
+    first.baseline.sleepIntervalUs = 16000;
+    check(detail::hasExternalDriverPolicy(first.baseline, first.ownSleepProof),
+          "reenrollment never ignores an observed interval");
+}
+
+void firstSleepModeRace() {
+    using detail::FirstSleepGate;
+    using Admission = FirstSleepGate::Admission;
+    FirstSleepGate gate(false);
+    ModeHistory mode;
+    check(mode.change(Mode::Off, true), "initial Off is applied before the first Sleep");
+    mode.acceptRequest();
+    check(gate.beginSleep() == Admission::Unproven && gate.beginModeUpdate() == Admission::Busy,
+          "first Sleep defers a concurrent mode change");
+    check(mode.change(Mode::On, true), "the live On request is noticed");
+    mode.deferRequest();
+    check(mode.retryNeeded() && !mode.needsReset(),
+          "defer keeps the mode pending without creating cleanup ownership");
+    gate.finish(true);
+    check(gate.beginModeUpdate() == Admission::Owned && mode.change(Mode::On, true),
+          "the same request retries with ownership proof only after accepted Sleep");
+    mode.acceptRequest();
+    check(!mode.retryNeeded() && mode.needsReset() && !mode.change(Mode::On, true),
+          "the accepted retry completes normally and is not repeated");
+
+    FirstSleepGate rejected(false);
+    check(rejected.beginSleep() == Admission::Unproven, "a new device begins without Sleep ownership");
+    rejected.finish(false);
+    check(rejected.beginModeUpdate() == Admission::Unproven && rejected.beginSleep() == Admission::Busy,
+          "after refused Sleep, the next mode reads a clean baseline and excludes first Sleep during that read");
+    rejected.finish(false);
+    check(rejected.beginSleep() == Admission::Unproven,
+          "a completed mode check reopens first Sleep admission");
+    rejected.finish(false);
+
+    check(detail::canWithdrawRetiredMode(Mode::Off, true) &&
+          !detail::canWithdrawRetiredMode(Mode::Off, false) &&
+          !detail::canWithdrawRetiredMode(Mode::On, true) &&
+          !detail::canWithdrawRetiredMode(Mode::Boost, true),
+          "retired transport permits only an Off withdrawal of an owned enable");
 }
 
 void acceptedAndRefusedRequests() {
@@ -172,6 +319,10 @@ Result apply(ID3D11Device*, Mode mode, bool alreadyOwned) {
         [](SetSleepMode& params) { return driver.set(params); });
 }
 
+Result applyFrameMode(FrameDriver&, ID3D11Device* device, Mode mode, bool alreadyOwned) {
+    return apply(device, mode, alreadyOwned);
+}
+
 Result observe(ID3D11Device*, Mode mode) {
     Result result{"unavailable", true};
     readMode(result, mode, [](GetSleepStatus& status) { return driver.read(status); });
@@ -192,9 +343,12 @@ int main(int argc, char** argv) {
     modeSelection();
     modeParameters();
     preserveExternalPolicy();
+    reenrollOwnedSleepDevice();
+    firstSleepModeRace();
     acceptedAndRefusedRequests();
     delayedCleanup();
     modulePaths();
+    frameTransport();
     std::printf("native_reflex_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

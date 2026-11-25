@@ -41,7 +41,15 @@ python tools\fetch_ffx_dx11.py
 python tools\fetch_xess.py
 python tools\fetch_fsr4.py
 python tools\fetch_openxr_loader.py
+python tools\fetch_reflex.py
 ```
+
+`fetch_reflex.py` verifies NVIDIA's pinned Reflex statistics header and license
+in `third_party\reflex`. Set `EDUP_REFLEX_SDK` to another verified SDK directory,
+or `none` to build without the statistics integration. The native build fetches
+and verifies this dependency automatically unless disabled. Binaries containing
+the statistics integration require `NVIDIA-REFLEX-LICENSE.txt`; packaging and
+installation preserve that license beside the game.
 
 `fetch_fsr4.py` stages AMD's FidelityFX (FSR 4.1) headers and its two signed
 D3D12 DLLs (about 29 MB) into `%LOCALAPPDATA%\EDVR\fsr4-sdk`; `third_party\fsr4`

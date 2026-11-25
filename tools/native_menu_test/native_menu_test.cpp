@@ -15,6 +15,9 @@
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/gpu_census.h"
 #include "../../src/d3d11/input_latency_probe.h"
+#include "../../src/d3d11/native_reflex_engine_hook.h"
+#include "../../src/d3d11/native_reflex_pcl.h"
+#include "../../src/d3d11/native_reflex_session.h"
 #include <openxr/openxr.h>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -51,6 +54,15 @@ void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 // enable or exercise the separately tested latency probe.
 namespace input_latency_probe {
 void mouseButton(void*, bool, unsigned) noexcept {}
+void keyboardState(void*, const uint8_t*, uint64_t) noexcept {}
+}
+namespace native_reflex {
+void shutdownFrameTelemetry() noexcept {}
+void mouseMessageRemoved(bool) noexcept {}
+uint64_t currentInputFrameToken() noexcept { return 0; }
+namespace pcl {
+bool messageRemoved(uint32_t) noexcept { return false; }
+}
 }
 }
 

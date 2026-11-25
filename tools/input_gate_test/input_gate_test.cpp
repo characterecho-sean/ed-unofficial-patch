@@ -36,6 +36,30 @@ void mouseButton(void* device, bool pressed, unsigned source) noexcept {
     if (testMouseReadCount < testMouseReads.size())
         testMouseReads[testMouseReadCount++] = {device, pressed, source};
 }
+struct TestKeyboardRead { void* device; uint64_t token; std::array<uint8_t, 256> state; };
+std::array<TestKeyboardRead, 32> testKeyboardReads{};
+size_t testKeyboardReadCount = 0;
+void keyboardState(void* device, const uint8_t* state256, uint64_t token) noexcept {
+    if (testKeyboardReadCount < testKeyboardReads.size()) {
+        auto& read = testKeyboardReads[testKeyboardReadCount++];
+        read.device = device; read.token = token;
+        memcpy(read.state.data(), state256, read.state.size());
+    }
+}
+}
+
+namespace edvr::native_reflex::pcl {
+unsigned testRemovedMessages = 0;
+bool messageRemoved(uint32_t) noexcept { ++testRemovedMessages; return true; }
+}
+namespace edvr::native_reflex {
+unsigned testNormalQuits = 0;
+std::vector<bool> testRemovedMouseButtons;
+void mouseMessageRemoved(bool down) noexcept { testRemovedMouseButtons.push_back(down); }
+void shutdownFrameTelemetry() noexcept { ++testNormalQuits; }
+uint64_t testInputFrameToken = 0;
+unsigned testInputTokenCalls = 0;
+uint64_t currentInputFrameToken() noexcept { ++testInputTokenCalls; return testInputFrameToken; }
 }
 
 using namespace edvr;
@@ -95,6 +119,7 @@ struct Device {
     BYTE keys[256]{};
     DIDEVICEOBJECTDATA events[4]{};
     DWORD count = 0;
+    bool customState = false;
 };
 ULONG STDMETHODCALLTYPE retainDevice(Device* d) { return ++d->refs; }
 ULONG STDMETHODCALLTYPE releaseDevice(Device* d) { return --d->refs; }
@@ -108,7 +133,7 @@ HRESULT STDMETHODCALLTYPE state(Device* d, DWORD bytes, void* out) {
     ++d->calls;
     if (FAILED(d->result)) return d->result;
     if (!out) return DIERR_INVALIDPARAM;
-    if (d->type == DI8DEVTYPE_MOUSE && bytes <= sizeof(d->keys)) {
+    if ((d->type == DI8DEVTYPE_MOUSE || d->customState) && bytes <= sizeof(d->keys)) {
         memcpy(out, d->keys, bytes);
         return d->result;
     }
@@ -1204,6 +1229,88 @@ static void mouseInputLatencyCases() {
     }
 }
 
+static void keyboardInputLatencyCases() {
+    using namespace edvr::input_latency_probe;
+    const uint32_t savedSummon = g_summon.load();
+    const int savedPrivate = g_private.load();
+    for (bool wide : {false, true}) {
+        inputGateShutdown();
+        auto table = deviceTable();
+        auto factorySlots = factoryTable();
+        Device keyboard{table.data()};
+        Factory factory{factorySlots.data(), 1, &keyboard};
+        captureFactory(&factory, wide, std::make_index_sequence<kFactoryDoors>{});
+        void* returned = nullptr;
+        check(createThrough(factory, &returned) == DI_OK && returned == &keyboard && keyboardRegistered(&keyboard),
+              "A/W keyboard receipt fixture uses the game's captured factory identity");
+        g_private.store(0); g_summon.store(0); cancelReleaseTail();
+        keyboard.keys[DIK_UP] = 0x80; keyboard.keys[DIK_A] = 0x80;
+        BYTE observed[256]{};
+        testKeyboardReadCount = 0;
+        native_reflex::testInputFrameToken = 901;
+        const unsigned tokenCalls = native_reflex::testInputTokenCalls;
+        live.store(false);
+        check(readState(keyboard, observed) == DI_OK && testKeyboardReadCount == 0 &&
+              native_reflex::testInputTokenCalls == tokenCalls && memcmp(observed, keyboard.keys, 256) == 0,
+              "disabled keyboard probe preserves state and does not query engine scope");
+        live.store(true); native_reflex::testInputFrameToken = 0;
+        check(readState(keyboard, observed) == DI_OK && testKeyboardReadCount == 0 &&
+              memcmp(observed, keyboard.keys, 256) == 0,
+              "a captured keyboard read outside qualified InputManager scope stays unobserved");
+        native_reflex::testInputFrameToken = 901;
+        check(readState(keyboard, observed) == DI_OK && testKeyboardReadCount == 1 &&
+              testKeyboardReads[0].device == &keyboard && testKeyboardReads[0].token == 901 &&
+              memcmp(testKeyboardReads[0].state.data(), observed, 256) == 0 &&
+              memcmp(observed, keyboard.keys, 256) == 0,
+              "successful owned standard keyboard read reports unchanged bytes with the exact engine token");
+        const size_t before = testKeyboardReadCount;
+        keyboard.customState = true;
+        memset(observed, 0x5a, sizeof(observed));
+        auto read = reinterpret_cast<PFN_GetDeviceState>(keyboard.table[9]);
+        check(read(&keyboard, 255, observed) == DI_OK && testKeyboardReadCount == before &&
+              memcmp(observed, keyboard.keys, 255) == 0 && observed[255] == 0x5a,
+              "a successful custom keyboard layout is forwarded without being interpreted");
+        keyboard.customState = false; keyboard.result = DIERR_INPUTLOST;
+        BYTE old[256]; memcpy(old, observed, sizeof(old));
+        check(readState(keyboard, observed) == DIERR_INPUTLOST && testKeyboardReadCount == before &&
+              memcmp(old, observed, sizeof(old)) == 0,
+              "failed keyboard reads preserve their status and untouched bytes without reporting receipt");
+        keyboard.result = S_FALSE;
+        check(readState(keyboard, observed) == S_FALSE && testKeyboardReadCount == before,
+              "a non-DI_OK success code cannot qualify a keyboard receipt");
+        keyboard.result = DI_OK;
+        Device foreign{table.data()}; foreign.keys[DIK_UP] = 0x80;
+        check(read(&foreign, sizeof(observed), observed) == DI_OK && testKeyboardReadCount == before &&
+              memcmp(observed, foreign.keys, sizeof(observed)) == 0,
+              "a foreign keyboard sharing the captured table cannot borrow its ownership");
+        for (DiDoor* fallback : {&g_diW, &g_diA}) {
+            void* savedDummy = fallback->dummy;
+            fallback->dummy = &keyboard;
+            check(readState(keyboard, observed) == DI_OK && testKeyboardReadCount == before,
+                  "either owned fallback dummy remains excluded even if its address is registered");
+            fallback->dummy = savedDummy;
+        }
+        g_private.store(1);
+        check(readState(keyboard, observed) == DI_OK && testKeyboardReadCount == before + 1 && released(observed) &&
+              memcmp(testKeyboardReads[before].state.data(), observed, sizeof(observed)) == 0,
+              "keyboard receipt sees the fully filtered private state that actually reaches the game");
+        g_private.store(0);
+        g_summon.store(0x80000000u | uint32_t(VK_UP) | (uint32_t(DIK_UP) << 8));
+        check(readState(keyboard, observed) == DI_OK && testKeyboardReadCount == before + 2 &&
+              observed[DIK_UP] == 0 && observed[DIK_A] == 0x80 &&
+              memcmp(testKeyboardReads[before + 1].state.data(), observed, sizeof(observed)) == 0,
+              "summon-key filtering precedes keyboard receipt and preserves unrelated returned keys");
+        keyboardForget(&keyboard);
+        check(!keyboardRegistered(&keyboard) && readState(keyboard, observed) == DI_OK &&
+              testKeyboardReadCount == before + 3 && testKeyboardReads[before + 2].device == &keyboard,
+              "the retained captured door remains positive keyboard ownership after registry eviction");
+        live.store(false); native_reflex::testInputFrameToken = 0;
+        inputGateShutdown();
+        check(keyboard.refs == 1, "keyboard receipt holds no additional device references");
+    }
+    g_summon.store(savedSummon); g_private.store(savedPrivate);
+}
+
 static void releaseLogCases();
 
 namespace {
@@ -1242,11 +1349,13 @@ static void mouseMessageLatencyCases() {
     mouseQueuedMessage.pt = {37, 51};
     MSG observed{};
     live.store(false);
+    const size_t sdkBefore = native_reflex::testRemovedMouseButtons.size();
     check(hookPeekMessageA(&observed, ownWindow, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE) == 7 &&
           mousePeekCalls == 1 && mousePeekFilter == ownWindow && mousePeekLo == WM_MOUSEFIRST &&
           mousePeekHi == WM_MOUSELAST && mousePeekRemove == PM_REMOVE &&
-          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0 && testMouseReadCount == 0,
-          "disabled message receipt preserves the original arguments, result and every message byte");
+          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0 && testMouseReadCount == 0 &&
+          native_reflex::testRemovedMouseButtons.size() == sdkBefore + 1 && native_reflex::testRemovedMouseButtons.back(),
+          "SDK click receipt stays active while the optional probe is disabled and preserves the original message");
     live.store(true);
     check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE | PM_NOYIELD) == 7 && testMouseReadCount == 1 &&
           testMouseReads[0].device == ownWindow && testMouseReads[0].pressed && testMouseReads[0].source == 3 &&
@@ -1260,20 +1369,21 @@ static void mouseMessageLatencyCases() {
           "an owned release is observed before the independent keyboard-pump retirement check");
     g_user.retired3 = false;
     const size_t before = testMouseReadCount;
+    const size_t sdkAccepted = native_reflex::testRemovedMouseButtons.size();
     check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_NOREMOVE) == 7 && testMouseReadCount == before &&
-          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0 && native_reflex::testRemovedMouseButtons.size() == sdkAccepted,
           "a peek of an owned button message cannot be counted as receipt");
     for (HWND other : {testForeignMessageWindow, HWND(nullptr), reinterpret_cast<HWND>(uintptr_t(1))}) {
         mouseQueuedMessage.hwnd = other;
         check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == 7 && testMouseReadCount == before &&
-              memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+              memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0 && native_reflex::testRemovedMouseButtons.size() == sdkAccepted,
               "foreign-process, thread-only and invalid-window button messages remain unobserved and unchanged");
     }
     mouseQueuedMessage.hwnd = ownWindow;
     for (UINT message : {UINT(WM_RBUTTONDOWN), UINT(WM_MOUSEMOVE), UINT(WM_INPUT)}) {
         mouseQueuedMessage.message = message;
         check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == 7 && testMouseReadCount == before &&
-              memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+              memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0 && native_reflex::testRemovedMouseButtons.size() == sdkAccepted,
               "unrelated mouse and raw-input messages do not report a left-button receipt");
     }
     mouseQueuedMessage.message = WM_LBUTTONDOWN;
@@ -1281,11 +1391,45 @@ static void mouseMessageLatencyCases() {
     memset(&observed, 0x5a, sizeof(observed));
     const MSG old = observed;
     check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == FALSE && testMouseReadCount == before &&
-          memcmp(&observed, &old, sizeof(MSG)) == 0,
+          memcmp(&observed, &old, sizeof(MSG)) == 0 && native_reflex::testRemovedMouseButtons.size() == sdkAccepted,
           "an unsuccessful dequeue preserves the result and untouched output without reporting receipt");
     mousePeekResult = TRUE;
-    check(hookPeekMessageA(nullptr, nullptr, 0, 0, PM_REMOVE) == TRUE && testMouseReadCount == before,
+    check(hookPeekMessageA(nullptr, nullptr, 0, 0, PM_REMOVE) == TRUE && testMouseReadCount == before &&
+          native_reflex::testRemovedMouseButtons.size() == sdkAccepted,
           "a null message output cannot report receipt");
+    live.store(false);
+    mouseQueuedMessage.message = WM_LBUTTONDBLCLK;
+    check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == TRUE &&
+          native_reflex::testRemovedMouseButtons.size() == sdkAccepted + 1 && native_reflex::testRemovedMouseButtons.back() &&
+          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0 && testMouseReadCount == before,
+          "an owned double-click reports the second down edge to the SDK while the optional probe is off");
+    mouseQueuedMessage.message = WM_LBUTTONUP;
+    check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == TRUE &&
+          native_reflex::testRemovedMouseButtons.size() == sdkAccepted + 2 && !native_reflex::testRemovedMouseButtons.back() &&
+          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+          "the actual removed release reaches the SDK without changing mouse input");
+    mouseQueuedMessage.message = 0xC123; // stand-in for the SDK's registered ping
+    unsigned pclBefore = edvr::native_reflex::pcl::testRemovedMessages;
+    check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_NOREMOVE) == TRUE &&
+          edvr::native_reflex::pcl::testRemovedMessages == pclBefore,
+          "PCL cannot attribute a ping that the game only peeked");
+    check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == TRUE &&
+          edvr::native_reflex::pcl::testRemovedMessages == pclBefore + 1 &&
+          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+          "the actual removed ping reaches PCL unchanged without assigning a simulation frame");
+    mouseQueuedMessage.message = WM_QUIT;
+    unsigned quitBefore = edvr::native_reflex::testNormalQuits;
+    hookPeekMessageA(&observed, nullptr, 0, 0, PM_NOREMOVE);
+    check(edvr::native_reflex::testNormalQuits == quitBefore,
+          "a peeked quit cannot shut down process-lifetime telemetry");
+    g_user.retired3 = true;
+    check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == TRUE &&
+          edvr::native_reflex::testNormalQuits == quitBefore + 1 && observed.message == WM_QUIT,
+          "normal game quit stops telemetry outside loader teardown even after keyboard retirement");
+    mousePeekResult = FALSE;
+    hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE);
+    check(edvr::native_reflex::testNormalQuits == quitBefore + 1,
+          "a failed dequeue with stale quit bytes cannot shut down telemetry");
     live.store(false);
     g_user.origPeek = savedPeek; g_user.retired3 = savedRetired; g_private.store(savedPrivate);
     DestroyWindow(ownWindow);
@@ -1301,6 +1445,7 @@ int main(int argc, char** argv) {
         return failures ? 1 : 0;
     }
     mouseInputLatencyCases();
+    keyboardInputLatencyCases();
     mouseMessageLatencyCases();
     padHookCases();
     loadedModuleMatchCases();

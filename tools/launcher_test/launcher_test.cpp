@@ -452,7 +452,7 @@ void testShapes() {
     }
     const std::wstring tableBase = P(P(g_fixtures, L"shapes"), widenUtf8(tableLabel));
     Manifest table;
-    check(loadVerifiedManifest(readAll(tableBase + L".json"), readAll(tableBase + L".sig"), g_testKeys, &table, &err) && table.files.size() == 20,
+    check(loadVerifiedManifest(readAll(tableBase + L".json"), readAll(tableBase + L".sig"), g_testKeys, &table, &err) && table.files.size() == 21,
           "the packager's file table is read whole: " + err);
     auto byId = [&](const char* id) -> const ManifestFile* {
         for (const ManifestFile& f : table.files) if (f.id == id) return &f;
@@ -480,6 +480,14 @@ void testShapes() {
                   f->target.root == TargetRoot::Game,
               std::string(id) + " is placed with d3d11.dll for both profiles, and owned");
     }
+    const ManifestFile* reflexLicense = byId("reflex_license");
+    const ManifestFile* graphics = byId("graphics");
+    check(reflexLicense && graphics && reflexLicense->asset == graphics->asset &&
+              reflexLicense->path == "NVIDIA-REFLEX-LICENSE.txt" &&
+              reflexLicense->target.root == TargetRoot::Game && reflexLicense->target.path == reflexLicense->path &&
+              reflexLicense->existing == ExistingMode::Owned &&
+              whenHolds(reflexLicense->when, kProfileVr, false) && whenHolds(reflexLicense->when, kProfileFlat, false),
+          "the Reflex license travels in the graphics asset and is owned beside d3d11.dll in both profiles");
     for (const char* id : {"xess_fg", "xess_ll"}) {
         const ManifestFile* f = byId(id);
         check(f && f->when.profiles == kProfileFlat && !f->when.adapterNvidia && f->existing == ExistingMode::Owned && f->target.root == TargetRoot::Game,

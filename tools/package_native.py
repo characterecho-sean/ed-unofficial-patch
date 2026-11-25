@@ -26,6 +26,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
@@ -33,6 +34,12 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 import sign_manifest
+_reflex_bytecode_policy = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    import fetch_reflex
+finally:
+    sys.dont_write_bytecode = _reflex_bytecode_policy
 from gen_installer_rc import IDR_FILE_BASE, IDR_MANIFEST, descriptor_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +125,8 @@ FILES = (
     PackagedFile("dittosr_license", "DITTOSR-LICENSE.txt", "core", "game", "DITTOSR-LICENSE.txt", _EITHER, "owned"),
     PackagedFile("dittosr_gsr_license", "DITTOSR-GSR-LICENSE.txt", "core", "game",
                  "DITTOSR-GSR-LICENSE.txt", _EITHER, "owned"),
+    PackagedFile("reflex_license", fetch_reflex.LICENSE_NAME, "core", "game",
+                 fetch_reflex.LICENSE_NAME, _EITHER, "owned"),
     PackagedFile("dlss", "nvngx_dlss.dll", "dlss", "game", "nvngx_dlss.dll", _NVIDIA, "owned"),
     PackagedFile("xess", "libxess.dll", "xess", "game", "libxess.dll", None, "owned"),
     PackagedFile("xess_license", "INTEL-XESS-LICENSE.txt", "xess", "game", "INTEL-XESS-LICENSE.txt", None, "owned"),
@@ -189,6 +198,9 @@ def _files(root, no_dlss):
               (build / "OPENXR-LOADER-LICENSE.txt", "openvr/OPENXR-LOADER-LICENSE.txt"),
               (root / "release" / "README.txt", "README.txt"),
               (root / "release" / "OPENVR.txt", "openvr/READ-ME-FIRST.txt")]
+    reflex_notice = fetch_reflex.build_license(result[0][0], build)
+    if reflex_notice is not None:
+        result.append((reflex_notice, fetch_reflex.LICENSE_NAME))
     # --no-dlss permits builds made without the SDK. A build that holds the
     # runtime packs it either way.
     if not no_dlss or (build / "nvngx_dlss.dll").is_file():
@@ -1193,7 +1205,8 @@ def self_test():
                                           "sha256": hashlib.sha256(b"launcher exe").hexdigest(), "size": 12}
             assert (dist / LAUNCHER_ASSET).read_bytes() == b"launcher exe"
             assert [asset["name"] for asset in parsed["assets"]] == [core.name, dlss_zip.name, xess_zip.name, fsr4_zip.name]
-            assert [entry["id"] for entry in parsed["files"]] == [file.id for file in FILES if file.group != "edhm"]
+            assert [entry["id"] for entry in parsed["files"]] == [file.id for file in FILES
+                                                                 if file.group != "edhm" and file.id != "reflex_license"]
             # Pin v0.22.x compatibility: ed-up-manifest-v2.json is strictly schema 2 and stays
             # byte-for-byte identical whether or not the optional EDHM_2DMigoto asset is staged.
             v2_without_edhm = (dist / V2_MANIFEST).read_bytes()
@@ -1222,7 +1235,7 @@ def self_test():
             assert (dist / V2_MANIFEST).read_bytes() == v2_without_edhm, "ed-up-manifest-v2.json changed when EDHM was added!"
             v3_with_edhm, v3_problems = sign_manifest.load_manifest((dist / MANIFEST).read_bytes())
             assert v3_problems == [], v3_problems
-            assert [entry["id"] for entry in v3_with_edhm["files"]] == [file.id for file in FILES]
+            assert [entry["id"] for entry in v3_with_edhm["files"]] == [file.id for file in FILES if file.id != "reflex_license"]
             v3_by_id = {entry["id"]: entry for entry in v3_with_edhm["files"]}
             assert v3_by_id["edhm_2dmigoto"]["existing"] == "opt_in"
             assert v3_by_id["edhm_2dmigoto"]["when"] == {"option": "edhm_2dmigoto"}
@@ -1336,6 +1349,53 @@ def self_test():
             except ValueError as error:
                 assert "licence must travel" in str(error), str(error)
             (root / "build" / AMD_LICENSE).write_bytes(held)
+            # PCL is incorporated into graphics, so its exact SDK notice must
+            # travel through both the manual archive and launcher manifest.
+            # A leftover notice alone must never enable it for a later build.
+            graphics = root / "build" / "edvr_openxr_graphics.dll"
+            graphics_before = graphics.read_bytes()
+            reflex_notice = root / "build" / fetch_reflex.LICENSE_NAME
+            reflex_payload = b"NVIDIA Reflex SDK fixture license"
+            reflex_pin = fetch_reflex.FILES[fetch_reflex.LICENSE]
+            fetch_reflex.FILES[fetch_reflex.LICENSE] = (len(reflex_payload), hashlib.sha256(reflex_payload).hexdigest())
+            try:
+                reflex_notice.write_bytes(b"stale notice")
+                assert fetch_reflex.LICENSE_NAME not in {name for _, name in _files(root, True)}
+                graphics.write_bytes(graphics_before + fetch_reflex.PCL_BINARY_MARKER)
+                for invalid in (b"stale notice", None):
+                    if invalid is None:
+                        reflex_notice.unlink()
+                    else:
+                        reflex_notice.write_bytes(invalid)
+                    for dry in (True, False):
+                        before_refusal = snapshot()
+                        try:
+                            package(root, "4.0.1", no_dlss=True, dry_run=dry)
+                            raise AssertionError("PCL build without the pinned notice was packaged")
+                        except ValueError as error:
+                            assert "PCL-enabled graphics requires" in str(error), str(error)
+                        assert snapshot() == before_refusal
+                reflex_notice.write_bytes(reflex_payload)
+                before_dry = snapshot()
+                assert package(root, "4.0.1", no_dlss=True, dry_run=True) == 0
+                assert snapshot() == before_dry
+                assert package(root, "4.0.1", no_dlss=True) == 0
+                for archive_name in ("ed-up-4.0.1.zip", "ed-up-core-4.0.1.zip"):
+                    with zipfile.ZipFile(dist / archive_name) as archive:
+                        assert archive.read(fetch_reflex.LICENSE_NAME) == reflex_payload
+                for manifest_name in (MANIFEST, V2_MANIFEST):
+                    pcl_manifest = json.loads((dist / manifest_name).read_text(encoding="ascii"))
+                    entry = next(item for item in pcl_manifest["files"] if item["id"] == "reflex_license")
+                    assert entry["target"] == {"root": "game", "path": fetch_reflex.LICENSE_NAME}
+                    assert entry["sha256"] == hashlib.sha256(reflex_payload).hexdigest()
+                graphics.write_bytes(graphics_before)
+                assert package(root, "4.0.1", no_dlss=True) == 0
+                with zipfile.ZipFile(dist / "ed-up-core-4.0.1.zip") as archive:
+                    assert fetch_reflex.LICENSE_NAME not in archive.namelist()
+            finally:
+                graphics.write_bytes(graphics_before)
+                fetch_reflex.FILES[fetch_reflex.LICENSE] = reflex_pin
+                if reflex_notice.exists(): reflex_notice.unlink()
             # A changed runtime gets a new name and the old one goes.
             dlss_dll = root / "build" / "nvngx_dlss.dll"
             kept = dlss_dll.read_bytes()

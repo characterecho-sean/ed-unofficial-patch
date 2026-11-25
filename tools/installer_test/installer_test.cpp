@@ -207,6 +207,7 @@ static const TestTableRow kTestTable[] = {
     {"settings_flat", TargetRoot::Game, "edvr-flat.ini", kProfileFlat, false, nullptr, ExistingMode::Settings},
     {"dittosr_license", TargetRoot::Game, "DITTOSR-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Owned},
     {"dittosr_gsr_license", TargetRoot::Game, "DITTOSR-GSR-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Owned},
+    {"reflex_license", TargetRoot::Game, "NVIDIA-REFLEX-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Owned},
     {"dlss", TargetRoot::Game, "nvngx_dlss.dll", 0, true, nullptr, ExistingMode::Owned},
     {"xess", TargetRoot::Game, "libxess.dll", 0, false, nullptr, ExistingMode::Owned},
     {"xess_license", TargetRoot::Game, "INTEL-XESS-LICENSE.txt", 0, false, nullptr, ExistingMode::Owned},
@@ -7715,6 +7716,7 @@ static void testManifestFiles(const std::wstring& root) {
 
     {   // The test table is the packager's table: same ids, targets, conditions and behaviours, so a test payload is a real one's shape.
         const std::string text = readTextFile(joinPath(root, L"tools\\package_native.py"));
+        const std::string reflexFetcher = readTextFile(joinPath(root, L"tools\\fetch_reflex.py"));
         check(!text.empty(), "tools\\package_native.py is readable from the root");
         size_t count = 0;
         for (size_t at = text.find("PackagedFile(\""); at != std::string::npos; at = text.find("PackagedFile(\"", at + 1)) ++count;
@@ -7726,7 +7728,12 @@ static void testManifestFiles(const std::wstring& root) {
             std::string decl = text.substr(at, text.find("),", at) - at + 2);
             const char* when = row.option ? "_EDHM_OPT" : row.nvidia ? "_NVIDIA" : row.profiles == kProfileAll ? "_EITHER" : row.profiles == kProfileVr ? "_VR"
                               : row.profiles == kProfileFlat ? "_FLAT" : "None";
-            const std::string tail = std::string("\"") + (row.root == TargetRoot::Game ? "game" : "openvr") + "\", \"" + row.path + "\"";
+            const std::string literalPath = std::string("\"") + row.path + "\"";
+            // The packager uses the SDK fetcher's filename constant as the Reflex target.
+            const bool matchesReflexConstant = std::string(row.id) == "reflex_license" &&
+                reflexFetcher.find("LICENSE_NAME = " + literalPath) != std::string::npos;
+            const std::string tail = std::string("\"") + (row.root == TargetRoot::Game ? "game" : "openvr") + "\", " +
+                (matchesReflexConstant ? "fetch_reflex.LICENSE_NAME" : literalPath);
             std::string flattened;
             for (char c : decl) if (c != '\n' && c != '\r') flattened += c;
             std::string squeezed;

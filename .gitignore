@@ -21,6 +21,8 @@ build - Copy/
 # default is one copy per machine under %LOCALAPPDATA%\EDVR\ngx-sdk). Its licence
 # keeps it out of the tree: not stand-alone, not under an open source licence.
 third_party/ngx/
+# NVIDIA Reflex PCL SDK subset; fetched with its original SDK license.
+third_party/reflex/
 
 # The community FidelityFX DX11 port's fetched checkout and build output
 # (tools/fetch_ffx_dx11.py --dest third_party/ffx-dx11 puts it here; the

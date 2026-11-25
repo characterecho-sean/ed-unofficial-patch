@@ -30,10 +30,17 @@ void stop() noexcept;
 // Never changes game input or message results.
 void mouseButton(void* device, bool pressed, unsigned source) noexcept;
 
-// After all eye treatments, immediately before transfer, paint a small owned
-// diagnostic response into the actual submitted eye texture. Both eyes must
-// belong to the same native sequence. Signal a GPU fence after the second
-// response; its CPU notification is an observed completion upper bound.
+// source4: the input gate supplies an unchanged, successful 256-byte state
+// from its captured game keyboard, within a qualified InputManager invocation.
+// Only the requested UP/DOWN key is read. Missing engine ownership is rejected
+// by the caller; its token is retained with the actual pressed receipt.
+void keyboardState(void* device, const uint8_t* state256, uint64_t inputTickToken) noexcept;
+
+// After all eye treatments, immediately before transfer: owned-marker mode
+// paints a diagnostic rectangle; opt-in GameUi mode only copies configured
+// ROIs and verifies the real pixels. Both eyes must belong to the same native
+// sequence and be accepted. Fence CPU notification is a completion upper bound;
+// only the producer thread issues context commands or maps staging textures.
 void eyeRendered(ID3D11Device*, ID3D11Texture2D*, uint64_t sequence, unsigned eye) noexcept;
 
 // Only a successful paired native submission qualifies. This CPU endpoint is

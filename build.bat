@@ -227,6 +227,19 @@ REM Dependency cache survives --clean. Never discover a loader in SteamVR.
 python tools\fetch_openxr_loader.py --verify || exit /b 1
 copy /y "%ROOT%\third_party\openxr\loader\openxr_loader.dll" "%BUILD%\openxr_loader.dll" >nul || exit /b 1
 copy /y "%ROOT%\third_party\openxr\loader\OPENXR-LOADER-LICENSE.txt" "%BUILD%\OPENXR-LOADER-LICENSE.txt" >nul || exit /b 1
+REM The PCL source stays in the ignored, pinned NVIDIA SDK subset. The
+REM compiled graphics DLL carries its original SDK notice in every package.
+set "REFLEX=%ROOT%\third_party\reflex"
+if defined EDUP_REFLEX_SDK set "REFLEX=%EDUP_REFLEX_SDK%"
+set "REFLEXFLAGS=/DEDVR_HAVE_REFLEX_PCL=0"
+if /I "%REFLEX%"=="none" (
+    if exist "%BUILD%\NVIDIA-REFLEX-LICENSE.txt" del "%BUILD%\NVIDIA-REFLEX-LICENSE.txt"
+) else (
+    python tools\fetch_reflex.py --dest "%REFLEX%" || exit /b 1
+    python tools\fetch_reflex.py --verify "%REFLEX%" || exit /b 1
+    copy /y "%REFLEX%\license.txt" "%BUILD%\NVIDIA-REFLEX-LICENSE.txt" >nul || exit /b 1
+    set REFLEXFLAGS=/DEDVR_HAVE_REFLEX_PCL=1 /I"%REFLEX%\Reflex_Stats"
+)
 REM Python cannot call compiler-only Interlocked intrinsics through kernel32.
 REM Keep the diagnostic atomic bridge with build tools, outside game packages.
 if not defined EDUP_COMPILE_ONLY (
@@ -271,6 +284,7 @@ REM the PE identity itself, or names an address the signature table cannot place
 REM -- it reads only src\.
 python tools\run_jobs.py ^
     --gate "tools\fetch_openxr_loader.py --self-test" ^
+    --gate "tools\fetch_reflex.py --self-test" ^
     --gate "tools\fetch_xess.py --self-test" ^
     --gate "tools\fetch_edhm_2dmigoto.py --self-test" ^
     --gate "tools\fetch_fsr4.py --self-test" ^
@@ -501,6 +515,7 @@ python "tools\gen_exports.py" --source "%SystemRoot%\System32\d3d11.dll" ^
     --extra-export edvrAcquireNativeTemporal ^
     --extra-export edvrAcquireNativeSharpen ^
     --extra-export edvrAcquireNativeFrame ^
+    --extra-export edvrAcquireNativeReflexFrame ^
     --extra-export edvrAcquireNativeTiming ^
     --extra-export edvrAcquireDesktopWindow ^
     --extra-export edvrReadNativePresentTrace ^
@@ -757,6 +772,8 @@ if defined EDUP_DLL_ONLY if not defined EDUP_COMPILE_ONLY (
         --context "ngx=%NGX%" ^
         --context "xess_request=%EDUP_XESS_SDK%" ^
         --context "xess=%XESS%" ^
+        --context "reflex_request=%EDUP_REFLEX_SDK%" ^
+        --context "reflex=%REFLEX%" ^
         --context "fsr4_request=%EDUP_FSR4_SDK%" ^
         --context "fsr4=%FSR4%" ^
         --context "ffx_request=%EDUP_FFX_DX11%" ^
@@ -774,7 +791,7 @@ if errorlevel 1 ( echo [edup] ERROR: ml64 failed & exit /b 1 )
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\weapon_ui_getter_probe.obj" "src\d3d11\weapon_ui_getter_probe.asm" >nul
 if errorlevel 1 ( echo [edup] ERROR: ml64 failed on weapon UI getter probe & exit /b 1 )
 
-python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_probe.obj cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% %FSR4FLAGS% /Fo"%OBJ%\d3d11"\ ^
+python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_probe.obj cl.exe %CFLAGS% %NGXFLAGS% %FSRFLAGS% %XESSFLAGS% %FSR4FLAGS% %REFLEXFLAGS% /Fo"%OBJ%\d3d11"\ ^
 
     "src\common\log.cpp" "src\common\config.cpp" ^
     "src\common\config_audit.cpp" ^
@@ -798,6 +815,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
 
     "src\d3d11\native_sharpen.cpp" ^
     "src\d3d11\native_frame.cpp" "src\d3d11\native_reflex.cpp" "src\d3d11\input_latency_probe.cpp" ^
+    "src\d3d11\native_reflex_engine_hook.cpp" "src\d3d11\native_reflex_session.cpp" "src\d3d11\native_reflex_pcl.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\map_wait.cpp" ^
     "src\d3d11\native_render_settings.cpp" ^
@@ -1095,6 +1113,8 @@ python tools\build_receipt.py --write "%BUILD%\full_build_receipt.json" ^
     --context "ngx=%NGX%" ^
     --context "xess_request=%EDUP_XESS_SDK%" ^
     --context "xess=%XESS%" ^
+    --context "reflex_request=%EDUP_REFLEX_SDK%" ^
+    --context "reflex=%REFLEX%" ^
     --context "fsr4_request=%EDUP_FSR4_SDK%" ^
     --context "fsr4=%FSR4%" ^
     --context "ffx_request=%EDUP_FFX_DX11%" ^
@@ -1304,6 +1324,42 @@ if not exist "%OBJ%\native_reflex" mkdir "%OBJ%\native_reflex"
 if errorlevel 1 ( echo [edup] ERROR: NVIDIA low latency policy test build failed & exit /b 1 )
 "%BUILD%\native_reflex_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_reflex_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_native_reflex_engine_test
+echo [edup] === native_reflex_engine_test.exe ===
+if not exist "%OBJ%\native_reflex_engine" mkdir "%OBJ%\native_reflex_engine"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\native_reflex_engine"\ /Fe"%BUILD%\native_reflex_engine_test.exe" ^
+    "tools\native_reflex_engine_test\native_reflex_engine_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%BUILD%\native_reflex_engine_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_reflex_engine_test.exe" --self-test || exit /b 1
+exit /b 0
+
+:rig_native_reflex_pcl_test
+echo [edup] === native_reflex_pcl_test.exe ===
+if not exist "%OBJ%\native_reflex_pcl" mkdir "%OBJ%\native_reflex_pcl"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\native_reflex_pcl"\ /Fe"%BUILD%\native_reflex_pcl_test.exe" ^
+    "tools\native_reflex_pcl_test\native_reflex_pcl_test.cpp" /link /INCREMENTAL:NO
+if errorlevel 1 exit /b 1
+"%BUILD%\native_reflex_pcl_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_reflex_pcl_test.exe" --self-test || exit /b 1
+"%BUILD%\native_reflex_pcl_test.exe" --self-test-failed-init || exit /b 1
+exit /b 0
+
+:rig_native_reflex_session_test
+echo [edup] === native_reflex_session_test.exe ===
+if not exist "%OBJ%\native_reflex_session" mkdir "%OBJ%\native_reflex_session"
+%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
+    /Fo"%OBJ%\native_reflex_session"\ /Fe"%BUILD%\native_reflex_session_test.exe" ^
+    "tools\native_reflex_session_test\native_reflex_session_test.cpp" ^
+    "src\d3d11\native_reflex.cpp" "src\common\guard.cpp" ^
+    /link /INCREMENTAL:NO kernel32.lib dxgi.lib
+if errorlevel 1 exit /b 1
+"%BUILD%\native_reflex_session_test.exe" --dry-run || exit /b 1
+"%BUILD%\native_reflex_session_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_fss_reveal_test

@@ -8,6 +8,7 @@
 #include <limits>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 using namespace edvr::openxr;
 extern "C" vr::IVRCompositor* compositorAbiCaller(vr::IVRCompositor*);
@@ -180,10 +181,60 @@ void blocked() {
   vr::TrackedDevicePose_t r{},g{};check(c->GetLastPoses(&r,1,&g,1)==vr::VRCompositorError_None&&equal(r,f.state.renderPose)&&equal(g,f.state.gamePose)&&f.waits==1,"cached ABI getters proceed during blocked wait");
   {std::lock_guard<std::mutex> lock(f.blockMutex);f.release=true;f.cv.notify_all();}worker.join();check(waited&&!f.timedOut,"blocked wait returns coherent snapshot");
 }
+void reflexReceipts() {
+  struct ReceiptSource : Fake {
+    std::vector<unsigned> order;
+    vr::TrackedDevicePose_t* renderOutput=nullptr;
+    uint64_t poseSequence=0,eyeSequence=0;
+    unsigned poseReceipts=0;
+    bool copiedBeforeReceipt=false,accepted=false;
+    vr::EVREye receiptEye=vr::Eye_Left;
+    const vr::Texture_t* receiptTexture=nullptr;
+    std::thread::id callbackThread;
+    void reflexPoseConsumed(uint64_t sequence) override {
+      ++poseReceipts;poseSequence=sequence;callbackThread=std::this_thread::get_id();
+      copiedBeforeReceipt=renderOutput&&equal(*renderOutput,state.renderPose);
+    }
+    void reflexEyeSource(vr::EVREye eye,const vr::Texture_t* texture,uint64_t sequence) override {
+      order.push_back(1);receiptEye=eye;receiptTexture=texture;eyeSequence=sequence;
+    }
+    vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
+        const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
+      order.push_back(2);return Fake::submitEye(generation,eye,texture,bounds,flags);
+    }
+    void reflexEyeSubmitted(vr::EVREye eye,uint64_t sequence,bool ok) override {
+      order.push_back(3);receiptEye=eye;eyeSequence=sequence;accepted=ok;callbackThread=std::this_thread::get_id();
+    }
+  } f;
+  OpenVRCompositor c(&f);vr::TrackedDevicePose_t render{},game{};f.renderOutput=&render;
+  const auto caller=std::this_thread::get_id();
+  check(c.WaitGetPoses(&render,1,&game,1)==vr::VRCompositorError_None&&f.poseReceipts==1&&
+    f.poseSequence==f.state.sequence&&f.copiedBeforeReceipt&&f.callbackThread==caller,
+    "pose source receipt runs on game caller after exact render output copy");
+  c.GetLastPoses(&render,1,&game,1);
+  check(f.poseReceipts==1,"cached pose getter does not fabricate a fresh receipt");
+  c.WaitGetPoses(nullptr,0,&game,1);c.WaitGetPoses(&render,1,&render,1);
+  check(f.poseReceipts==1,"absent and gameplay-overwritten render buffers cannot claim receipt");
+  f.state.renderPose.bPoseIsValid=false;c.WaitGetPoses(&render,1,&game,1);
+  f.state.renderPose=pose(1);f.waitResult=vr::VRCompositorError_DoNotHaveFocus;c.WaitGetPoses(&render,1,&game,1);
+  f.waitResult=vr::VRCompositorError_None;f.wrongGeneration=true;c.WaitGetPoses(&render,1,&game,1);f.wrongGeneration=false;
+  check(f.poseReceipts==1,"invalid pose, rejected wait and stale generation publish no receipt");
+  vr::Texture_t texture{reinterpret_cast<void*>(123),vr::API_DirectX,vr::ColorSpace_Linear};
+  for (bool success:{true,false}) {
+    f.order.clear();f.submitResult=success?vr::VRCompositorError_None:vr::VRCompositorError_TextureIsOnWrongDevice;
+    const auto result=c.Submit(vr::Eye_Right,&texture,nullptr,vr::Submit_Default);
+    check(result==f.submitResult&&f.order==std::vector<unsigned>{1,2,3}&&f.accepted==success&&
+      f.receiptEye==vr::Eye_Right&&f.receiptTexture==&texture&&f.eyeSequence==f.state.sequence&&f.callbackThread==caller,
+      "source attempt brackets actual Submit and reports its unchanged acceptance on caller thread");
+  }
+  f.order.clear();c.Submit(vr::EVREye(2),&texture,nullptr,vr::Submit_Default);f.state.connected=false;
+  c.Submit(vr::Eye_Left,&texture,nullptr,vr::Submit_Default);
+  check(f.order.empty(),"invalid eye and disconnected source never emit source or acceptance receipts");
+}
 }
 int main(int argc,char** argv) {
   if(argc!=2)return 2;
   if(!std::strcmp(argv[1],"--dry-run")){std::puts("Would test owned compositor ABI and cache; no files or runtime calls.");return 0;}
   if(std::strcmp(argv[1],"--self-test"))return 2;
-  buffersAndCache();methods();skyboxAbi();publication();blocked();std::printf("openxr_compositor_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
+  buffersAndCache();methods();skyboxAbi();publication();blocked();reflexReceipts();std::printf("openxr_compositor_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

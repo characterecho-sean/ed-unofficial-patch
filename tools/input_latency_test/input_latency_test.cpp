@@ -154,13 +154,78 @@ void clocksAndRequests() {
           pulse.result().consumedQpc == 110, "removed owned-window mouse message qualifies as API receipt source three");
     pulse = Pulse{}; pulse.arm(1, 100, 100, 1000);
     check(!pulse.consume(110, 4) && pulse.result().reason == Refusal::InvalidRequest,
-          "unrecognized input source rejected");
+          "keyboard source without a qualified InputManager token is rejected");
+    pulse = Pulse{}; pulse.arm(1, 100, 100, 1000);
+    check(!pulse.consume(110, 5) && pulse.result().reason == Refusal::InvalidRequest,
+          "unrecognized input source is rejected");
     pulse = consumed();
     check(!pulse.render(0, 0, 120) && pulse.result().reason == Refusal::InvalidRequest,
           "missing sequence rejected");
     pulse = consumed();
     check(!pulse.render(7, 2, 120) && pulse.result().reason == Refusal::InvalidRequest,
           "non-eye index rejected before shifting mask");
+}
+
+void uiResponseEvidence() {
+    PixelRoi roi{};
+    const auto pack = [](uint64_t l, uint64_t t, uint64_t r, uint64_t b) {
+        return l | (t << 16) | (r << 32) | (b << 48);
+    };
+    check(decodeRoi(pack(0, 0, 65535, 65535), 8, 8, roi) && roi.left == 0 && roi.top == 0 &&
+          roi.right == 8 && roi.bottom == 8, "normalized ROI includes edge pixels without exceeding the texture");
+    check(decodeRoi(pack(100, 200, 300, 400), 2560, 1440, roi) && roi.right > roi.left && roi.bottom > roi.top,
+          "small nonempty normalized ROI rounds outward to a bounded pixel rectangle");
+    check(!decodeRoi(pack(5, 0, 5, 65535), 8, 8, roi) &&
+          !decodeRoi(pack(6, 0, 5, 65535), 8, 8, roi) &&
+          !decodeRoi(pack(0, 0, 65535, 65535), 0, 8, roi) &&
+          !decodeRoi(pack(0, 0, 65535, 65535), 257, 256, roi),
+          "empty, reversed, missing-size and oversized ROI requests fail before GPU access");
+    const uint8_t rgba[]{255,128,0,255, 128,128,128,255, 255,128,0,255,
+                         128,128,128,255, 255,128,0,255, 255,128,0,255};
+    uint32_t ppm = 0;
+    check(orangeFraction(rgba, 12, 2, 2, false, ppm) && ppm == 500000,
+          "RGBA classifier honors padded RowPitch and excludes orange padding");
+    const uint8_t bgra[]{0,128,255,255, 128,128,128,255};
+    check(orangeFraction(bgra, 8, 2, 1, true, ppm) && ppm == 500000,
+          "BGRA classifier decodes channel order independently of alpha");
+    check(!orangeFraction(nullptr, 8, 2, 1, false, ppm) &&
+          !orangeFraction(rgba, 7, 2, 1, false, ppm) &&
+          !orangeFraction(rgba, 8, 0, 1, false, ppm), "invalid maps and strides cannot manufacture pixel proof");
+    check(orangeState(100000, 200000, 600000) == OrangeState::Off &&
+          orangeState(800000, 200000, 600000) == OrangeState::On &&
+          orangeState(400000, 200000, 600000) == OrangeState::Ambiguous &&
+          orangeState(0, 600000, 200000) == OrangeState::Ambiguous,
+          "orange-state thresholds preserve an ambiguous band and reject invalid limits");
+    Pulse pulse;
+    pulse.arm(1, 100, 101, 1000);
+    check(pulse.consume(110, 4, 8765) && pulse.result().consumedTickToken == 8765,
+          "actual keyboard receipt retains its qualified engine tick token");
+    UiCandidateReceipt frame; frame.sequence = 77;
+    check(frame.copyEye(0) && !frame.copyEye(0) && !frame.copyEye(2) &&
+          !frame.submit(1, true, 120) && !frame.ready(), "duplicate eyes and an uncopied submit cannot qualify a candidate");
+    check(frame.submit(0, true, 120) && frame.copyEye(1) && !frame.submit(1, false, 125) &&
+          frame.submit(1, true, 130) && !frame.ready(), "accepted stereo alone is insufficient without a fence receipt");
+    check(!uiTargetMatches(frame, 76, 900000, 900000, 200000, 600000, true),
+          "matching pixels without GPU completion cannot complete UI latency");
+    frame.gpuQpc = 140;
+    check(frame.ready() && !uiTargetMatches(frame, 76, 100000, 100000, 200000, 600000, true) &&
+          pulse.phase() == Phase::Consumed && pulse.result().sentQpc == 100 && pulse.result().consumedQpc == 110,
+          "an unchanged completed candidate leaves the original input timestamps pending for a retry");
+    check(!uiTargetMatches(frame, 76, 900000, 100000, 200000, 600000, true) &&
+          !uiTargetMatches(frame, 77, 900000, 900000, 200000, 600000, true),
+          "mixed stereo states and the baseline frame cannot become a response");
+    frame.sequence = 78; frame.gpuQpc = 150; frame.submitQpc = 145;
+    check(uiTargetMatches(frame, 76, 900000, 900000, 200000, 600000, true) &&
+          pulse.uiResponse(frame.sequence, frame.gpuQpc, frame.submitQpc, 160) && pulse.phase() == Phase::Complete &&
+          pulse.result().sequence == 78 && pulse.result().gpuCompleteQpc == 150 && pulse.result().consumedQpc == 110,
+          "pixel-proven retry uses that candidate's GPU endpoint and preserves actual input receipt");
+    check(uiTargetMatches(frame, 76, 100000, 100000, 200000, 600000, false),
+          "the same evidence path verifies a real deselection response");
+    pulse = Pulse{}; pulse.arm(1, 100, 101, 1000); pulse.consume(110, 4, 1);
+    check(!pulse.uiResponse(78, 150, 145, 2101) && pulse.result().reason == Refusal::Timeout,
+          "retry keeps the original absolute timeout instead of extending unavailable latency");
+    pulse = consumed();
+    check(!pulse.uiResponse(78, 150, 145, 160), "mouse marker receipt cannot masquerade as game UI keyboard evidence");
 }
 
 #ifdef _WIN32
@@ -209,7 +274,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && !std::strcmp(argv[1], "--dry-run")) {
         std::puts("input_latency_test: dry-run (no device, mapping, or worker)"); return 0;
     }
-    edges(); pairBoundary(); completeOrders(); refusals(); clocksAndRequests();
+    edges(); pairBoundary(); completeOrders(); refusals(); clocksAndRequests(); uiResponseEvidence();
 #ifdef _WIN32
     mappingPublication();
 #endif

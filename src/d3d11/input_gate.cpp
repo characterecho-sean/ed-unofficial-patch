@@ -25,6 +25,9 @@
 #include "desktop_window_cursor.h"   // desktopWindowNoteMouseCooperative: the game mouse's cooperative level, observed
 #include "joy_watch.h"
 #include "input_latency_probe.h"
+#include "native_reflex_pcl.h"
+#include "native_reflex_session.h"
+#include "native_reflex_engine_hook.h"
 #include "menu_pad.h"
 
 namespace edvr {
@@ -415,6 +418,7 @@ FaultBudget g_budgetPump("inputGate.pump", 4);
 // copying a joystick's buttons retires the WATCH, never a keyboard door.
 FaultBudget g_budgetJoy("inputGate.joystick", 4);
 FaultBudget g_budgetMouse("inputGate.mouseObservation", 4);
+FaultBudget g_budgetKeyboardProbe("inputGate.keyboardObservation", 4);
 // Five first observations per process, only while the diagnostic is enabled.
 // Keep missing capture, unsupported layouts and a silent route distinguishable
 // without logging every input read.
@@ -879,6 +883,16 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
                         d.name);
     }
     observeMouseState(self, hr, cb, data);
+    // Observe exactly what this captured game keyboard returns after privacy,
+    // summon-key and release-tail filtering. Our fallback devices, unknown
+    // layouts and calls outside the original InputManager cannot own a pulse.
+    if (input_latency_probe::enabled() && hr == DI_OK && cb == 256 &&
+        self != g_diW.dummy && self != g_diA.dummy && classifyDevice(self) == DeviceClass::Keyboard) {
+        guardedBudget(g_budgetKeyboardProbe, [&] {
+            const uint64_t token = native_reflex::currentInputFrameToken();
+            if (token) input_latency_probe::keyboardState(self, static_cast<const uint8_t*>(data), token);
+        });
+    }
     return hr;
 }
 
@@ -1071,15 +1085,19 @@ bool isKeyboardMessage(UINT m) {
 // not establish a gameplay response; the paired-eye diagnostic owns that end.
 // PM_NOREMOVE and thread/foreign-window messages cannot consume a pulse.
 void observeMouseMessage(const MSG* msg, UINT remove) {
-    if (!input_latency_probe::enabled() || !msg || !(remove & PM_REMOVE)) return;
+    if (!msg || !(remove & PM_REMOVE)) return;
     guardedBudget(g_budgetMouse, [&] {
-        if (!msg->hwnd || (msg->message != WM_LBUTTONDOWN && msg->message != WM_LBUTTONUP)) return;
+        if (!msg->hwnd || (msg->message != WM_LBUTTONDOWN && msg->message != WM_LBUTTONUP &&
+                           msg->message != WM_LBUTTONDBLCLK)) return;
         DWORD owner = 0;
         if (!GetWindowThreadProcessId(msg->hwnd, &owner) || owner != GetCurrentProcessId()) return;
+        const bool down = msg->message != WM_LBUTTONUP;
+        native_reflex::mouseMessageRemoved(down);
+        if (!input_latency_probe::enabled()) return;
         if (!(g_mouseDiagnosticNotes.fetch_or(16, std::memory_order_relaxed) & 16))
             Log::get().note("input_latency_input,route=window_message,hwnd=%p,message=0x%X,remove=0x%X,source=3",
                             msg->hwnd, msg->message, remove);
-        input_latency_probe::mouseButton(msg->hwnd, msg->message == WM_LBUTTONDOWN, 3);
+        input_latency_probe::mouseButton(msg->hwnd, down, 3);
     });
 }
 
@@ -1090,6 +1108,10 @@ BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove
         return FALSE;
     }
     if (!r || !msg) return r;
+    if (remove & PM_REMOVE) {
+        native_reflex::pcl::messageRemoved(msg->message);
+        if (msg->message == WM_QUIT) native_reflex::shutdownFrameTelemetry();
+    }
     observeMouseMessage(msg, remove);
     if (g_user.retired3) return r;
     guardedBudget(g_budgetPump, [&] {

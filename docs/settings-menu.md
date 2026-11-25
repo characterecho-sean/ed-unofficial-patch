@@ -290,9 +290,12 @@ window, VR view, still lists the row.
 ### NVIDIA low latency
 
 The VR Performance page offers **NVIDIA low latency** (`fix.nvidia_reflex`).
-**On** is the default and requests NVIDIA's driver low latency mode for the
-game's D3D11 device. **On + Boost** also requests higher GPU clocks. **Off**
-withdraws a request ED-UP owns. Older profiles saved with Auto use On.
+**On** is the default and enables the per-frame low latency mode for an
+eligible native VR session. **On + Boost** also requests higher GPU clocks.
+**Off** withdraws a request ED-UP owns while keeping frame instrumentation
+active. Older profiles saved with Auto use On. The row dims when unavailable;
+Off remains selectable for recovery. A saved On choice waits until the
+paired runtime, SDK and actual rendered-frame source are available.
 [NVIDIA Reflex programming guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideReflex.md#80-nvidia-reflex-qa-checklist)
 
 ED-UP checks the device's existing low latency and sleep state before it
@@ -305,7 +308,9 @@ unavailable, normal VR shutdown makes one more Off attempt.
 
 The driver reports the effective low latency bit. Boost is recorded as a
 request, and its effect would need a GPU clock measurement. The feature uses
-NVAPI SetSleepMode and GetSleepStatus. OpenXR continues to pace the headset.
+NVAPI mode controls, per-frame Sleep, latency markers and latency reports.
+OpenXR continues to pace the headset. See the
+[frame timing and measurement limits](input-latency.md#reflex-frame-timing).
 [NVIDIA's NVAPI reference](https://docs.nvidia.com/nvapi/group__dx.html)
 
 ### XeSS Frame Generation rows (2026-11-12)

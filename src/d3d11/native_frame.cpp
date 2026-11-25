@@ -14,6 +14,7 @@
 #include "journal_watch.h"
 #include "native_on_foot.h"
 #include "native_reflex.h"
+#include "native_reflex_session.h"
 #include "input_latency_probe.h"
 #include "input_gate.h"
 #include "native_render_labels.h"
@@ -38,6 +39,7 @@ struct State {
     ID3D11Device* device = nullptr; // borrowed; the host owns its lifetime
     uint64_t generation = 0;
     edvr::native_reflex::ModeHistory lowLatency;
+    edvr::native_reflex::FrameDriver* lowLatencyDriver = nullptr; // borrowed from explicit session owner
     DWORD lowLatencyProducerThread = 0;
     uint64_t sequenceFloor = 0;
     bool active = false;
@@ -68,11 +70,15 @@ std::mutex g_mutex;
 // needs no provider lock when there is no session or no work for this one.
 constexpr uint64_t kLowLatencyObservationPending = uint64_t{1} << 63;
 constexpr uint64_t kLowLatencyNeedsRefresh = uint64_t{1} << 62;
+constexpr uint64_t kLowLatencyTransportFault = uint64_t{1} << 61;
+constexpr uint64_t kLowLatencyAvailable = uint64_t{1} << 60;
 constexpr uint64_t kLowLatencyNoSession = UINT64_MAX;
 std::atomic<uint64_t> g_lowLatencyStamp{kLowLatencyNoSession};
 
 uint64_t lowLatencyConfigStamp() {
-    return (uint64_t(edvr::Config::get().generation()) << 1) | uint64_t(edvr::runtimeVrProfile());
+    return (uint64_t(edvr::Config::get().generation()) << 1) | uint64_t(edvr::runtimeVrProfile()) |
+           (edvr::native_reflex::frameSessionFaulted() ? kLowLatencyTransportFault : 0) |
+           (edvr::native_reflex::availableForUser() ? kLowLatencyAvailable : 0);
 }
 
 // g_mutex protects the session. Reading the stamp again after the settings
@@ -83,15 +89,18 @@ void refreshLowLatency(State& state, uint64_t cached, bool fromPresent) {
     bool changed = false;
     if (stamp != (cached & ~kLowLatencyObservationPending)) {
         Mode mode = Mode::Off;
-        if ((stamp & 1) && !edvr::graphicsRuntimeDisabled()) {
+        if ((stamp & 1) && (stamp & kLowLatencyAvailable) && !(stamp & kLowLatencyTransportFault) &&
+            !edvr::graphicsRuntimeDisabled() && state.lowLatencyDriver) {
             mode = parseMode(edvr::Config::get().getString("fix.nvidia_reflex", "on"));
         }
         if (stamp != lowLatencyConfigStamp()) return;
-        changed = updateMode(state.lowLatency, state.device, mode, state.generation);
+        changed = updateMode(state.lowLatency, state.device, mode, state.generation, state.lowLatencyDriver);
     }
     // The Present that changed the mode precedes the new request.
     if (fromPresent && !changed) notePresent(state.lowLatency, state.device, state.generation);
-    g_lowLatencyStamp.store(stamp | (state.lowLatency.observing() ? kLowLatencyObservationPending : 0),
+    if (fromPresent) reportFrameSession(state.generation);
+    g_lowLatencyStamp.store(stamp | (state.lowLatency.observing() ? kLowLatencyObservationPending : 0) |
+                               (state.lowLatency.retryNeeded() ? kLowLatencyNeedsRefresh : 0),
                             std::memory_order_release);
 }
 
@@ -680,6 +689,8 @@ HRESULT WINAPI close(void* context) {
         edvr::retireGlitchConsumer();
         state->consumerAnnounced = false;
     }
+    edvr::native_reflex::stopFrameSession(state->generation);
+    state->lowLatencyDriver = nullptr;
     edvr::native_reflex::closeMode(state->lowLatency, state->device, state->generation);
     edvr::input_latency_probe::stop();
     g_lowLatencyStamp.store(kLowLatencyNoSession, std::memory_order_release);
@@ -712,7 +723,10 @@ void native_reflex::updateOnGamePresent(ID3D11Device* device) {
     if (!probeLive && cached == kLowLatencyNoSession) return;
     const bool probeChanged = probeStamp.load(std::memory_order_acquire) != stamp;
     if (!probeChanged && !probeWanted.load(std::memory_order_acquire) &&
-        !probeLive && cached == stamp) return;
+        !probeLive && cached == stamp) {
+        reportFrameSession(0);
+        return;
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_current || GetCurrentThreadId() != g_current->lowLatencyProducerThread ||
         (device != g_current->device && !sameDevice(g_current->device, device))) {
@@ -858,6 +872,7 @@ extern "C" HRESULT WINAPI edvrAcquireNativeFrame(
     g_current = &state;
     // NativeRuntimeHost acquires through the game producer dispatcher.
     state.lowLatencyProducerThread = GetCurrentThreadId();
+    state.lowLatencyDriver = edvr::native_reflex::startFrameSession(state.device, state.generation);
     g_lowLatencyStamp.store(kLowLatencyNeedsRefresh, std::memory_order_release);
     refreshLowLatency(state, kLowLatencyNeedsRefresh, false);
     table->context = &state;

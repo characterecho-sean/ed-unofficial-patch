@@ -10,6 +10,62 @@ enabled modes. The temporary setting remains while this latency-validation
 investigation is open. A successful driver-mode readback and ordinary frame
 timings are not input latency measurements.
 
+The current per-frame Reflex integration is under native validation. Its
+engine/source checks are separate from the earlier synthetic response probe;
+the earlier comparison does not validate this implementation. A new VR
+comparison is required before claiming an improvement.
+The engine hooks support game build 334925, using its exact PE identity and
+entry, callsite and scheduler-protocol pins. Other builds leave Reflex
+unavailable. This support does not extend the existing address resolver.
+
+## Reflex frame timing
+
+The native VR session calls NVIDIA's Sleep once at the guarded application
+iteration boundary, before input. Off still makes that call. The normal
+update's return ends the simulation region. The retained render-job ticket
+identifies the HMD pose returned to that job and its submitted eye textures.
+The first real command on the game's immediate context begins render
+submission. Its end waits for both the render job and the eye-mirror draw.
+Simulation, rendering and Present can overlap.
+
+The optional source capability is shared by the graphics and native runtime
+modules. It checks device, session, job, pose sequence and actual acceptance
+of both eyes. The finished texture carries that source into the desktop
+mirror. Mixed, reused, backward or unqualified sources emit no Present
+markers. Present markers surround the real DXGI call on its calling thread.
+The game's original mirror route has no qualified source yet.
+
+PCL statistics remain active in every mode and on other GPU vendors. Removed
+PCL ping messages wait for the next actual InputManager boundary. Normal
+game shutdown stops the SDK worker outside loader teardown. The pinned
+NVIDIA SDK license ships with binaries using its statistics header.
+Removed game-window left-button presses, including double-clicks, also queue
+the SDK flash marker for the next actual InputManager boundary. This does not
+depend on the optional response probe or a flash-indicator setting.
+
+The graphics log's `native_reflex_frame` rows use QPC for the interval from
+the game's HMD pose receipt to desktop Present return. This is a CPU interval.
+`native_reflex_latency` rows retain NVIDIA's separate microsecond clock for
+simulation-to-GPU completion. Neither is physical head-motion-to-photon
+latency. The integration follows the
+[native Reflex SDK guide](https://github.com/NVIDIA-RTX/REFLEX/blob/main/NVIDIA%20Reflex%20SDK%20Integration%20Guide.pdf)
+and [NVAPI interfaces](https://docs.nvidia.com/nvapi/group__dx.html).
+
+## Real UI response probe
+
+The optional v2 keyboard route uses `--input-key UP` or `DOWN` and configured
+per-eye response regions. It verifies an opposite-state stereo baseline and
+released key before injection. Only a successful, standard keyboard read
+inside the guarded InputManager supplies the consuming tick token. The
+receiver then checks the actual UI pixels in both accepted eye images; it
+does not paint a response. Unsupported formats, failed input ownership,
+unchanged pixels and mixed sequences reject the sample.
+
+This is a fallback for a controlled UI response. VR head motion is supplied
+by the existing testing framework's pose controls. Framework command receipt,
+game pose receipt, software rendering and physical display remain distinct
+endpoints.
+
 ## What is measured
 
 A test sender publishes a unique pulse in a process-specific shared-memory
@@ -37,8 +93,9 @@ in either order. Neither endpoint measures the monitor or HMD's photons.
 
 The response belongs to the diagnostic. This does not establish how quickly
 Elite's gameplay simulation, weapons or physics respond to that input. The
-probe also does not enable per-frame Reflex sleep or change the selected driver
-policy; identical instrumentation is used for Off, On and On + Boost.
+earlier comparison build did not implement per-frame Reflex Sleep or NVIDIA
+markers. The probe itself does not change the selected driver policy;
+identical instrumentation is used for Off, On and On + Boost.
 
 ## Collection and rejection
 

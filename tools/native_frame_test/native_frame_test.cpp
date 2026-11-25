@@ -9,6 +9,7 @@
 #include "../../src/d3d11/native_on_foot_optic_capture.h"  // F76: bounded exact-image optic capture ledger
 #include "../../src/d3d11/native_on_foot_ads_incident.h"
 #include "../../src/d3d11/native_reflex.h"
+#include "../../src/d3d11/native_reflex_session.h"
 #include "../../src/d3d11/input_gate.h"
 
 #include <d3d11.h>
@@ -152,9 +153,14 @@ struct LatencyDriverCall {
 };
 std::vector<LatencyDriverCall> g_latencyCalls;
 std::vector<unsigned> g_latencySamples;
+bool g_frameTransportAvailable = true;
+std::shared_ptr<edvr::native_reflex::FrameDriver> g_frameTransport;
 }
 
 namespace edvr::native_reflex::detail {
+Result applyFrameMode(FrameDriver&, ID3D11Device* device, Mode mode, bool alreadyOwned) {
+    return apply(device, mode, alreadyOwned);
+}
 Result apply(ID3D11Device* device, Mode mode, bool alreadyOwned) {
     g_latencyCalls.push_back({device, mode, alreadyOwned});
     return {"fixture", true, 0, 0};
@@ -167,6 +173,27 @@ Result observe(ID3D11Device*, Mode mode) {
 void logMode(Mode, const char*, uint64_t, const Result&, unsigned count) {
     if (count) g_latencySamples.push_back(count);
 }
+}
+
+namespace edvr::native_reflex {
+// Engine/SDK lifecycle belongs to the separate integration module. This rig
+// keeps driver calls under its existing controlled mode-policy substitutes.
+FrameDriver::FrameDriver(ID3D11Device* device, bool ownGameSleep)
+    : device_(device), firstSleep_(ownGameSleep) { device_->AddRef(); }
+FrameDriver::~FrameDriver() { device_->Release(); }
+std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device) {
+    return std::shared_ptr<FrameDriver>(new FrameDriver(device, false));
+}
+FrameDriver* startFrameSession(ID3D11Device* device, uint64_t) {
+    g_frameTransport = g_frameTransportAvailable ? openFrameDriver(device) : nullptr;
+    fullFrameAvailable.store(g_frameTransportAvailable);
+    return g_frameTransport.get();
+}
+void stopFrameSession(uint64_t) noexcept {
+    fullFrameAvailable.store(false);
+    g_frameTransport.reset();
+}
+void reportFrameSession(uint64_t) noexcept {}
 }
 
 extern "C" uintptr_t g_weaponUiGetterTarget = 0;
@@ -6530,6 +6557,40 @@ int wmain(int argc, wchar_t** argv) {
           g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off && g_latencyCalls.back().alreadyOwned,
           "closing the XR session withdraws its driver request once");
     edvr::Config::get().set("fix.nvidia_reflex", "on");
+    {
+        // A refused complete transport must not silently enable a partial
+        // driver-only mode through the old fallback.
+        g_frameTransportAvailable = false;
+        const auto calls = g_latencyCalls.size();
+        auto unavailableRequest = request;
+        unavailableRequest.generation = 42;
+        EdvrNativeFrameTable unavailable{sizeof(unavailable), EDVR_NATIVE_FRAME_VERSION_1};
+        check(edvrAcquireNativeFrame(&unavailableRequest, &unavailable) == S_OK &&
+                  g_latencyCalls.size() == calls,
+              "unavailable frame transport never enables a driver-only fallback");
+        check(unavailable.close(unavailable.context) == S_OK && g_latencyCalls.size() == calls,
+              "unavailable frame transport owns no mode cleanup");
+        g_frameTransportAvailable = true;
+    }
+    {
+        const auto calls = g_latencyCalls.size();
+        auto faultRequest = request;
+        faultRequest.generation = 43;
+        EdvrNativeFrameTable faultTable{sizeof(faultTable), EDVR_NATIVE_FRAME_VERSION_1};
+        check(edvrAcquireNativeFrame(&faultRequest, &faultTable) == S_OK &&
+                  g_latencyCalls.size() == calls + 1 &&
+                  g_latencyCalls.back().mode == edvr::native_reflex::Mode::On,
+              "a supported frame session accepts its requested mode");
+        edvr::native_reflex::fullFrameFaulted.store(true);
+        edvr::native_reflex::updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == calls + 2 &&
+                  g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off &&
+                  g_latencyCalls.back().alreadyOwned,
+              "a transport fault withdraws owned On on Present without an INI edit");
+        check(faultTable.close(faultTable.context) == S_OK,
+              "faulted mode session still closes normally");
+        edvr::native_reflex::fullFrameFaulted.store(false);
+    }
     check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
           "closed context rejects callbacks");
 

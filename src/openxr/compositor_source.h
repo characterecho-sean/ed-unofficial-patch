@@ -27,6 +27,11 @@ class CompositorSource {
   virtual bool setTrackingSpace(uint64_t generation,vr::ETrackingUniverseOrigin)=0;
   virtual vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye,const vr::Texture_t*,
       const vr::VRTextureBounds_t*,vr::EVRSubmitFlags)=0;
+  // Optional source receipts on the actual game caller, after pose copying
+  // and before Submit marshaling. Unsupported sources preserve ABI behavior.
+  virtual void reflexPoseConsumed(uint64_t) {}
+  virtual void reflexEyeSource(vr::EVREye,const vr::Texture_t*,uint64_t) {}
+  virtual void reflexEyeSubmitted(vr::EVREye,uint64_t,bool) {}
   // The source reports false if full historical semantics are unavailable.
   virtual bool clearSubmitted(uint64_t generation)=0;
   virtual bool handoff(uint64_t generation)=0;
