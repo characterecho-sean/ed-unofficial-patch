@@ -18,6 +18,16 @@ static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
 
 #include "../../src/d3d11/loaded_module_match.h"
 
+namespace edvr::input_latency_probe {
+struct TestMouseRead { void* device; bool pressed; unsigned source; };
+std::array<TestMouseRead, 64> testMouseReads{};
+size_t testMouseReadCount = 0;
+void mouseButton(void* device, bool pressed, unsigned source) noexcept {
+    if (testMouseReadCount < testMouseReads.size())
+        testMouseReads[testMouseReadCount++] = {device, pressed, source};
+}
+}
+
 using namespace edvr;
 
 namespace {
@@ -87,7 +97,12 @@ HRESULT STDMETHODCALLTYPE caps(Device* d, DIDEVCAPS* c) {
 HRESULT STDMETHODCALLTYPE state(Device* d, DWORD bytes, void* out) {
     ++d->calls;
     if (FAILED(d->result)) return d->result;
-    if (bytes != 256 || !out) return DIERR_INVALIDPARAM;
+    if (!out) return DIERR_INVALIDPARAM;
+    if (d->type == DI8DEVTYPE_MOUSE && bytes <= sizeof(d->keys)) {
+        memcpy(out, d->keys, bytes);
+        return d->result;
+    }
+    if (bytes != 256) return DIERR_INVALIDPARAM;
     memcpy(out, d->keys, 256);
     return d->result;
 }
@@ -1069,6 +1084,116 @@ static void releaseTailInterleavingCases() {
     if (!e->aborted) delete e;   // an aborted run leaves detached workers pointing into it
 }
 
+static void mouseInputLatencyCases() {
+    using namespace edvr::input_latency_probe;
+    for (bool wide : {false, true}) {
+        inputGateShutdown();
+        auto table = deviceTable();
+        auto factorySlots = factoryTable();
+        Device mouse{table.data()};
+        mouse.type = DI8DEVTYPE_MOUSE;
+        Factory factory{factorySlots.data(), 1, &mouse};
+        captureFactory(&factory, wide, std::make_index_sequence<kFactoryDoors>{});
+        void* returned = nullptr;
+        check(reinterpret_cast<PFN_CreateDevice>(factory.table[3])(&factory, kGuidSysMouse, &returned, nullptr) == DI_OK &&
+              returned == &mouse && mouse.table == table.data(),
+              "A/W game mouse capture preserves the factory result, identity and vptr");
+        DIMOUSESTATE2 packet{};
+        packet.lX = 42; packet.lY = -17; packet.rgbButtons[1] = 0x80;
+        memcpy(mouse.keys, &packet, sizeof(packet));
+        DIMOUSESTATE2 out{};
+        testMouseReadCount = 0;
+        live.store(false);
+        auto read = reinterpret_cast<PFN_GetDeviceState>(mouse.table[9]);
+        check(read(&mouse, sizeof(DIMOUSESTATE), &out) == DI_OK && testMouseReadCount == 0 &&
+              memcmp(&out, &packet, sizeof(DIMOUSESTATE)) == 0,
+              "disabled mouse observation forwards state without a callback or buffer change");
+        live.store(true);
+        for (DWORD bytes : {DWORD(sizeof(DIMOUSESTATE)), DWORD(sizeof(DIMOUSESTATE2))}) {
+            check(read(&mouse, bytes, &out) == DI_OK && testMouseReadCount > 0 && !testMouseReads[testMouseReadCount-1].pressed &&
+                  testMouseReads[testMouseReadCount-1].device == &mouse &&
+                  testMouseReads[testMouseReadCount-1].source == 1 && memcmp(&out, &packet, bytes) == 0,
+                  "standard game mouse state reports a real release with unchanged bytes");
+        }
+        packet.rgbButtons[0] = 0x80;
+        memcpy(mouse.keys, &packet, sizeof(packet));
+        check(read(&mouse, sizeof(packet), &out) == DI_OK && testMouseReadCount > 0 && testMouseReads[testMouseReadCount-1].pressed &&
+              memcmp(&out, &packet, sizeof(packet)) == 0,
+              "standard game mouse state reports a real press without consuming it");
+        const size_t before = testMouseReadCount;
+        check(read(&mouse, sizeof(DIMOUSESTATE)+1, &out) == DI_OK && testMouseReadCount == before,
+              "a successful custom mouse state layout remains unobserved");
+        mouse.result = DIERR_INPUTLOST;
+        const auto old = out;
+        check(read(&mouse, sizeof(out), &out) == DIERR_INPUTLOST && testMouseReadCount == before &&
+              memcmp(&old, &out, sizeof(out)) == 0, "failed state reads retain their result and bytes");
+        mouse.result = DI_OK;
+        Device foreign{table.data()}; foreign.type = DI8DEVTYPE_MOUSE;
+        check(read(&foreign, sizeof(out), &out) == DI_OK && testMouseReadCount == before,
+              "a foreign mouse on the shared table cannot produce an observation");
+        mouse.events[0] = {DIMOFS_BUTTON0, 0x80, 77, 4, 0};
+        mouse.events[1] = {DIMOFS_X, 2, 78, 5, 0};
+        mouse.events[2] = {DIMOFS_BUTTON0, 0, 79, 6, 0};
+        mouse.count = 3;
+        DIDEVICEOBJECTDATA events[4]{};
+        DWORD count = 4;
+        auto buffered = reinterpret_cast<PFN_GetDeviceData>(mouse.table[10]);
+        check(buffered(&mouse, sizeof(events[0]), events, &count, DIGDD_PEEK) == DI_OK &&
+              count == 3 && mouse.count == 3 && testMouseReadCount == before &&
+              memcmp(events, mouse.events, 3*sizeof(events[0])) == 0,
+              "peeked mouse events pass through without being treated as consumed input");
+        mouse.result = DI_BUFFEROVERFLOW; count = 4;
+        check(buffered(&mouse, sizeof(events[0]), events, &count, 0) == DI_BUFFEROVERFLOW &&
+              count == 3 && testMouseReadCount == before,
+              "an overflowed mouse event read keeps its status and cannot qualify input");
+        mouse.result = DI_OK; mouse.count = 3; count = 4;
+        check(buffered(&mouse, sizeof(events[0]), events, &count, 0) == DI_OK && count == 3 &&
+              testMouseReadCount == before+2 && testMouseReads[before].pressed &&
+              !testMouseReads[before+1].pressed && testMouseReads[before].source == 2 &&
+              testMouseReads[before+1].source == 2 && memcmp(events, mouse.events, 3*sizeof(events[0])) == 0,
+              "consumed mouse events report left press/release only and preserve every returned row");
+        mouse.result = DIERR_INPUTLOST; count = 4;
+        check(buffered(&mouse, sizeof(events[0]), events, &count, 0) == DIERR_INPUTLOST &&
+              testMouseReadCount == before+2, "failed buffered mouse reads do not report input");
+        mouse.result = DI_OK; mouse.count = 3; count = 4;
+        check(buffered(&mouse, sizeof(events[0])-4, events, &count, 0) == DIERR_INVALIDPARAM &&
+              testMouseReadCount == before+2, "custom buffered mouse layouts remain unobserved");
+
+        // A later keyboard on the mouse's table must reuse the input filter.
+        Device keyboard{table.data()};
+        auto originalHook = table[9];
+        captureKeyboard(&keyboard, std::make_index_sequence<kGameDeviceDoors>{});
+        BYTE keys[256]{};
+        memset(keyboard.keys, 0x80, sizeof(keyboard.keys));
+        g_private.store(1);
+        check(table[9] == originalHook && readState(keyboard, keys) == DI_OK && released(keys) &&
+              testMouseReadCount == before+2,
+              "a shared mouse-first table gates keyboard input without stacking or reporting mouse reads");
+        g_private.store(0);
+        live.store(false);
+        inputGateShutdown();
+        check(mouse.refs == 1 && table[9] == reinterpret_cast<void*>(&state) &&
+              table[10] == reinterpret_cast<void*>(&data),
+              "mouse shutdown restores its shared table and releases retained identities");
+    }
+    {
+        auto table = deviceTable();
+        Device keyboard{table.data()}, mouse{table.data()}; mouse.type = DI8DEVTYPE_MOUSE;
+        captureKeyboard(&keyboard, std::make_index_sequence<kGameDeviceDoors>{});
+        void* keyboardReader = table[9];
+        captureMouse(&mouse);
+        testMouseReadCount = 0; live.store(true);
+        DIMOUSESTATE stateOut{};
+        check(table[9] == keyboardReader && reinterpret_cast<PFN_GetDeviceState>(table[9])(&mouse, sizeof(stateOut), &stateOut) == DI_OK &&
+              testMouseReadCount == 1 && !testMouseReads[0].pressed,
+              "a keyboard-first shared table observes the game mouse through its existing reader");
+        live.store(false);
+        inputGateShutdown();
+        check(mouse.refs == 1 && keyboard.refs == 1 && table[9] == reinterpret_cast<void*>(&state),
+              "keyboard-first shutdown restores the original reader without a retained mouse hook");
+    }
+}
+
 static void releaseLogCases();
 
 int main(int argc, char** argv) {
@@ -1080,6 +1205,7 @@ int main(int argc, char** argv) {
         printf("\nINPUT GATE TEST %s\n", failures ? "FAILED" : "PASSED");
         return failures ? 1 : 0;
     }
+    mouseInputLatencyCases();
     padHookCases();
     loadedModuleMatchCases();
     auto dummyTable = deviceTable(), table1 = deviceTable(), table2 = deviceTable();
@@ -1126,8 +1252,8 @@ int main(int argc, char** argv) {
     mouse.type = DI8DEVTYPE_MOUSE;
     factory.next = &mouse;
     reinterpret_cast<PFN_CreateDevice>(factory.table[3])(&factory, kGuidMouse, &returned, nullptr);
-    check(mouse.refs == 1 && mouse.capsCalls == 0,
-          "non-keyboard GUID creation bypasses keyboard capture without querying capabilities");
+    check(mouse.refs == 3 && mouse.capsCalls == 0 && !keyboardRegistered(&mouse),
+          "mouse capture retains its identity and table owner without keyboard classification or capability queries");
     factory.next = &keyboard;
 
     const RuntimeProfile savedProfile = g_runtimeProfile;
@@ -1673,7 +1799,8 @@ int main(int argc, char** argv) {
           "shutdown restores all device tables");
     check(ftable1[3] == reinterpret_cast<void*>(&createDevice) && ftable1[kSlotEnumDevices] == reinterpret_cast<void*>(&enumDevices) &&
           factory.refs == 1 &&
-          keyboard.refs == 1 && second.refs == 1, "shutdown restores factories and balances retained references");
+          keyboard.refs == 1 && second.refs == 1 && mouse.refs == 1,
+          "shutdown restores factories and balances retained keyboard and mouse references");
     check(!g_createImport.applied, "shutdown restores the executable import");
     {
         size_t differs = 0;

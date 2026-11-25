@@ -14,6 +14,7 @@
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/gpu_census.h"
+#include "../../src/d3d11/input_latency_probe.h"
 #include <openxr/openxr.h>
 #include <d3d11.h>
 #include <wrl/client.h>
@@ -46,6 +47,11 @@ thread_local bool g_flatComputeInternal = false;
 // perfMonitorNoteEvent above.
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
+// This menu rig links input_gate for its normal input routing, but does not
+// enable or exercise the separately tested latency probe.
+namespace input_latency_probe {
+void mouseButton(void*, bool, unsigned) noexcept {}
+}
 }
 
 static bool readPixels(ID3D11Device* d, ID3D11DeviceContext* c,

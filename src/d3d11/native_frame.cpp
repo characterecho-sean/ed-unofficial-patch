@@ -14,6 +14,7 @@
 #include "journal_watch.h"
 #include "native_on_foot.h"
 #include "native_reflex.h"
+#include "input_latency_probe.h"
 #include "native_render_labels.h"
 
 #include <algorithm>
@@ -679,6 +680,7 @@ HRESULT WINAPI close(void* context) {
         state->consumerAnnounced = false;
     }
     edvr::native_reflex::closeMode(state->lowLatency, state->device, state->generation);
+    edvr::input_latency_probe::stop();
     g_lowLatencyStamp.store(kLowLatencyNoSession, std::memory_order_release);
     state->active = false;
     state->device = nullptr;
@@ -700,11 +702,34 @@ namespace edvr {
 void native_reflex::updateOnGamePresent(ID3D11Device* device) {
     if (!device) return;
     const auto cached = g_lowLatencyStamp.load(std::memory_order_acquire);
-    if (cached == kLowLatencyNoSession || cached == lowLatencyConfigStamp()) return;
+    const auto stamp = lowLatencyConfigStamp();
+    // Foreign Presents may arrive concurrently. The atomic cache is only
+    // refreshed by the enrolled producer below the existing device fence.
+    static std::atomic<uint64_t> probeStamp{UINT64_MAX};
+    static std::atomic<bool> probeWanted{false};
+    const bool probeLive = input_latency_probe::enabled();
+    if (!probeLive && cached == kLowLatencyNoSession) return;
+    const bool probeChanged = probeStamp.load(std::memory_order_acquire) != stamp;
+    if (!probeChanged && !probeWanted.load(std::memory_order_acquire) &&
+        !probeLive && cached == stamp) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_current || GetCurrentThreadId() != g_current->lowLatencyProducerThread ||
-        (device != g_current->device && !sameDevice(g_current->device, device))) return;
-    refreshLowLatency(*g_current, g_lowLatencyStamp.load(std::memory_order_relaxed), true);
+        (device != g_current->device && !sameDevice(g_current->device, device))) {
+        return;
+    }
+    if (probeStamp.load(std::memory_order_relaxed) != stamp) {
+        probeWanted.store((stamp & 1) && !graphicsRuntimeDisabled() &&
+            Config::get().getBool("advanced.input_latency_probe", false),
+            std::memory_order_release);
+        probeStamp.store(stamp, std::memory_order_release);
+    }
+    const bool wanted = probeWanted.load(std::memory_order_relaxed);
+    const bool probeActive = wanted || input_latency_probe::enabled();
+    if (cached != kLowLatencyNoSession && cached != stamp)
+        refreshLowLatency(*g_current, g_lowLatencyStamp.load(std::memory_order_relaxed), true);
+    if (probeActive)
+        input_latency_probe::configure(device, wanted,
+            g_current->lowLatency.requested(), Config::get().generation());
 }
 
 // For temporal_pass.cpp's edges-mode fovea (same DLL, no table needed):

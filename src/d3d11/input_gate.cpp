@@ -1,6 +1,8 @@
 #include "input_gate.h"
 
 #include <atomic>
+#include <algorithm>
+#include <iterator>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
@@ -22,6 +24,7 @@
 #include "../common/vtable_hook.h"
 #include "desktop_window_cursor.h"   // desktopWindowNoteMouseCooperative: the game mouse's cooperative level, observed
 #include "joy_watch.h"
+#include "input_latency_probe.h"
 #include "menu_pad.h"
 
 namespace edvr {
@@ -411,6 +414,7 @@ FaultBudget g_budgetPump("inputGate.pump", 4);
 // The joystick watch (joy_watch.h) has a budget of its own: a fault while
 // copying a joystick's buttons retires the WATCH, never a keyboard door.
 FaultBudget g_budgetJoy("inputGate.joystick", 4);
+FaultBudget g_budgetMouse("inputGate.mouseObservation", 4);
 
 // ---------------------------------------------------------------------------
 // The joystick watch's side of the gate (docs/settings-menu.md, "Hotkeys page").
@@ -780,6 +784,14 @@ void observeControllerData(void* self, const DIDEVICEOBJECTDATA* rows, DWORD cou
     if (joyWatchObserveData(self, e.id, rows, count, sizeof(DIDEVICEOBJECTDATA), stampMs())) joyNote(self, 1, 0);
 }
 
+// The mouse reader shares the same pass-through/input-filtering dispatch as a
+// keyboard on a shared table. The observer only sees returned mouse packets.
+void observeMouseState(void* device, HRESULT result, DWORD bytes, const void* data);
+void observeMouseData(void* device, HRESULT result, DWORD bytes, const DIDEVICEOBJECTDATA* data,
+                      const DWORD* count, DWORD flags, DWORD capacity);
+bool isGameMouse(void* device);
+bool mouseInputTableCaptured(void** table);
+
 template <bool Wide>
 HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     const HRESULT hr = d.origState(self, cb, data);
@@ -858,12 +870,17 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
                         "with the game while the menu is open.",
                         d.name);
     }
+    observeMouseState(self, hr, cb, data);
     return hr;
 }
 
 template <bool Wide>
 HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rgdod,
                          LPDWORD inOut, DWORD flags) {
+    DWORD observationCapacity = 0;
+    if (input_latency_probe::enabled() && isGameMouse(self) && inOut &&
+        cbObj == sizeof(DIDEVICEOBJECTDATA) && !(flags & DIGDD_PEEK))
+        guardedBudget(g_budgetMouse, [&] { observationCapacity = *inOut; });
     const HRESULT hr = d.origData(self, cbObj, rgdod, inOut, flags);
     d.dataCalls.fetch_add(1, std::memory_order_relaxed);
     if (d.retired || FAILED(hr) || !rgdod || !inOut) return hr;
@@ -939,6 +956,7 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
     if (other) {
         guardedBudget(g_budgetJoy, [&] { observeControllerData(self, rgdod, *inOut); });
     }
+    observeMouseData(self, hr, cbObj, rgdod, inOut, flags, observationCapacity);
     return hr;
 }
 
@@ -1128,6 +1146,7 @@ void captureKeyboard(void* device, std::index_sequence<I...>) {
     for (auto& d : g_gameDi) {
         if (d.installed && d.hook.originalVTable() == table) return;
     }
+    if (mouseInputTableCaptured(table)) return;
     for (size_t i = 0; i < kGameDeviceDoors; ++i) {
         auto& d = g_gameDi[i];
         if (d.installed) continue;
@@ -1165,66 +1184,142 @@ void captureKeyboard(void* device, std::index_sequence<I...>) {
                     "is left untouched. Please report this log.", kGameDeviceDoors);
 }
 
-// ---- the game's mouse: its cooperative level, observed (visual.desktop_window, round 3) ----
-// One slot (SetCooperativeLevel, 13) on the table of the first mouse the game creates, in place and stacked with whatever else patched that table. The hook forwards first and
-// looks after, so what the game gets is the driver's answer unchanged. Only a device recorded at CreateDevice as a mouse is reported: the table is shared with the keyboard
-// and the controllers. Observe-only: nothing about the mouse is changed. Round 3 found it nonexclusive and background (the lock is the game's ClipCursor, which is left alone;
-// docs\desktop-window.md). The line stays as an instrument. VR scope only.
+// ---- the game's mouse: observe the returned input and cooperative level ----
+// Tables can be shared with keyboards and controllers. Reuse an existing
+// keyboard reader when present, or let a later keyboard reuse our reader.
+// Each captured table therefore has one input filter and one original chain.
 constexpr size_t kSlotSetCooperativeLevel = 13;
 typedef HRESULT(STDMETHODCALLTYPE* PFN_SetCooperativeLevel)(void*, HWND, DWORD);
 constexpr size_t kMouseDevices = 4;
 std::atomic<void*> g_mice[kMouseDevices] = {};
 struct MouseDoor {
-    VTableHook hook;
-    PFN_SetCooperativeLevel original = nullptr;
-    std::atomic<bool> installed{false};
+    DiDoor reader;
+    PFN_SetCooperativeLevel originalCooperative = nullptr;
+    bool observesReads = false;
 };
-MouseDoor g_mouseDoor;
+MouseDoor g_mouseDoors[kMouseDevices];
 
 bool isGameMouse(void* device) {
-    for (auto& m : g_mice) {
-        if (m.load(std::memory_order_relaxed) == device) return true;
+    for (auto& mouse : g_mice) {
+        if (mouse.load(std::memory_order_acquire) == device) return true;
     }
     return false;
 }
 
 void mouseForget(void* device) {
-    for (auto& m : g_mice) {
+    for (auto& mouse : g_mice) {
         void* expected = device;
-        m.compare_exchange_strong(expected, nullptr);
+        if (mouse.compare_exchange_strong(expected, nullptr)) reinterpret_cast<IUnknown*>(device)->Release();
     }
 }
 
-HRESULT STDMETHODCALLTYPE hookMouseSetCooperativeLevel(void* self, HWND hwnd, DWORD flags) {
-    const HRESULT hr = g_mouseDoor.original(self, hwnd, flags);
-    if (isGameMouse(self)) desktopWindowNoteMouseCooperative(flags, hr);
-    return hr;
+bool mouseInputTableCaptured(void** table) {
+    for (auto& mouse : g_mouseDoors)
+        if (mouse.reader.installed && mouse.observesReads && mouse.reader.hook.originalVTable() == table)
+            return true;
+    return false;
+}
+
+void observeMouseState(void* device, HRESULT result, DWORD bytes, const void* data) {
+    if (!input_latency_probe::enabled() || result != DI_OK || !data || !isGameMouse(device) ||
+        (bytes != sizeof(DIMOUSESTATE) && bytes != sizeof(DIMOUSESTATE2))) return;
+    guardedBudget(g_budgetMouse, [&] {
+        const auto* packet = static_cast<const BYTE*>(data);
+        input_latency_probe::mouseButton(device, (packet[offsetof(DIMOUSESTATE, rgbButtons)] & 0x80) != 0, 1);
+    });
+}
+
+void observeMouseData(void* device, HRESULT result, DWORD bytes, const DIDEVICEOBJECTDATA* data,
+                      const DWORD* count, DWORD flags, DWORD capacity) {
+    if (!input_latency_probe::enabled() || result != DI_OK || !data || !count || !isGameMouse(device) ||
+        bytes != sizeof(DIDEVICEOBJECTDATA) || (flags & DIGDD_PEEK)) return;
+    guardedBudget(g_budgetMouse, [&] {
+        // Bound the diagnostic independently of an unfamiliar driver's count.
+        if (*count > capacity || *count > 1024) return;
+        for (DWORD i = 0; i < *count; ++i)
+            if (data[i].dwOfs == DIMOFS_BUTTON0)
+                input_latency_probe::mouseButton(device, (data[i].dwData & 0x80) != 0, 2);
+    });
+}
+
+template <size_t Index>
+HRESULT STDMETHODCALLTYPE mouseDeviceState(void* self, DWORD bytes, LPVOID data) {
+    return filterDeviceState<false>(g_mouseDoors[Index].reader, self, bytes, data);
+}
+
+template <size_t Index>
+HRESULT STDMETHODCALLTYPE mouseDeviceData(void* self, DWORD bytes, LPDIDEVICEOBJECTDATA data,
+                                          LPDWORD count, DWORD flags) {
+    return filterDeviceData<false>(g_mouseDoors[Index].reader, self, bytes, data, count, flags);
+}
+
+template <size_t Index>
+HRESULT STDMETHODCALLTYPE mouseSetCooperativeLevel(void* self, HWND hwnd, DWORD flags) {
+    const HRESULT result = g_mouseDoors[Index].originalCooperative(self, hwnd, flags);
+    if (isGameMouse(self)) desktopWindowNoteMouseCooperative(flags, result);
+    return result;
+}
+
+template <size_t... Index>
+void captureMouseTable(void* device, std::index_sequence<Index...>) {
+    static const PFN_GetDeviceState stateHooks[] = {&mouseDeviceState<Index>...};
+    static const PFN_GetDeviceData dataHooks[] = {&mouseDeviceData<Index>...};
+    static const PFN_SetCooperativeLevel cooperativeHooks[] = {&mouseSetCooperativeLevel<Index>...};
+    void** table = *reinterpret_cast<void***>(device);
+    for (auto& mouse : g_mouseDoors)
+        if (mouse.reader.installed && mouse.reader.hook.originalVTable() == table) return;
+    bool sharedReader = false;
+    for (DiDoor* reader : {&g_diA, &g_diW})
+        sharedReader = sharedReader || (reader->installed && reader->hook.originalVTable() == table);
+    for (auto& reader : g_gameDi)
+        sharedReader = sharedReader || (reader.installed && reader.hook.originalVTable() == table);
+    for (size_t i = 0; i < kMouseDevices; ++i) {
+        auto& mouse = g_mouseDoors[i];
+        auto& reader = mouse.reader;
+        if (reader.installed) continue;
+        if (!reader.hook.attach(device, 32) || reader.hook.executablePrefix() <= kSlotSetCooperativeLevel) {
+            reader.hook.uninstall();
+            return;
+        }
+        reader.name = "game mouse input";
+        reader.gameDevice = true;
+        reader.dummy = device;
+        reinterpret_cast<IUnknown*>(device)->AddRef();
+        reader.hook.setMode(HookMode::InPlace);
+        bool staged = reader.hook.replace(kSlotSetCooperativeLevel, reinterpret_cast<void*>(cooperativeHooks[i]),
+                                           reinterpret_cast<void**>(&mouse.originalCooperative));
+        if (!sharedReader) {
+            staged = staged && reader.hook.replace(kSlotGetDeviceState, reinterpret_cast<void*>(stateHooks[i]),
+                                                   reinterpret_cast<void**>(&reader.origState)) &&
+                     reader.hook.replace(kSlotGetDeviceData, reinterpret_cast<void*>(dataHooks[i]),
+                                         reinterpret_cast<void**>(&reader.origData));
+        }
+        if (!staged || !reader.hook.commit()) {
+            reader.hook.uninstall();
+            reinterpret_cast<IUnknown*>(device)->Release();
+            reader.dummy = nullptr;
+            return;
+        }
+        mouse.observesReads = !sharedReader;
+        reader.installed = true;
+        return;
+    }
 }
 
 void captureMouse(void* device) {
-    mouseForget(device);
-    bool stored = false;
-    for (auto& m : g_mice) {
-        void* expected = nullptr;
-        if (m.compare_exchange_strong(expected, device)) {
-            stored = true;
-            break;
-        }
-    }
-    if (!stored) g_mice[0].store(device);
     CaptureLock lock;
-    MouseDoor& d = g_mouseDoor;
-    if (d.installed.load()) return;
-    if (!d.hook.attach(device, 32) || d.hook.executablePrefix() <= kSlotSetCooperativeLevel) {
-        d.hook.uninstall();
-        return;
+    bool known = false;
+    for (auto& mouse : g_mice) known = known || mouse.load(std::memory_order_relaxed) == device;
+    if (!known) {
+        auto* free = std::find_if(std::begin(g_mice), std::end(g_mice),
+            [](const auto& mouse) { return mouse.load(std::memory_order_relaxed) == nullptr; });
+        if (free == std::end(g_mice)) return;
+        // Keep the captured identity alive until the hooks are removed. A
+        // released object's address cannot become a foreign device's identity.
+        reinterpret_cast<IUnknown*>(device)->AddRef();
+        free->store(device, std::memory_order_release);
     }
-    d.hook.setMode(HookMode::InPlace);
-    if (!d.hook.replace(kSlotSetCooperativeLevel, reinterpret_cast<void*>(&hookMouseSetCooperativeLevel), reinterpret_cast<void**>(&d.original)) || !d.hook.commit()) {
-        d.hook.uninstall();
-        return;
-    }
-    d.installed = true;
+    captureMouseTable(device, std::make_index_sequence<kMouseDevices>{});
 }
 
 // ---- the joystick doors: observation and plugin gating ------------------
@@ -1512,6 +1607,10 @@ void installDiDoor(PFN_DirectInput8Create create, HINSTANCE inst, const GUID& ii
     d.dummy = dev;
 
     void** table = *reinterpret_cast<void***>(dev);
+    if (mouseInputTableCaptured(table)) {
+        *sharedTableOut = table;
+        return;  // The shared mouse reader also applies the keyboard gate.
+    }
     if (*sharedTableOut && *sharedTableOut == table) {
         // The two interfaces share one table on this dinput8: patching it
         // twice would chain the second hook to the first and loop.
@@ -1637,6 +1736,8 @@ void probeLine() {
 void doorEvidence(bool* di, bool* reached) {
     bool any = (g_diW.installed && !g_diW.retired) || (g_diA.installed && !g_diA.retired);
     for (const auto& d : g_gameDi) any |= d.installed && !d.retired;
+    for (const auto& mouse : g_mouseDoors)
+        any |= mouse.observesReads && mouse.reader.installed && !mouse.reader.retired;
     // The budget is what actually decides pass-through: once it is spent
     // guardedBudget skips every door's lambda, and only the door whose next
     // GetDeviceState observes that marks itself retired -- a door the game
@@ -1945,6 +2046,9 @@ void inputGateTick() {
         for (JoyDoor& j : g_joyDoors) {
             if (j.installed) j.hook.reclaim("joystick watch");
         }
+        for (auto& mouse : g_mouseDoors) {
+            if (mouse.reader.installed) mouse.reader.hook.reclaim("mouse input observation");
+        }
     }
     if (g_probe && dueMs(g_probeMs, kProbeEveryMs)) {
         g_probeMs = stampMs();
@@ -2038,9 +2142,16 @@ void inputGateShutdown() {
         if (f.owner) reinterpret_cast<IUnknown*>(f.owner)->Release();
         f.owner = nullptr;
     }
-    g_mouseDoor.hook.uninstall();
-    g_mouseDoor.installed = false;
-    for (auto& m : g_mice) m.store(nullptr);
+    for (auto& mouse : g_mouseDoors) {
+        mouse.reader.hook.uninstall();
+        mouse.reader.installed = false;
+        mouse.observesReads = false;
+        if (mouse.reader.dummy) reinterpret_cast<IUnknown*>(mouse.reader.dummy)->Release();
+        mouse.reader.dummy = nullptr;
+    }
+    for (auto& mouse : g_mice) {
+        if (void* device = mouse.exchange(nullptr)) reinterpret_cast<IUnknown*>(device)->Release();
+    }
 }
 
 void inputGateInstallEarly() {

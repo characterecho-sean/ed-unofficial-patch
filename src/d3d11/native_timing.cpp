@@ -1,4 +1,5 @@
 #include "native_timing.h"
+#include "input_latency_probe.h"
 #include "map_wait.h"
 #include "../common/gpu_frame_protocol.h"
 #include "../common/config.h"
@@ -279,6 +280,11 @@ uint32_t WINAPI gpuEye(void* p, uint64_t sequence, uint32_t eye, uint32_t begin,
         if (GetCurrentThreadId() != c->producer) return 0;
         if (eye >= 5u) {
             if (begin != 0 || accepted != 1 || !texture || !c->waitValid || c->published) return 0;
+            // This is the final treated eye texture, before runtime transfer.
+            // The diagnostic's response therefore follows the game's actual
+            // input receipt and is not paired to an unrelated next Present.
+            if (edvr::input_latency_probe::enabled())
+                edvr::input_latency_probe::eyeRendered(c->device, texture, sequence, eye - 5u);
             return edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
                 static_cast<unsigned>(edvr::GpuFrameEvent::SegmentEnd), sequence,
                 eye - 5u, 1u, texture) ? 1u : 0u;
@@ -310,6 +316,8 @@ uint32_t WINAPI gpuEye(void* p, uint64_t sequence, uint32_t eye, uint32_t begin,
     const auto event = begin ? edvr::GpuFrameEvent::SubmitBegin : edvr::GpuFrameEvent::SubmitEnd;
     const uint64_t result = edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
         static_cast<unsigned>(event), sequence, eye, begin ? 0u : (accepted ? 1u : 0u), texture);
+    if (!begin && edvr::input_latency_probe::enabled())
+        edvr::input_latency_probe::eyeSubmitted(sequence, eye, accepted != 0);
     if (result && begin) c->opened |= bit;
     // GPU timing can be disabled or lack a covered render command. Its own
     // controller handles validity; CPU wall measurements remain independent.

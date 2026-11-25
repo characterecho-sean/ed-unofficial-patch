@@ -2343,7 +2343,10 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       } while(false);
       if(appOpened && !timing.applicationSegment(timingSequence,false)) timingInvalidate();
       if(timingGpuBegun[unsigned(eye)] &&
-          !timing.producerSegmentEnd(timingSequence,unsigned(eye),submittedSource.Get()))
+          // A successful treatment may replace the source (for example DLSS).
+          // The diagnostic response must be in the actual transfer source.
+          !timing.producerSegmentEnd(timingSequence,unsigned(eye),
+              treated ? treated.Get() : submittedSource.Get()))
         timingInvalidate();
       workClock=workClock&&counterNow(&workEnded);
     };
