@@ -12,10 +12,13 @@ latency measurements.
 
 A test sender publishes a unique pulse in a process-specific shared-memory
 mapping and timestamps a mouse-button injection with QueryPerformanceCounter.
-The existing DirectInput owner observes the first successful game-owned read
-that returns the pressed button. An observed release is required before a press;
-foreign devices, failed reads, custom layouts and peek/overflow reads do not
-qualify.
+The existing input owner observes the first returned DirectInput press or
+left-button message removed by the game's own `PeekMessageA` call. The message
+must belong to a window in the game process and use `PM_REMOVE`. An observed
+release is required before a press; foreign devices/windows, failed reads,
+custom layouts, peek-only reads and overflow reads do not qualify. This is an
+input API receipt; it does not prove that Elite's simulation acted on the input. A
+source field identifies the exact API route for each sample.
 
 After all native eye treatments, the receiver paints a 16 by 16 white diagnostic
 response in each actual submitted eye texture. Both responses and both accepted

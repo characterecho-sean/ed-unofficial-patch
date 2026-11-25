@@ -150,7 +150,10 @@ void clocksAndRequests() {
     check(!pulse.render(7, 0, 109) && pulse.result().reason == Refusal::InvalidRequest,
           "endpoint clock before consumption rejected");
     pulse = Pulse{}; pulse.arm(1, 100, 100, 1000);
-    check(!pulse.consume(110, 3) && pulse.result().reason == Refusal::InvalidRequest,
+    check(pulse.consume(110, 3) && pulse.phase() == Phase::Consumed && pulse.result().source == 3 &&
+          pulse.result().consumedQpc == 110, "removed owned-window mouse message qualifies as API receipt source three");
+    pulse = Pulse{}; pulse.arm(1, 100, 100, 1000);
+    check(!pulse.consume(110, 4) && pulse.result().reason == Refusal::InvalidRequest,
           "unrecognized input source rejected");
     pulse = consumed();
     check(!pulse.render(0, 0, 120) && pulse.result().reason == Refusal::InvalidRequest,

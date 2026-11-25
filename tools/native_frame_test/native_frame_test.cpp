@@ -9,6 +9,7 @@
 #include "../../src/d3d11/native_on_foot_optic_capture.h"  // F76: bounded exact-image optic capture ledger
 #include "../../src/d3d11/native_on_foot_ads_incident.h"
 #include "../../src/d3d11/native_reflex.h"
+#include "../../src/d3d11/input_gate.h"
 
 #include <d3d11.h>
 #include <immintrin.h>
@@ -133,6 +134,8 @@
 // The journal watcher is stubbed so the on-foot signal is the rig's to set.
 static bool g_journalActive = false, g_onFootKnown = false, g_onFoot = false;
 namespace edvr {
+// This frame-policy rig does not install game input imports.
+void inputGateInstall() {}
 bool journalWatchActive() { return g_journalActive; }
 bool journalOnFootKnown() { return g_onFootKnown; }
 bool journalOnFoot() { return g_onFoot; }

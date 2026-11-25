@@ -21,9 +21,13 @@ inline bool enabled() noexcept { return live.load(std::memory_order_relaxed); }
 void configure(ID3D11Device*, bool wanted, native_reflex::Mode, uint64_t generation) noexcept;
 void stop() noexcept;
 
-// Actual game-owned DirectInput reads call this after successful return. A
-// released packet must be seen before a pressed edge. source=1 is a standard
-// state packet, source=2 a non-peek buffered event. Never changes game input.
+// Actual game-owned input calls report a successful DirectInput read or a
+// removed message for the owned game window. A released receipt must precede
+// a pressed edge. source=1 is a standard state packet, source=2 a non-peek
+// buffered event, source=3 a PM_REMOVE WM_LBUTTONDOWN/UP message returned by
+// PeekMessageA. This is an API receipt, not proof of gameplay processing.
+// device identifies the DirectInput device or the owned window's HWND.
+// Never changes game input or message results.
 void mouseButton(void* device, bool pressed, unsigned source) noexcept;
 
 // After all eye treatments, immediately before transfer, paint a small owned

@@ -15,6 +15,7 @@
 #include "native_on_foot.h"
 #include "native_reflex.h"
 #include "input_latency_probe.h"
+#include "input_gate.h"
 #include "native_render_labels.h"
 
 #include <algorithm>
@@ -727,6 +728,9 @@ void native_reflex::updateOnGamePresent(ID3D11Device* device) {
     const bool probeActive = wanted || input_latency_probe::enabled();
     if (cached != kLowLatencyNoSession && cached != stamp)
         refreshLowLatency(*g_current, g_lowLatencyStamp.load(std::memory_order_relaxed), true);
+    // Install the game import observer even when the settings menu has never
+    // opened. The existing input owner installs each door once.
+    if (wanted) inputGateInstall();
     if (probeActive)
         input_latency_probe::configure(device, wanted,
             g_current->lowLatency.requested(), Config::get().generation());

@@ -7,6 +7,11 @@ Windows session. Each pulse moves the cursor to a caller-selected client point
 actual input reader and paired eye response. Choose a benign point while the
 game is stationary. This tool never activates a window or sends gameplay keys.
 
+Consumption means receipt at a game-owned input API: a DirectInput state packet
+(source 1), a non-peek buffered DirectInput event (source 2), or a game-window
+mouse message removed by the game's PeekMessageA call with PM_REMOVE (source 3).
+This endpoint does not establish that gameplay processed the input.
+
 Metrics distinguish injection-to-game-consumption, consumption-to-GPU-fence
 notification, injection-to-GPU-fence notification, and injection-to-paired-submit
 CPU endpoint. GPU notification is an observed completion upper bound, not a GPU
@@ -49,6 +54,8 @@ SHARED_SIZE = WORD_COUNT * 8
 UINT64_MAX = (1 << 64) - 1
 IDLE, RESERVED, ARMED, CONSUMED, RENDERING, COMPLETE, REJECTED, STOPPED = range(8)
 MODES = {"off": 0, "on": 1, "boost": 2}
+SOURCES = {1: "directinput_state", 2: "directinput_buffered_event",
+           3: "window_mouse_message_peekmessagea_remove"}
 REASONS = ("None", "Timeout", "InvalidRequest", "GenerationChanged", "WrongThread",
            "TextureUnsupported", "MixedFrame", "DuplicateEye", "GraphicsFailure",
            "SubmitFailed", "DeviceRemoved", "Stopped")
@@ -61,8 +68,8 @@ TIMEOUT_SECONDS = 3.0
 POLL_SECONDS = 0.01
 DEFAULT_ATOMIC_HELPER = Path(__file__).resolve().parent.parent / "build" / "tools" / "input_latency_atomic.dll"
 METRICS = {
-    "injection_to_consumption_ms": "sentQpc to actual game input consumption",
-    "consumption_to_gpu_notification_ms": "game consumption to GPU-fence CPU notification (upper bound)",
+    "injection_to_consumption_ms": "sentQpc to game input API receipt (not gameplay processing)",
+    "consumption_to_gpu_notification_ms": "game input API receipt to GPU-fence CPU notification (upper bound)",
     "injection_to_gpu_notification_ms": "sentQpc to GPU-fence CPU notification (upper bound)",
     "injection_to_paired_submit_ms": "sentQpc to successful paired native-submit CPU endpoint",
 }
@@ -531,10 +538,10 @@ class Collector:
                         or not data["renderSequence"] or data["eyeMask"] != 3 or data["submitMask"] != 3
                         or data["gpuCompleteQpc"] < data["consumedQpc"]
                         or data["submitCompleteQpc"] < data["consumedQpc"]
-                        or data["source"] not in (1, 2)):
+                        or data["source"] not in SOURCES):
                     raise ProbeError("Complete result has invalid timestamps, paired eyes/submits, or input source")
                 scale = 1000.0 / data["frequency"]
-                record.update(status="complete", metrics={
+                record.update(status="complete", source=data["source"], source_label=SOURCES[data["source"]], metrics={
                     "injection_to_consumption_ms": (data["consumedQpc"] - sent) * scale,
                     "consumption_to_gpu_notification_ms": (data["gpuCompleteQpc"] - data["consumedQpc"]) * scale,
                     "injection_to_gpu_notification_ms": (data["gpuCompleteQpc"] - sent) * scale,
@@ -614,6 +621,7 @@ def collect(config, backend_factory):
                             "atomic_helper": str(atomic_helper_path(config.atomic_helper)),
                             "count": config.count, "interval_ms": config.interval_ms, "hold_ms": config.hold_ms,
                             "client_point": {"x": config.x, "y": config.y}, "metric_definitions": METRICS,
+                            "input_source_definitions": SOURCES,
                             "limits": "GPU-fence notification is an upper bound, not photons or gameplay physics"})
         try:
             backend = backend_factory(config)
@@ -701,8 +709,9 @@ def main(argv=None, backend_factory=None):
 class FakeBackend:
     """Deterministic receiver and identity faults; never imports Windows APIs."""
 
-    def __init__(self, config, behavior="complete"):
+    def __init__(self, config, behavior="complete", source=1):
         self.config, self.behavior = config, behavior
+        self.source = source
         self.frequency, self.clock = 1000000, 1.0
         self.words = [0] * WORD_COUNT
         for name, value in {"magic": MAGIC, "version": VERSION, "size": SHARED_SIZE,
@@ -763,7 +772,7 @@ class FakeBackend:
                 sent = self.words[INDEX["sentQpc"]]
                 result = {"state": COMPLETE, "consumedQpc": sent + 1000, "renderSequence": 8,
                           "eyeMask": 3, "submitMask": 3, "gpuCompleteQpc": sent + 4000,
-                          "submitCompleteQpc": sent + 3000, "source": 1}
+                          "submitCompleteQpc": sent + 3000, "source": self.source}
                 if self.behavior == "rejected":
                     result.update(state=REJECTED, reason=5)
                 if self.behavior == "bad_time":
@@ -815,6 +824,30 @@ def self_test():
             self.assertEqual(events.count("down"), 1)
             self.assertEqual(events.count("up"), 1)
             self.assertFalse(backend.down)
+
+        def test_game_input_api_sources_accept_message_receipt(self):
+            for source in (1, 2, 3):
+                with self.subTest(source=source):
+                    config = self.config()
+                    backend = FakeBackend(config, source=source)
+                    record = Collector(config, backend).sample(1)
+                    self.assertEqual(record["status"], "complete")
+                    self.assertEqual(record["source"], source)
+                    self.assertEqual(record["source_label"], SOURCES[source])
+                    self.assertEqual(record["snapshot"]["source"], source)
+                    self.assertEqual(record["metrics"], dict(zip(METRICS, (1.0, 3.0, 4.0, 3.0))))
+
+        def test_unknown_input_api_source_never_gets_metrics(self):
+            for source in (0, 4, UINT64_MAX):
+                with self.subTest(source=source):
+                    config = self.config()
+                    backend = FakeBackend(config, source=source)
+                    record = Collector(config, backend).sample(1)
+                    self.assertEqual(record["status"], "error")
+                    self.assertNotIn("metrics", record)
+                    self.assertNotIn("source_label", record)
+                    self.assertEqual(record["snapshot"]["source"], source)
+                    self.assertEqual(backend.words[INDEX["state"]], IDLE)
 
         def test_request_monotonic_and_receiver_ready_required(self):
             config = self.config()

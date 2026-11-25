@@ -7,8 +7,8 @@
 
 namespace edvr::input_latency_probe {
 
-// One physical mouse may report the same edge through state and buffered
-// reads. A device must report release before its next press can be an edge.
+// An input owner may report the same edge through repeated reads or messages.
+// Each device or game window must report release before its next press edge.
 class ButtonEdges final {
 public:
     bool press(uintptr_t device, bool pressed) noexcept {
@@ -89,7 +89,7 @@ public:
     bool consume(uint64_t now, unsigned source) noexcept {
         if (phase_ != Phase::Armed) return false;
         if (expire(now)) return false;
-        if (source != 1 && source != 2) { reject(Refusal::InvalidRequest); return false; }
+        if (source != 1 && source != 2 && source != 3) { reject(Refusal::InvalidRequest); return false; }
         result_.consumedQpc = now; result_.source = source;
         phase_ = Phase::Consumed;
         return true;

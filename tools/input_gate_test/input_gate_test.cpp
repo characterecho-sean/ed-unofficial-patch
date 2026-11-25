@@ -3,8 +3,18 @@
 #include <windows.h>
 static HWND testPadForeground = nullptr;
 static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
+static HWND testForeignMessageWindow = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(0x1234));
+static DWORD WINAPI testGetWindowThreadProcessId(HWND hwnd, LPDWORD process) {
+    if (hwnd == testForeignMessageWindow) {
+        if (process) *process = GetCurrentProcessId() + 1;
+        return 1;
+    }
+    return GetWindowThreadProcessId(hwnd, process);
+}
 #define GetForegroundWindow testGetForegroundWindow
+#define GetWindowThreadProcessId testGetWindowThreadProcessId
 #include "../../src/d3d11/input_gate.cpp"
+#undef GetWindowThreadProcessId
 #undef GetForegroundWindow
 
 #include <array>
@@ -1196,6 +1206,91 @@ static void mouseInputLatencyCases() {
 
 static void releaseLogCases();
 
+namespace {
+MSG mouseQueuedMessage{};
+BOOL mousePeekResult = TRUE;
+unsigned mousePeekCalls = 0;
+HWND mousePeekFilter = nullptr;
+UINT mousePeekLo = 0, mousePeekHi = 0, mousePeekRemove = 0;
+BOOL WINAPI mousePeekOriginal(LPMSG out, HWND hwnd, UINT lo, UINT hi, UINT remove) {
+    ++mousePeekCalls;
+    mousePeekFilter = hwnd; mousePeekLo = lo; mousePeekHi = hi; mousePeekRemove = remove;
+    if (out && mousePeekResult) *out = mouseQueuedMessage;
+    return mousePeekResult;
+}
+}
+
+static void mouseMessageLatencyCases() {
+    using namespace edvr::input_latency_probe;
+    HWND ownWindow = CreateWindowExW(0, L"STATIC", L"EDUP input receipt rig", 0,
+                                    0, 0, 1, 1, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(ownWindow != nullptr, "mouse message rig creates a real same-process window");
+    if (!ownWindow) return;
+    const auto savedPeek = g_user.origPeek;
+    const bool savedRetired = g_user.retired3;
+    const int savedPrivate = g_private.load();
+    g_user.origPeek = &mousePeekOriginal;
+    g_user.retired3 = false;
+    g_private.store(1);
+    mousePeekCalls = 0; testMouseReadCount = 0; mousePeekResult = 7;
+    mouseQueuedMessage = {};
+    mouseQueuedMessage.hwnd = ownWindow;
+    mouseQueuedMessage.message = WM_LBUTTONDOWN;
+    mouseQueuedMessage.wParam = MK_LBUTTON;
+    mouseQueuedMessage.lParam = MAKELPARAM(37, 51);
+    mouseQueuedMessage.time = 42;
+    mouseQueuedMessage.pt = {37, 51};
+    MSG observed{};
+    live.store(false);
+    check(hookPeekMessageA(&observed, ownWindow, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE) == 7 &&
+          mousePeekCalls == 1 && mousePeekFilter == ownWindow && mousePeekLo == WM_MOUSEFIRST &&
+          mousePeekHi == WM_MOUSELAST && mousePeekRemove == PM_REMOVE &&
+          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0 && testMouseReadCount == 0,
+          "disabled message receipt preserves the original arguments, result and every message byte");
+    live.store(true);
+    check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE | PM_NOYIELD) == 7 && testMouseReadCount == 1 &&
+          testMouseReads[0].device == ownWindow && testMouseReads[0].pressed && testMouseReads[0].source == 3 &&
+          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+          "an owned left-button dequeue reports source3 while keyboard privacy preserves mouse bytes");
+    mouseQueuedMessage.message = WM_LBUTTONUP; mouseQueuedMessage.wParam = 0;
+    g_user.retired3 = true;
+    check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == 7 && testMouseReadCount == 2 &&
+          !testMouseReads[1].pressed && testMouseReads[1].source == 3 &&
+          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+          "an owned release is observed before the independent keyboard-pump retirement check");
+    g_user.retired3 = false;
+    const size_t before = testMouseReadCount;
+    check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_NOREMOVE) == 7 && testMouseReadCount == before &&
+          memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+          "a peek of an owned button message cannot be counted as receipt");
+    for (HWND other : {testForeignMessageWindow, HWND(nullptr), reinterpret_cast<HWND>(uintptr_t(1))}) {
+        mouseQueuedMessage.hwnd = other;
+        check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == 7 && testMouseReadCount == before &&
+              memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+              "foreign-process, thread-only and invalid-window button messages remain unobserved and unchanged");
+    }
+    mouseQueuedMessage.hwnd = ownWindow;
+    for (UINT message : {UINT(WM_RBUTTONDOWN), UINT(WM_MOUSEMOVE), UINT(WM_INPUT)}) {
+        mouseQueuedMessage.message = message;
+        check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == 7 && testMouseReadCount == before &&
+              memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+              "unrelated mouse and raw-input messages do not report a left-button receipt");
+    }
+    mouseQueuedMessage.message = WM_LBUTTONDOWN;
+    mousePeekResult = FALSE;
+    memset(&observed, 0x5a, sizeof(observed));
+    const MSG old = observed;
+    check(hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) == FALSE && testMouseReadCount == before &&
+          memcmp(&observed, &old, sizeof(MSG)) == 0,
+          "an unsuccessful dequeue preserves the result and untouched output without reporting receipt");
+    mousePeekResult = TRUE;
+    check(hookPeekMessageA(nullptr, nullptr, 0, 0, PM_REMOVE) == TRUE && testMouseReadCount == before,
+          "a null message output cannot report receipt");
+    live.store(false);
+    g_user.origPeek = savedPeek; g_user.retired3 = savedRetired; g_private.store(savedPrivate);
+    DestroyWindow(ownWindow);
+}
+
 int main(int argc, char** argv) {
     (void)keepPadImport;
     if (argc > 1 && strcmp(argv[1], "--interleave-only") == 0) {
@@ -1206,6 +1301,7 @@ int main(int argc, char** argv) {
         return failures ? 1 : 0;
     }
     mouseInputLatencyCases();
+    mouseMessageLatencyCases();
     padHookCases();
     loadedModuleMatchCases();
     auto dummyTable = deviceTable(), table1 = deviceTable(), table2 = deviceTable();

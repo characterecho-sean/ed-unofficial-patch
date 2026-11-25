@@ -328,7 +328,7 @@ void stop() noexcept {
 void mouseButton(void* device, bool pressed, unsigned source) noexcept {
     if (!enabled()) return;
     std::lock_guard<std::mutex> lock(callbacks);
-    if (!current || !device || (source != 1 && source != 2)) return;
+    if (!current || !device || (source != 1 && source != 2 && source != 3)) return;
     auto& probe = *current;
     const uint64_t now = nowQpc();
     synchronizeLocked(probe, now);

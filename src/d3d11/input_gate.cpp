@@ -415,6 +415,10 @@ FaultBudget g_budgetPump("inputGate.pump", 4);
 // copying a joystick's buttons retires the WATCH, never a keyboard door.
 FaultBudget g_budgetJoy("inputGate.joystick", 4);
 FaultBudget g_budgetMouse("inputGate.mouseObservation", 4);
+// Five first observations per process, only while the diagnostic is enabled.
+// Keep missing capture, unsupported layouts and a silent route distinguishable
+// without logging every input read.
+std::atomic<unsigned> g_mouseDiagnosticNotes{0};
 
 // ---------------------------------------------------------------------------
 // The joystick watch's side of the gate (docs/settings-menu.md, "Hotkeys page").
@@ -791,12 +795,16 @@ void observeMouseData(void* device, HRESULT result, DWORD bytes, const DIDEVICEO
                       const DWORD* count, DWORD flags, DWORD capacity);
 bool isGameMouse(void* device);
 bool mouseInputTableCaptured(void** table);
+void noteMouseStateRead(void* device, HRESULT result, DWORD bytes);
+void noteMouseDataRead(void* device, HRESULT result, DWORD bytes, const DIDEVICEOBJECTDATA* data,
+                       const DWORD* count, DWORD flags, DWORD capacity);
 
 template <bool Wide>
 HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     const HRESULT hr = d.origState(self, cb, data);
     d.stateCalls.fetch_add(1, std::memory_order_relaxed);
     if (self != d.dummy) d.stateForeign.fetch_add(1, std::memory_order_relaxed);
+    noteMouseStateRead(self, hr, cb);
     if (d.retired || FAILED(hr) || !data) return hr;
     bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
     guardedBudget(g_budgetDi, [&] {
@@ -883,6 +891,7 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
         guardedBudget(g_budgetMouse, [&] { observationCapacity = *inOut; });
     const HRESULT hr = d.origData(self, cbObj, rgdod, inOut, flags);
     d.dataCalls.fetch_add(1, std::memory_order_relaxed);
+    noteMouseDataRead(self, hr, cbObj, rgdod, inOut, flags, observationCapacity);
     if (d.retired || FAILED(hr) || !rgdod || !inOut) return hr;
     if (cbObj != sizeof(DIDEVICEOBJECTDATA)) return hr;   // a layout this was not written for
     bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
@@ -1058,13 +1067,31 @@ bool isKeyboardMessage(UINT m) {
     }
 }
 
+// Receipt means the game's own import dequeued this button message. It does
+// not establish a gameplay response; the paired-eye diagnostic owns that end.
+// PM_NOREMOVE and thread/foreign-window messages cannot consume a pulse.
+void observeMouseMessage(const MSG* msg, UINT remove) {
+    if (!input_latency_probe::enabled() || !msg || !(remove & PM_REMOVE)) return;
+    guardedBudget(g_budgetMouse, [&] {
+        if (!msg->hwnd || (msg->message != WM_LBUTTONDOWN && msg->message != WM_LBUTTONUP)) return;
+        DWORD owner = 0;
+        if (!GetWindowThreadProcessId(msg->hwnd, &owner) || owner != GetCurrentProcessId()) return;
+        if (!(g_mouseDiagnosticNotes.fetch_or(16, std::memory_order_relaxed) & 16))
+            Log::get().note("input_latency_input,route=window_message,hwnd=%p,message=0x%X,remove=0x%X,source=3",
+                            msg->hwnd, msg->message, remove);
+        input_latency_probe::mouseButton(msg->hwnd, msg->message == WM_LBUTTONDOWN, 3);
+    });
+}
+
 BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove) {
     BOOL r = FALSE;
     if (!guarded("inputGate/origPeekMessageA",
                  [&] { r = g_user.origPeek(msg, hwnd, lo, hi, remove); })) {
         return FALSE;
     }
-    if (!r || !msg || g_user.retired3) return r;
+    if (!r || !msg) return r;
+    observeMouseMessage(msg, remove);
+    if (g_user.retired3) return r;
     guardedBudget(g_budgetPump, [&] {
         const UINT m = msg->message;
         if (m == WM_INPUT) {
@@ -1218,6 +1245,45 @@ bool mouseInputTableCaptured(void** table) {
         if (mouse.reader.installed && mouse.observesReads && mouse.reader.hook.originalVTable() == table)
             return true;
     return false;
+}
+
+void noteMouseCapture() {
+    if (!input_latency_probe::enabled() ||
+        (g_mouseDiagnosticNotes.fetch_or(1, std::memory_order_relaxed) & 1)) return;
+    unsigned devices = 0, tables = 0, ownedReaders = 0;
+    for (auto& mouse : g_mice) devices += mouse.load(std::memory_order_acquire) != nullptr;
+    for (auto& mouse : g_mouseDoors) {
+        tables += mouse.reader.installed;
+        ownedReaders += mouse.reader.installed && mouse.observesReads;
+    }
+    Log::get().note("input_latency_input,route=directinput,captured_devices=%u,captured_tables=%u,owned_readers=%u",
+                    devices, tables, ownedReaders);
+}
+
+void noteMouseStateRead(void* device, HRESULT result, DWORD bytes) {
+    if (!input_latency_probe::enabled() || !isGameMouse(device) ||
+        (g_mouseDiagnosticNotes.fetch_or(2, std::memory_order_relaxed) & 2)) return;
+    Log::get().note("input_latency_input,route=directinput_state,device=%p,result=0x%08lX,bytes=%lu,standard_layout=%u",
+                    device, static_cast<unsigned long>(result), static_cast<unsigned long>(bytes),
+                    unsigned(bytes == sizeof(DIMOUSESTATE) || bytes == sizeof(DIMOUSESTATE2)));
+}
+
+void noteMouseDataRead(void* device, HRESULT result, DWORD bytes, const DIDEVICEOBJECTDATA* data,
+                       const DWORD* count, DWORD flags, DWORD capacity) {
+    if (!input_latency_probe::enabled() || !isGameMouse(device)) return;
+    guardedBudget(g_budgetMouse, [&] {
+        const DWORD returned = count ? *count : 0;
+        if (!(g_mouseDiagnosticNotes.fetch_or(4, std::memory_order_relaxed) & 4))
+            Log::get().note("input_latency_input,route=directinput_data,device=%p,result=0x%08lX,bytes=%lu,flags=0x%lX,returned=%lu,capacity=%lu",
+                            device, static_cast<unsigned long>(result), static_cast<unsigned long>(bytes),
+                            static_cast<unsigned long>(flags), static_cast<unsigned long>(returned),
+                            static_cast<unsigned long>(capacity));
+        if (result == DI_OK && data && bytes == sizeof(DIDEVICEOBJECTDATA) && returned &&
+            returned <= capacity && returned <= 1024 &&
+            !(g_mouseDiagnosticNotes.fetch_or(8, std::memory_order_relaxed) & 8))
+            Log::get().note("input_latency_input,route=directinput_data_first_row,device=%p,offset=%lu,flags=0x%lX",
+                            device, static_cast<unsigned long>(data[0].dwOfs), static_cast<unsigned long>(flags));
+    });
 }
 
 void observeMouseState(void* device, HRESULT result, DWORD bytes, const void* data) {
@@ -2011,6 +2077,7 @@ bool inputGateGameKeyboardSeen() {
 
 void inputGateTick() {
     if (!g_installTried) return;
+    noteMouseCapture();
     guarded("inputGate/refreshReleaseTail-tick", [&] { refreshReleaseTail(g_tailReader); });
     static bool gameReachedNoted = false;
     if (!gameReachedNoted && g_gameKeyboardCalls.load() != 0) {
