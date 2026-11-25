@@ -70,6 +70,39 @@ unsigned readFrameBoundaryRecords(uint64_t& cursor, FrameBoundaryRecord* output,
                                   unsigned capacity, uint64_t& dropped) noexcept;
 
 namespace engine_detail {
+enum class EntryInstallResult { Installed, RelayAllocationFailed, RelayOutOfRange, RelayProtectionFailed, HookRefused };
+constexpr bool relativeEntryReachable(uintptr_t site, uintptr_t destination) noexcept {
+    if (site > UINTPTR_MAX - 5) return false;
+    const uintptr_t next = site + 5;
+    return destination >= next ? destination - next <= uintptr_t(INT32_MAX) :
+        next - destination <= uintptr_t(INT32_MAX) + 1;
+}
+constexpr std::array<uint8_t,14> entryRelayBytes(uint64_t replacement) noexcept {
+    // jmp qword ptr [rip+0], followed by its absolute destination. A tail
+    // jump preserves the game's caller return address, registers and flags.
+    std::array<uint8_t,14> code{{0xFF,0x25,0,0,0,0}};
+    for (unsigned byte=0;byte<8;++byte) code[6+byte]=uint8_t(replacement>>(8*byte));
+    return code;
+}
+// The injectable operations are the production allocator/protection and
+// CodeHook adapters; the portable rig supplies deterministic address layouts.
+template<class Reserve, class Seal, class Install, class Release>
+EntryInstallResult installEntryRelay(uintptr_t site, uintptr_t replacement,
+                                    Reserve reserve, Seal seal, Install install, Release release) noexcept {
+    if (!site || !replacement) return EntryInstallResult::HookRefused;
+    uint8_t* const relay=reserve(site);
+    if (!relay) return EntryInstallResult::RelayAllocationFailed;
+    if (!relativeEntryReachable(site,reinterpret_cast<uintptr_t>(relay))) {
+        release(relay);return EntryInstallResult::RelayOutOfRange;
+    }
+    const auto code=entryRelayBytes(uint64_t(replacement));
+    for (size_t byte=0;byte<code.size();++byte) relay[byte]=code[byte];
+    if (!seal(relay,code.size())) { release(relay);return EntryInstallResult::RelayProtectionFailed; }
+    if (!install(relay)) { release(relay);return EntryInstallResult::HookRefused; }
+    // The game can enter this page now. It shares its CodeHook's explicit
+    // process lifetime, including a later entry's partial install failure.
+    return EntryInstallResult::Installed;
+}
 constexpr bool supportedBuildIdentity(bool known, uint32_t stamp, uint32_t imageSize,
                                       uint32_t supportedStamp, uint32_t supportedImageSize) noexcept {
     return known && stamp == supportedStamp && imageSize == supportedImageSize;

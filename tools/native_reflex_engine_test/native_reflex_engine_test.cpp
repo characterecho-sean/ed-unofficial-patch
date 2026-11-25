@@ -91,6 +91,47 @@ void supportedIdentity() {
           !engine_detail::supportedBuildIdentity(true,stamp,0,stamp,image),
           "an unreadable or partial PE identity cannot admit any hook");
 }
+void distantReplacement() {
+    std::array<uint8_t,14> relay{};
+    const uintptr_t site=reinterpret_cast<uintptr_t>(relay.data())+0x10000;
+    const uintptr_t replacement=site+uintptr_t(0x200000000ull);
+    unsigned allocations=0,seals=0,installs=0,releases=0;
+    const auto result=engine_detail::installEntryRelay(site,replacement,
+        [&](uintptr_t at) { ++allocations;return at==site?relay.data():nullptr; },
+        [&](uint8_t*,size_t) { ++seals;return true; },
+        [&](void* destination) { ++installs;return engine_detail::relativeEntryReachable(site,reinterpret_cast<uintptr_t>(destination)); },
+        [&](uint8_t*) { ++releases; });
+    check(!engine_detail::relativeEntryReachable(site,replacement),
+          "distant DLL callback reproduces CodeHook's direct rel32 refusal");
+    check(result==engine_detail::EntryInstallResult::Installed&&allocations==1&&seals==1&&installs==1&&!releases,
+          "distant callback installs through a nearby sealed entry relay rather than the DLL address");
+    uint64_t encoded=0;std::memcpy(&encoded,relay.data()+6,sizeof(encoded));
+    check(relay[0]==0xFF&&relay[1]==0x25&&!relay[2]&&!relay[3]&&!relay[4]&&!relay[5]&&encoded==replacement,
+          "relay is a register-preserving absolute tail jump with the complete distant pointer");
+    const uintptr_t next=site+5;
+    check(engine_detail::relativeEntryReachable(site,next+uintptr_t(INT32_MAX))&&
+          !engine_detail::relativeEntryReachable(site,next+uintptr_t(INT32_MAX)+1)&&
+          engine_detail::relativeEntryReachable(site,next-uintptr_t(INT32_MAX)-1)&&
+          !engine_detail::relativeEntryReachable(site,next-uintptr_t(INT32_MAX)-2)&&
+          !engine_detail::relativeEntryReachable(UINTPTR_MAX-4,site),
+          "relative jump admission includes exact signed32 limits and refuses address wrap");
+    for (unsigned refusal=0;refusal<4;++refusal) {
+        relay.fill(0xA5);allocations=seals=installs=releases=0;
+        const uintptr_t attemptedSite=refusal==1?site+uintptr_t(0x200000000ull):site;
+        const auto failed=engine_detail::installEntryRelay(attemptedSite,replacement,
+            [&](uintptr_t) { ++allocations;return refusal==0?nullptr:relay.data(); },
+            [&](uint8_t*,size_t bytes) { ++seals;return bytes==14&&refusal!=2; },
+            [&](void*) { ++installs;return refusal!=3; },
+            [&](uint8_t* page) { if (page==relay.data()) ++releases; });
+        const auto expected=refusal==0?engine_detail::EntryInstallResult::RelayAllocationFailed:
+            refusal==1?engine_detail::EntryInstallResult::RelayOutOfRange:
+            refusal==2?engine_detail::EntryInstallResult::RelayProtectionFailed:engine_detail::EntryInstallResult::HookRefused;
+        check(failed==expected&&allocations==1&&releases==(refusal?1u:0u)&&
+              seals==(refusal>=2?1u:0u)&&installs==(refusal==3?1u:0u)&&
+              (refusal!=1||relay[0]==0xA5),
+              "allocation, out-of-range, executable protection, and hook refusal free only unpublished relays");
+    }
+}
 void retainedJobs() {
     FrameBoundaryCallbacks observer{};
     engine_detail::TicketRegistry<2> registry;
@@ -168,7 +209,7 @@ int main(int argc, char** argv) {
     if (argc > 1 && !std::strcmp(argv[1], "--dry-run")) {
         std::puts("native_reflex_engine_test: dry-run (no game hooks or graphics)"); return 0;
     }
-    callbackOrder(); exceptionalForward(); callbackTable(); inputTokens(); supportedIdentity(); retainedJobs(); mirrorSources();
+    callbackOrder(); exceptionalForward(); callbackTable(); inputTokens(); supportedIdentity(); distantReplacement(); retainedJobs(); mirrorSources();
     std::printf("native_reflex_engine_test: %u checks, %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }

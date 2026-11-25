@@ -327,6 +327,39 @@ bool prepareOriginal(void* trampoline, void* context) noexcept {
     static_cast<std::atomic<void*>*>(context)->store(trampoline, std::memory_order_release);
     return true;
 }
+// Same VirtualQuery/free-region search as the existing net_keepalive and
+// object-record writer relays. CodeHook owns prologue relocation; this page
+// only bridges the rel32 entry patch to a possibly distant DLL callback.
+uint8_t* reserveEntryRelay(uintptr_t target) noexcept {
+    SYSTEM_INFO info{};GetSystemInfo(&info);
+    const uintptr_t granularity=info.dwAllocationGranularity;
+    const uintptr_t floor=reinterpret_cast<uintptr_t>(info.lpMinimumApplicationAddress);
+    const uintptr_t ceiling=reinterpret_cast<uintptr_t>(info.lpMaximumApplicationAddress);
+    if (!granularity || (granularity&(granularity-1)) || floor>=ceiling || target<floor || target>ceiling) return nullptr;
+    const uintptr_t distance=uintptr_t(INT32_MAX)-0x10000u;
+    uintptr_t at=target-floor>distance?target-distance:floor;
+    const uintptr_t limit=ceiling-target>distance?target+distance:ceiling;
+    while (at<limit) {
+        MEMORY_BASIC_INFORMATION region{};
+        if (!VirtualQuery(reinterpret_cast<void*>(at),&region,sizeof(region))) break;
+        const uintptr_t start=reinterpret_cast<uintptr_t>(region.BaseAddress);
+        if (region.RegionSize>UINTPTR_MAX-start) break;
+        const uintptr_t end=start+region.RegionSize;
+        if (region.State==MEM_FREE) {
+            uintptr_t candidate=at>start?at:start;
+            if (candidate>UINTPTR_MAX-(granularity-1)) break;
+            candidate=(candidate+granularity-1)&~(granularity-1);
+            if (candidate<limit && candidate<end && end-candidate>=4096) {
+                auto* page=static_cast<uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(candidate),4096,
+                    MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+                if (page) return page;
+            }
+        }
+        if (end<=at) break;
+        at=end;
+    }
+    return nullptr;
+}
 bool verifyPins(uintptr_t base) noexcept {
     struct Pin { uint32_t rva; const char* hex; };
     // Known-build pins compare exactly; gamePinMatches masks only fields
@@ -416,9 +449,22 @@ bool installOnce() noexcept {
         auto* hook = new (std::nothrow) CodeHook;
         if (!hook) { status.store("allocation_failed", std::memory_order_release); return false; }
         void* unused = nullptr;
-        if (!hook->install(reinterpret_cast<void*>(target.address), target.replacement, &unused,
-                           target.name, prepareOriginal, target.original)) {
-            delete hook; status.store("entry_hook_refused", std::memory_order_release); return false;
+        const auto result=engine_detail::installEntryRelay(target.address,reinterpret_cast<uintptr_t>(target.replacement),
+            reserveEntryRelay,
+            [](uint8_t* page,size_t bytes) {
+                DWORD oldProtect=0;
+                return VirtualProtect(page,4096,PAGE_EXECUTE_READ,&oldProtect) &&
+                    FlushInstructionCache(GetCurrentProcess(),page,bytes);
+            },
+            [&](void* relay) { return hook->install(reinterpret_cast<void*>(target.address),relay,&unused,
+                target.name,prepareOriginal,target.original); },
+            [](uint8_t* page) { VirtualFree(page,0,MEM_RELEASE); });
+        if (result!=engine_detail::EntryInstallResult::Installed) {
+            delete hook;
+            const char* reason=result==engine_detail::EntryInstallResult::RelayAllocationFailed?"entry_relay_allocation_failed":
+                result==engine_detail::EntryInstallResult::RelayOutOfRange?"entry_relay_out_of_range":
+                result==engine_detail::EntryInstallResult::RelayProtectionFailed?"entry_relay_protection_failed":"entry_hook_refused";
+            status.store(reason,std::memory_order_release);return false;
         }
     }
     installed.store(true, std::memory_order_release);
