@@ -495,7 +495,6 @@ FrameDriver* startFrameSession(ID3D11Device* device, uint64_t generation) {
     auto session = std::make_shared<FrameSession>();
     session->pclReady = inputGateInstallMessageObserver() && pcl::initialize();
     session->detailedReports.store(Config::get().getBool("advanced.app_gpu_timing", false), std::memory_order_relaxed);
-    inputGateInstall();
     session->device = device;
     session->generation = generation;
     session->producerThread = GetCurrentThreadId();

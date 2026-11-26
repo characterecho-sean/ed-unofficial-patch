@@ -17,10 +17,6 @@
 // as absent (0, not valid), and the consumer falls back to the producer's
 // application time.
 #define EDVR_NATIVE_TIMING_VERSION_5 5u
-// Version 6 of the table keeps its shape. Only the eye 5/6 SegmentEnd calls
-// gain a definition for accepted=0: the selected image is cropped or flipped.
-// A version 3 host cannot provide full-image proof to the input diagnostic.
-#define EDVR_NATIVE_TIMING_VERSION_6 6u
 // Private paired-module measurement capability. Acquire binds the producer;
 // gpuEye runs only on that thread. All other callbacks are CPU-only and may
 // run on the XR owner. The host retains the module/device through close.

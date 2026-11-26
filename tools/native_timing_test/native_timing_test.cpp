@@ -1,7 +1,5 @@
 #include "../../src/common/native_timing.h"
 #include "../../src/d3d11/native_timing.h"
-#include "../../src/d3d11/input_latency_probe.h"
-#include <cwchar>
 #include "../../src/common/gpu_frame_protocol.h"
 #include "../../src/common/config.h"
 #include "../../src/common/system_d3d11.h"
@@ -44,57 +42,6 @@ static EdvrNativeTimingTable acquire(ID3D11Device* d,uint64_t gen,Checks& c){
     EdvrNativeTimingRequest r{sizeof(r),EDVR_NATIVE_TIMING_VERSION_3,d,gen};EdvrNativeTimingTable t{sizeof(t),EDVR_NATIVE_TIMING_VERSION_3};
     c.check(edvrAcquireNativeTiming(&r,&t)==S_OK&&t.context,"acquire");return t;
 }
-// Use the public timing table and an independent sender view on a private WARP
-// device. Submit acceptance must remain available even when probe pixels lack
-// positive full-image bounds (including an old version 3 runtime).
-static void checkProbeEyeBounds(ID3D11Device* device, Checks& checks, uint32_t version, bool fullImage) {
-    using namespace edvr::input_latency_probe;
-    EdvrNativeTimingRequest request{sizeof(request), version, device, 42};
-    EdvrNativeTimingTable table{sizeof(table), version};
-    checks.check(edvrAcquireNativeTiming(&request, &table) == S_OK, "bounds fixture acquires negotiated timing table");
-    if (!table.context) return;
-    configure(device, true, edvr::native_reflex::Mode::Off, 42);
-    FILETIME created{}, exited{}, kernel{}, user{};
-    GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
-    wchar_t name[128]{};
-    std::swprintf(name, 128, L"%ls%lu.%llu", kMappingPrefix, GetCurrentProcessId(),
-                  (uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime);
-    HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, name);
-    auto* shared = mapping ? static_cast<Shared*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(Shared))) : nullptr;
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = desc.Height = 32; desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.BindFlags = D3D11_BIND_RENDER_TARGET;
-    ComPtr<ID3D11Texture2D> texture;
-    checks.check(enabled() && shared && SUCCEEDED(device->CreateTexture2D(&desc, nullptr, &texture)),
-                 "bounds fixture opens receiver and allocates a supported texture");
-    if (shared && texture) {
-        const auto sequence = waitValid(table, checks);
-        mouseButton(device, false, 1);
-        LARGE_INTEGER stamp{};
-        QueryPerformanceCounter(&stamp);
-        auto* state = reinterpret_cast<volatile LONG64*>(&shared->state);
-        checks.check(InterlockedCompareExchange64(state, LONG64(Phase::Reserved), LONG64(Phase::Idle)) == LONG64(Phase::Idle),
-                     "bounds fixture exclusively reserves its request");
-        shared->request = 1; shared->sentQpc = uint64_t(stamp.QuadPart);
-        checks.check(InterlockedCompareExchange64(state, LONG64(Phase::Armed), LONG64(Phase::Reserved)) == LONG64(Phase::Reserved),
-                     "bounds fixture publishes the completed input request");
-        mouseButton(device, true, 1);
-        checks.check(shared->state == uint64_t(Phase::Consumed), "bounds fixture consumes an owned press");
-        checks.check(table.gpuEye(table.context, sequence, 0, 1, 0, texture.Get()) &&
-                     table.gpuEye(table.context, sequence, 5, 0, fullImage ? 1u : 0u, texture.Get()) &&
-                     table.gpuEye(table.context, sequence, 0, 0, 1, texture.Get()),
-                     "ordinary GPU markers and submit succeed for every supported bounds route");
-        const bool proven = version == EDVR_NATIVE_TIMING_VERSION_6 && fullImage;
-        checks.check(shared->state == uint64_t(proven ? Phase::Rendering : Phase::Rejected) &&
-                     shared->reason == uint64_t(proven ? Refusal::None : Refusal::TextureUnsupported),
-                     "only a version 6 positive full-image receipt can render probe pixels");
-    }
-    stop();
-    if (shared) UnmapViewOfFile(shared);
-    if (mapping) CloseHandle(mapping);
-    table.close(table.context);
-}
-
 int wmain(int argc,wchar_t** argv){
     if(argc!=2)return 2;if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_timing_test: dry-run (no WARP device)");return 0;}if(std::wcscmp(argv[1],L"--self-test"))return 2;
     SetErrorMode(3);
@@ -226,10 +173,6 @@ int wmain(int argc,wchar_t** argv){
             last.outputHeight[0]==678&&last.gameFov[0][0]==-.75f&&last.featureEpoch==42&&last.treatments[0]==7,
             "version three metadata travels with its own completion");
     c.check(t3.close(t3.context)==S_OK,"queue pressure context closes");
-    gpuEnabled = true;
-    checkProbeEyeBounds(d.Get(), c, EDVR_NATIVE_TIMING_VERSION_3, true);
-    checkProbeEyeBounds(d.Get(), c, EDVR_NATIVE_TIMING_VERSION_6, false);
-    checkProbeEyeBounds(d.Get(), c, EDVR_NATIVE_TIMING_VERSION_6, true);
     EdvrNativeTimingRequest old{sizeof(old),2,d.Get(),10};
     EdvrNativeTimingTable modern{sizeof(modern),EDVR_NATIVE_TIMING_VERSION_3};
     c.check(edvrAcquireNativeTiming(&old,&modern)==E_INVALIDARG,"version two cannot silently use version three frame semantics");

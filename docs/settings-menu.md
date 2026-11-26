@@ -308,9 +308,7 @@ after 4, 16 and 64 successful game Presents (`native_reflex_readback`). A
 failed owned withdrawal, or an enabled/unknown final Off readback, schedules
 bounded retries after 4, 16 and 64 subsequent successful Presents. Normal VR
 shutdown retains one final Off attempt. F8 shows driver proof or failure
-separately from the saved choice. The optional latency diagnostic stays retired
-until the requested mode has matching proof; it cannot label an unconfirmed
-driver state as Off.
+separately from the saved choice.
 
 The driver reports the effective low latency bit. Boost is recorded as a
 request, and its effect would need a GPU clock measurement. The feature uses

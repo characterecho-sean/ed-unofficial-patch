@@ -1,5 +1,4 @@
 #include "native_timing.h"
-#include "input_latency_probe.h"
 #include "map_wait.h"
 #include "../common/gpu_frame_protocol.h"
 #include "../common/config.h"
@@ -26,7 +25,6 @@ constexpr double kMaxFieldMs = 600000.0;            // malformed input guard
 
 struct Context {
     bool active = false;
-    bool suppliesEyeBounds = false;
     ID3D11Device* device = nullptr;
     DWORD producer = 0;
     uint64_t generation = 0;
@@ -280,12 +278,7 @@ uint32_t WINAPI gpuEye(void* p, uint64_t sequence, uint32_t eye, uint32_t begin,
     if (eye == 3u || eye == 4u || (eye >= 5u && eye <= 6u)) {
         if (GetCurrentThreadId() != c->producer) return 0;
         if (eye >= 5u) {
-            if (begin != 0 || accepted > 1 || (!c->suppliesEyeBounds && !accepted) || !texture || !c->waitValid || c->published) return 0;
-            // This is the final treated eye texture, before runtime transfer.
-            // The diagnostic's response therefore follows the game's actual
-            // input receipt and is not paired to an unrelated next Present.
-            if (edvr::input_latency_probe::enabled())
-                edvr::input_latency_probe::eyeRendered(c->device, texture, sequence, eye - 5u, c->suppliesEyeBounds && accepted);
+            if (begin != 0 || accepted != 1 || !texture || !c->waitValid || c->published) return 0;
             return edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
                 static_cast<unsigned>(edvr::GpuFrameEvent::SegmentEnd), sequence,
                 eye - 5u, 1u, texture) ? 1u : 0u;
@@ -317,8 +310,6 @@ uint32_t WINAPI gpuEye(void* p, uint64_t sequence, uint32_t eye, uint32_t begin,
     const auto event = begin ? edvr::GpuFrameEvent::SubmitBegin : edvr::GpuFrameEvent::SubmitEnd;
     const uint64_t result = edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
         static_cast<unsigned>(event), sequence, eye, begin ? 0u : (accepted ? 1u : 0u), texture);
-    if (!begin && edvr::input_latency_probe::enabled())
-        edvr::input_latency_probe::eyeSubmitted(sequence, eye, accepted != 0);
     if (result && begin) c->opened |= bit;
     // GPU timing can be disabled or lack a covered render command. Its own
     // controller handles validity; CPU wall measurements remain independent.
@@ -599,18 +590,15 @@ extern "C" HRESULT WINAPI edvrReadNativePresentTrace(
 
 extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest* request,
                                                     EdvrNativeTimingTable* table) {
-    if (!table || table->size != sizeof(*table) ||
-        (table->version != EDVR_NATIVE_TIMING_VERSION_3 && table->version != EDVR_NATIVE_TIMING_VERSION_6))
+    if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_TIMING_VERSION_3)
         return E_INVALIDARG;
-    const uint32_t version = table->version;
-    *table = {sizeof(*table), version};
-    if (!request || request->size != sizeof(*request) || request->version != version ||
+    *table = {sizeof(*table), EDVR_NATIVE_TIMING_VERSION_3};
+    if (!request || request->size != sizeof(*request) || request->version != EDVR_NATIVE_TIMING_VERSION_3 ||
         !request->device || !request->generation) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(lifetime);
     if (current || used == kCapacity) return E_PENDING;
     Context& c = pool[used++];
     c = {}; c.active = true; c.device = request->device; c.producer = GetCurrentThreadId();
-    c.suppliesEyeBounds = version == EDVR_NATIVE_TIMING_VERSION_6;
     c.generation = request->generation; current = &c;
     // The Map-wait totals have one consumer, the publish line below, and it
     // lives exactly as long as this context. Arm its collection with it, so

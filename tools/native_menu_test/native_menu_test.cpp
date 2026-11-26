@@ -14,8 +14,6 @@
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/runtime_profile.h"
 #include "../../src/d3d11/gpu_census.h"
-#include "../../src/d3d11/input_latency_probe.h"
-#include "../../src/d3d11/native_reflex_engine_hook.h"
 #include "../../src/d3d11/native_reflex_pcl.h"
 #include "../../src/d3d11/native_reflex_session.h"
 #include <openxr/openxr.h>
@@ -50,19 +48,10 @@ thread_local bool g_flatComputeInternal = false;
 // perfMonitorNoteEvent above.
 bool gpuCensusBegin(ID3D11DeviceContext*, GpuCensusSection) noexcept { return false; }
 void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
-// This menu rig links input_gate for its normal input routing, but does not
-// enable or exercise the separately tested latency probe.
-namespace input_latency_probe {
-void mouseButton(void*, bool, unsigned) noexcept {}
-void mouseReadLost(void*) noexcept {}
-void keyboardState(void*, const uint8_t*, uint64_t) noexcept {}
-void keyboardBuffered(void*, unsigned, bool, uint64_t, uint64_t) noexcept {}
-void keyboardReadLost(void*) noexcept {}
-}
+// The menu rig links the real input gate. Its Reflex transport is exercised in the session rig.
 namespace native_reflex {
 void shutdownFrameTelemetry() noexcept {}
 void mouseMessageRemoved(bool) noexcept {}
-uint64_t currentInputFrameToken() noexcept { return 0; }
 namespace pcl {
 bool messageRemoved(uint32_t) noexcept { return false; }
 }

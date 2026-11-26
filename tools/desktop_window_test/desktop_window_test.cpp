@@ -1148,26 +1148,20 @@ static void wiring(const std::string& root) {
         check(fn != std::string::npos && census != std::string::npos && take != std::string::npos && at(cpp, "desktopWindowCursorPublishCentre(centre.x, centre.y);") != std::string::npos,
               "the cursor line is written after the census line, and the client centre is published");
     }
-    // The DirectInput mouse's cooperative-level observer forwards the driver result unchanged and logs only captured game mice, in the VR scope.
+    // The DirectInput mouse: only its cooperative level is observed, the driver's answer is forwarded first and returned unchanged, in the VR scope.
     auto mouseObserved = [&](const std::string& t) {
-        const std::string hook = between(t, "HRESULT STDMETHODCALLTYPE mouseSetCooperativeLevel(", "template <size_t... Index>\nvoid captureMouseTable(");
+        const std::string hook = between(t, "HRESULT STDMETHODCALLTYPE hookMouseSetCooperativeLevel(", "void captureMouse(");
         const size_t branch = at(t, "} else if (isMouseGuid(guid)) {");
         return at(t, "constexpr size_t kSlotSetCooperativeLevel = 13;") != std::string::npos &&
-               at(hook, "const HRESULT result = g_mouseDoors[Index].originalCooperative(self, hwnd, flags);") != std::string::npos &&
-               at(hook, "if (isGameMouse(self)) desktopWindowNoteMouseCooperative(flags, result);") != std::string::npos &&
-               at(hook, "return result;") != std::string::npos &&
-               at(hook, "originalCooperative(self, hwnd, flags)") < at(hook, "desktopWindowNoteMouseCooperative") &&
+               at(hook, "const HRESULT hr = g_mouseDoor.original(self, hwnd, flags);") != std::string::npos && at(hook, "desktopWindowNoteMouseCooperative(flags, hr);") != std::string::npos &&
+               at(hook, "return hr;") != std::string::npos && at(hook, "original(self, hwnd, flags)") < at(hook, "desktopWindowNoteMouseCooperative") &&
                branch != std::string::npos && at(t, "if (runtimeScopeIncludesVr()) guardedBudget(g_budgetDi, [&] { captureMouse(*device); });", branch) != std::string::npos &&
-               at(t, "reader.hook.replace(kSlotSetCooperativeLevel,") != std::string::npos &&
-               at(t, "cooperativeHooks[] = {&mouseSetCooperativeLevel<Index>...};") != std::string::npos &&
-               count(t, "kSlotSetCooperativeLevel,") == 1;
+               at(t, "d.hook.replace(kSlotSetCooperativeLevel,") != std::string::npos && count(t, "kSlotSetCooperativeLevel,") == 1;
     };
     check(mouseObserved(gate), "the game's DirectInput mouse: SetCooperativeLevel (slot 13) is forwarded first and its flags are logged, in the VR scope");
     check(!mouseObserved(replaced(gate, "if (runtimeScopeIncludesVr()) guardedBudget(g_budgetDi, [&] { captureMouse(*device); });", "guardedBudget(g_budgetDi, [&] { captureMouse(*device); });")),
           "control: a mouse watched in every scope trips the pin");
-    check(!mouseObserved(replaced(gate, "const HRESULT result = g_mouseDoors[Index].originalCooperative(self, hwnd, flags);", "const HRESULT result = S_OK;")), "control: a SetCooperativeLevel that does not reach the driver trips the pin");
-    check(!mouseObserved(replaced(gate, "if (isGameMouse(self)) desktopWindowNoteMouseCooperative(flags, result);", "desktopWindowNoteMouseCooperative(flags, result);")),
-          "control: logging a foreign shared-table mouse trips the pin");
+    check(!mouseObserved(replaced(gate, "const HRESULT hr = g_mouseDoor.original(self, hwnd, flags);", "const HRESULT hr = S_OK;")), "control: a SetCooperativeLevel that does not reach the driver trips the pin");
 
     // The build: the export, the source, the shaders, and the rig itself.
     check(count(build, "desktop_window_cursor.cpp") == 3, "build.bat compiles the cursor module into the DLL and into the two rigs that compile input_gate.cpp");

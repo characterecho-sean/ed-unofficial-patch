@@ -2398,12 +2398,7 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       }
       if(appOpened && !timing.applicationSegment(timingSequence,false)) timingInvalidate();
       if(timingGpuBegun[unsigned(eye)] &&
-          // A successful treatment may replace the source (for example DLSS).
-          // The diagnostic response must be in the actual transfer source.
-          !timing.producerSegmentEnd(timingSequence,unsigned(eye),
-              treated ? treated.Get() : submittedSource.Get(),
-              r == vr::VRCompositorError_None && treatedBounds.uMin == 0.f && treatedBounds.vMin == 0.f &&
-              treatedBounds.uMax == 1.f && treatedBounds.vMax == 1.f))
+          !timing.producerSegmentEnd(timingSequence,unsigned(eye),submittedSource.Get()))
         timingInvalidate();
       workClock=workClock&&counterNow(&workEnded);
     };

@@ -12,8 +12,6 @@
 namespace edvr::native_reflex::detail {
 namespace {
 
-constexpr char kNonNvidiaAdapter[] = "non_nvidia_adapter";
-
 using Query = void* (__cdecl*)(uint32_t);
 using Initialize = int (__cdecl*)();
 using SetMode = int (__cdecl*)(IUnknown*, SetSleepMode*);
@@ -118,7 +116,7 @@ const char* deviceRefusal(ID3D11Device* device) {
     if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgi))) ||
         FAILED(dxgi->GetAdapter(&adapter)) || FAILED(adapter->GetDesc(&desc)))
         return "adapter_unavailable";
-    return desc.VendorId != 0x10de ? kNonNvidiaAdapter : nullptr;
+    return desc.VendorId != 0x10de ? "non_nvidia_adapter" : nullptr;
 }
 
 int readStatus(ID3D11Device* device, const Driver& driver, GetSleepStatus& status) {
@@ -240,10 +238,6 @@ void logMode(Mode mode, const char* event, uint64_t session, const Result& resul
 }  // namespace edvr::native_reflex::detail
 
 namespace edvr::native_reflex {
-
-bool isNonNvidiaAdapter(ID3D11Device* device) {
-    return detail::deviceRefusal(device) == detail::kNonNvidiaAdapter;
-}
 
 FrameDriver::FrameDriver(ID3D11Device* device, bool ownGameSleep)
     : device_(device), firstSleep_(ownGameSleep) {

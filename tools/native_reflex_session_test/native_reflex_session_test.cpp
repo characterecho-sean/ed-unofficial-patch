@@ -24,7 +24,7 @@ std::vector<Mark> marks;
 std::vector<uint64_t> inputFrames;
 std::atomic<const edvr::native_reflex::FrameBoundaryCallbacks*> enrolled{nullptr};
 thread_local uint64_t lateToken = 0;
-unsigned initialized = 0, shutDown = 0, inputInstalls = 0, detailRows = 0;
+unsigned initialized = 0, shutDown = 0, observerInstalls = 0, inputInstalls = 0, detailRows = 0;
 bool collectDetail = false, messageObserverReady = true;
 }
 
@@ -39,7 +39,7 @@ bool Config::getBool(const char* key, bool fallback) const {
     return std::strcmp(key, "advanced.app_gpu_timing") == 0 ? rig::collectDetail : fallback;
 }
 void breadcrumb(const char*) {}
-bool inputGateInstallMessageObserver() { return rig::messageObserverReady; }
+bool inputGateInstallMessageObserver() { ++rig::observerInstalls; return rig::messageObserverReady; }
 void inputGateInstall() { ++rig::inputInstalls; }
 }
 namespace edvr::native_reflex {
@@ -170,8 +170,10 @@ void acquisition(Graphics& graphics, Graphics& foreign, EdvrNativeReflexFrameTab
     auto missing = emptyTable();
     check(acquire(graphics.device.Get(), 41, missing) == E_PENDING, "provider refuses enrollment without an active native session");
     const auto* driver = startFrameSession(graphics.device.Get(), 41);
-    check(!driver && activeSession() && !activeSession()->driver && rig::enrolled.load() && rig::initialized == 1 &&
-          rig::inputInstalls == 1, "WARP retains a PCL-only production session without a hardware Reflex driver");
+    check(!driver && activeSession() && !activeSession()->driver && rig::enrolled.load() && rig::initialized == 1,
+          "WARP retains a PCL-only production session without a hardware Reflex driver");
+    check(rig::observerInstalls == 1 && rig::inputInstalls == 0,
+          "Reflex session enrollment installs only the passive message observer and leaves keyboard capture to the menu");
     auto bad = emptyTable();
     EdvrNativeReflexFrameRequest request{sizeof(request), 1, graphics.device.Get(), 41};
     check(edvrAcquireNativeReflexFrame(nullptr, &bad) == E_INVALIDARG &&

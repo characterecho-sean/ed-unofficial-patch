@@ -233,18 +233,6 @@ set "REFLEX=%ROOT%\third_party\reflex"
 if defined EDUP_REFLEX_SDK set "REFLEX=%EDUP_REFLEX_SDK%"
 set "REFLEXFLAGS=/DEDVR_HAVE_REFLEX_PCL=0"
 if /I not "%REFLEX%"=="none" set REFLEXFLAGS=/DEDVR_HAVE_REFLEX_PCL=1 /I"%REFLEX%\Reflex_Stats"
-REM Python cannot call compiler-only Interlocked intrinsics through kernel32.
-REM Keep the diagnostic atomic bridge with build tools, outside game packages.
-if not defined EDUP_COMPILE_ONLY (
-    if not exist "%BUILD%\tools" mkdir "%BUILD%\tools"
-    if not exist "%OBJ%\input_latency_tools" mkdir "%OBJ%\input_latency_tools"
-    cl.exe /nologo /LD /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-        /Fo"%OBJ%\input_latency_tools"\ /Fe"%BUILD%\tools\input_latency_atomic.dll" ^
-        "tools\input_latency_atomic.cpp" /link /INCREMENTAL:NO ^
-        /IMPLIB:"%OBJ%\input_latency_tools\input_latency_atomic.lib" kernel32.lib
-    if errorlevel 1 exit /b 1
-    python tools\input_latency_probe.py --self-test-atomic-helper || exit /b 1
-)
 REM A compile-only build is not validation and skips the Python gates; the
 REM full build runs every one of them.
 if defined EDUP_COMPILE_ONLY goto python_gates_done
@@ -292,7 +280,6 @@ python tools\run_jobs.py ^
     --gate "tools\build_diff.py --self-test" ^
     --gate "tools\effects_arc.py --self-test" ^
     --gate "tools\build_receipt.py --self-test" ^
-    --gate "tools\input_latency_probe.py --self-test" ^
     --gate "tools\compile_only.py --self-test" ^
     --gate "tools\linux_toolchain.py --self-test" ^
     --gate "tools\build_lock.py --self-test" ^
@@ -828,7 +815,7 @@ python tools\compile_cache.py --prune --keep thunks.obj --keep weapon_ui_getter_
     "src\d3d11\desktop_window.cpp" "src\d3d11\desktop_window_cursor.cpp" ^
 
     "src\d3d11\native_sharpen.cpp" ^
-    "src\d3d11\native_frame.cpp" "src\d3d11\native_reflex.cpp" "src\d3d11\input_latency_probe.cpp" ^
+    "src\d3d11\native_frame.cpp" "src\d3d11\native_reflex.cpp" ^
     "src\d3d11\native_reflex_engine_hook.cpp" "src\d3d11\native_reflex_session.cpp" "src\d3d11\native_reflex_pcl.cpp" ^
     "src\d3d11\native_timing.cpp" ^
     "src\d3d11\map_wait.cpp" ^
@@ -1316,7 +1303,7 @@ if errorlevel 1 ( echo [edup] ERROR: weapon UI getter probe fixture assembly bui
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_frame\\" /Fe"%BUILD%\native_frame_test.exe" ^
-    "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" "src\d3d11\input_latency_probe.cpp" ^
+    "tools\native_frame_test\native_frame_test.cpp" "src\d3d11\native_frame.cpp" ^
     "%OBJ%\native_frame\weapon_ui_getter_probe.obj" "%OBJ%\native_frame\weapon_ui_getter_probe_test.obj" ^
     "src\d3d11\native_render_settings.cpp" "src\common\vscreen_auto_state.cpp" "src\common\iniedit.cpp" ^
     "src\common\config.cpp" "src\common\frame_flag.cpp" "src\common\log.cpp" ^
@@ -1324,17 +1311,6 @@ if errorlevel 1 ( echo [edup] ERROR: weapon UI getter probe fixture assembly bui
 if errorlevel 1 ( echo [edup] ERROR: native frame provider test build failed & exit /b 1 )
 "%BUILD%\native_frame_test.exe" --dry-run || exit /b 1
 "%BUILD%\native_frame_test.exe" --self-test || exit /b 1
-exit /b 0
-
-:rig_input_latency_test
-echo [edup] === input_latency_test.exe ===
-if not exist "%OBJ%\input_latency" mkdir "%OBJ%\input_latency"
-%CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-    /Fo"%OBJ%\input_latency"\ /Fe"%BUILD%\input_latency_test.exe" ^
-    "tools\input_latency_test\input_latency_test.cpp" /link /INCREMENTAL:NO kernel32.lib
-if errorlevel 1 ( echo [edup] ERROR: input latency test build failed & exit /b 1 )
-"%BUILD%\input_latency_test.exe" --dry-run || exit /b 1
-"%BUILD%\input_latency_test.exe" --self-test || exit /b 1
 exit /b 0
 
 :rig_native_reflex_test
@@ -1564,7 +1540,7 @@ if not exist "%OBJ%\native_timing" mkdir "%OBJ%\native_timing"
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE ^
     /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_timing_test.exe" ^
-    "tools\native_timing_test\native_timing_test.cpp" "src\d3d11\native_timing.cpp" "src\d3d11\map_wait.cpp" "src\d3d11\input_latency_probe.cpp" ^
+    "tools\native_timing_test\native_timing_test.cpp" "src\d3d11\native_timing.cpp" "src\d3d11\map_wait.cpp" ^
     "src\common\config.cpp" "src\common\log.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib
 if errorlevel 1 ( echo [edup] ERROR: native timing contract test build failed & exit /b 1 )
@@ -1577,7 +1553,7 @@ if errorlevel 1 ( echo [edup] ERROR: native perf history test build failed & exi
 %CC% /nologo /O2 /MT /std:c++17 /EHsc /W4 /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
     /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE /I"third_party\openxr\include" ^
     /Fo"%OBJ%\native_timing\\" /Fe"%BUILD%\native_timing_gpu_test.exe" ^
-    "tools\native_timing_test\native_timing_gpu_test.cpp" "src\d3d11\native_timing.cpp" "src\d3d11\map_wait.cpp" "src\d3d11\input_latency_probe.cpp" ^
+    "tools\native_timing_test\native_timing_gpu_test.cpp" "src\d3d11\native_timing.cpp" "src\d3d11\map_wait.cpp" ^
     "src\d3d11\gpu_timing.cpp" "src\d3d11\gpu_frame_timing.cpp" "src\d3d11\gpu_span_d3d11.cpp" ^
     "src\common\log.cpp" "src\common\config.cpp" "src\common\proxy.cpp" "src\common\guard.cpp" ^
     /link /INCREMENTAL:NO kernel32.lib user32.lib version.lib

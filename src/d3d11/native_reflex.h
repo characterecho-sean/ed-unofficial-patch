@@ -99,15 +99,12 @@ constexpr const char* modeStatusHint(ModeStatus status, bool canEnable) noexcept
 // and close. Cleanup ownership begins when an enable request is accepted.
 class ModeHistory {
 public:
-    // Lets the provider retire active measurements before issuing a write.
-    bool requestDue(Mode mode, bool frameDriver) const noexcept {
-        return !noted_ || mode != requested_ || frameDriver != frameDriver_ || (retryNeeded_ && !retryDelay_);
-    }
-
     bool change(Mode mode, bool frameDriver = false) noexcept {
-        if (!requestDue(mode, frameDriver)) return false;
-        if (mode != requested_ || frameDriver != frameDriver_)
+        if (noted_ && mode == requested_ && frameDriver == frameDriver_) {
+            if (!retryNeeded_ || retryDelay_) return false;
+        } else {
             withdrawalRetries_ = 0;
+        }
         requested_ = mode;
         frameDriver_ = frameDriver;
         noted_ = true;
@@ -121,8 +118,8 @@ public:
     Mode requested() const noexcept { return requested_; }
     ModeStatus status() const noexcept { return status_; }
 
-    // Only label a sample when the driver accepted the request and its latest
-    // latency bit agrees. NVAPI has no independent Boost readback bit.
+    // Confirmation requires an accepted request and matching latency bit.
+    // NVAPI has no independent Boost readback bit.
     std::optional<Mode> confirmedMode() const noexcept {
         switch (status_) {
             case ModeStatus::ConfirmedOff: return Mode::Off;
@@ -507,10 +504,6 @@ private:
 // adapter once and refuse existing driver policy. A stale game-sleep bit can
 // be carried over only from an accepted ED-UP Sleep on this same device.
 std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device);
-
-// A verified non-NVIDIA device can measure response with Reflex Off, even
-// without a frame driver. Unknown adapters and NVIDIA policy need readback.
-bool isNonNvidiaAdapter(ID3D11Device* device);
 
 // Return true when a request first arrives, changes or retries. Accepted
 // requests begin a new observation window on the same device.
