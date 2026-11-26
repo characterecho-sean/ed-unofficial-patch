@@ -8,8 +8,8 @@ namespace edvr::native_reflex {
 
 enum class Mode : uint8_t { Off, On, Boost };
 
-// Older profiles shipped "auto". Treat it as the new default, On, even
-// before the installer has migrated the file. Unrecognized words stay Off.
+// Older profiles shipped "auto". It follows the current default, Off,
+// even before installer migration. Unrecognized words also resolve to Off.
 constexpr Mode parseMode(std::string_view word) noexcept {
     const auto matches = [word](std::string_view expected) {
         if (word.size() != expected.size()) return false;
@@ -19,7 +19,7 @@ constexpr Mode parseMode(std::string_view word) noexcept {
         }
         return true;
     };
-    if (matches("on") || matches("auto")) return Mode::On;
+    if (matches("on")) return Mode::On;
     if (matches("boost")) return Mode::Boost;
     return Mode::Off;
 }

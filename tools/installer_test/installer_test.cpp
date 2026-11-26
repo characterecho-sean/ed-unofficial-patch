@@ -5825,7 +5825,7 @@ static void testFlatSettingsWindow(const std::wstring& root, const std::wstring&
         if (index != SIZE_MAX) {
             const auto& row = model.rows()[index];
             expectEq(row.def->choices, "off=Off|on=On|boost=On + Boost", "the Reflex selector offers three driver modes");
-            expectEq(row.value, "on", "an old Auto preference shows On on first open");
+            expectEq(row.value, "off", "an old Auto preference shows Off on first open");
             check(row.isRecommended, "the migrated preference matches the recommended mode");
             expectEq(readAll(path), old, "opening the selector preserves the original file");
         }

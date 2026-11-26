@@ -290,12 +290,12 @@ window, VR view, still lists the row.
 ### NVIDIA low latency
 
 The VR Performance page offers **NVIDIA low latency** (`fix.nvidia_reflex`).
-**On** is the default and enables the per-frame low latency mode for an
-eligible native VR session. **On + Boost** also requests higher GPU clocks.
-**Off** withdraws a request ED-UP owns while keeping frame instrumentation
-active. Older profiles saved with Auto use On. The row dims when unavailable;
-Off remains selectable for recovery. A saved On choice waits until the
-paired runtime, SDK and actual rendered-frame source are available.
+**Off** is the default and withdraws a request ED-UP owns while keeping
+frame instrumentation active. Older profiles saved with Auto use Off.
+**On** enables the per-frame low latency mode for an eligible native VR
+session. **On + Boost** also requests higher GPU clocks. The row dims when
+unavailable and Off remains selectable for recovery. A saved On choice waits
+until the paired runtime, SDK and actual rendered-frame source are available.
 [NVIDIA Reflex programming guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideReflex.md#80-nvidia-reflex-qa-checklist)
 
 ED-UP checks the device's existing low latency and sleep state before it

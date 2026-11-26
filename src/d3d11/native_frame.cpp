@@ -91,7 +91,7 @@ void refreshLowLatency(State& state, uint64_t cached, bool fromPresent) {
         Mode mode = Mode::Off;
         if ((stamp & 1) && (stamp & kLowLatencyAvailable) && !(stamp & kLowLatencyTransportFault) &&
             !edvr::graphicsRuntimeDisabled() && state.lowLatencyDriver) {
-            mode = parseMode(edvr::Config::get().getString("fix.nvidia_reflex", "on"));
+            mode = parseMode(edvr::Config::get().getString("fix.nvidia_reflex", "off"));
         }
         if (stamp != lowLatencyConfigStamp()) return;
         changed = updateMode(state.lowLatency, state.device, mode, state.generation, state.lowLatencyDriver);

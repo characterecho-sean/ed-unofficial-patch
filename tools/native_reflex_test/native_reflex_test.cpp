@@ -119,7 +119,7 @@ void presents(ModeHistory& history, unsigned count) {
 void modeSelection() {
     check(parseMode("oN") == Mode::On && parseMode("bOOsT") == Mode::Boost &&
           parseMode("Off") == Mode::Off, "the three driver modes accept existing case-insensitive values");
-    check(parseMode("AuTo") == Mode::On, "retired Auto profiles use On");
+    check(parseMode("AuTo") == Mode::Off, "retired Auto profiles use Off");
     check(parseMode("invalid") == Mode::Off && parseMode("") == Mode::Off,
           "unknown and empty settings make no driver request");
     for (Mode mode : {Mode::Off, Mode::On, Mode::Boost})

@@ -332,8 +332,8 @@ int wmain(int argc, wchar_t** argv) {
         using edvr::native_reflex::updateOnGamePresent;
         auto& cfg = edvr::Config::get();
         const auto profile = edvr::runtimeProfileValue();
-        check(g_latencyCalls.size() == 1 && g_latencyCalls.back().mode == Mode::On &&
-              !g_latencyCalls.back().alreadyOwned, "missing NVIDIA low latency setting defaults to On in VR");
+        check(g_latencyCalls.size() == 1 && g_latencyCalls.back().mode == Mode::Off &&
+              !g_latencyCalls.back().alreadyOwned, "missing NVIDIA low latency setting defaults to Off in VR");
 
         cfg.set("fix.nvidia_reflex", "BoOsT");
         std::thread otherThread([&] { updateOnGamePresent(device.Get()); });
@@ -347,8 +347,8 @@ int wmain(int argc, wchar_t** argv) {
         check(g_latencyCalls.size() == 1, "live change requires the acquired producer and device");
         updateOnGamePresent(device.Get());
         check(g_latencyCalls.size() == 2 && g_latencyCalls.back().device == device.Get() &&
-              g_latencyCalls.back().mode == Mode::Boost && g_latencyCalls.back().alreadyOwned,
-              "the enrolled producer applies the live choice to the acquired device");
+              g_latencyCalls.back().mode == Mode::Boost && !g_latencyCalls.back().alreadyOwned,
+              "the enrolled producer applies the first enabled choice without prior mode ownership");
 
         for (unsigned i = 0; i < 3; ++i) updateOnGamePresent(device.Get());
         check(g_latencySamples.empty(), "the Present applying the mode is outside the new observation window");
