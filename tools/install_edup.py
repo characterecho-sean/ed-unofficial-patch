@@ -755,10 +755,17 @@ def native_install(root, target, receipt_path, tag, dry_run=False, keep_backups=
         for key in components:
             dst = paths[key + "_target"]
             src = paths[key + "_source"]
-            # Record the mutation before calling copy2: a failed copy may
-            # have partially overwritten its destination.
-            active_mutations.append((key, dst))
-            shutil.copy2(src, dst)
+            if backups[key] is None:
+                # Record ownership only after exclusive creation succeeds.
+                # A failed copy rolls back our partial file, not a file
+                # another publisher placed after the plan.
+                with open(src, "rb") as source, open(dst, "xb") as output:
+                    active_mutations.append((key, dst))
+                    shutil.copyfileobj(source, output)
+            else:
+                # A failed replacement can partially overwrite a live file.
+                active_mutations.append((key, dst))
+                shutil.copy2(src, dst)
             if sha256(dst) != installed_hashes[key]:
                 raise ValueError("installed hash verification failed: %s" % key)
         if sha256(paths["original"]) != original_hash:
@@ -1656,6 +1663,8 @@ def _native_direct_plan(root, target, loader, runtime):
 
 def native_direct(root, target, loader, runtime, dry_run=False):
     paths, config, lib = _native_direct_plan(root, target, loader, runtime)
+    reflex_target = paths["reflex_license_target"]
+    reflex_before = _hash_or_missing(reflex_target) if paths["reflex_license_required"] else None
     known, running = strict_game_running(target)
     if not known or running:
         if not dry_run: print("[edup] ERROR: direct native route requires a proven stopped game%s" % probe_reason())
@@ -1671,7 +1680,13 @@ def native_direct(root, target, loader, runtime, dry_run=False):
     print("       runtime selection: %s" % (lib if lib else "system discovery"))
     if dry_run: return 0
     if paths["reflex_license_required"]:
-        shutil.copy2(paths["reflex_license_source"], paths["reflex_license_target"])
+        reflex_source = paths["reflex_license_source"]
+        if reflex_before is None:
+            _copy_exclusive(reflex_source, reflex_target)
+        elif _hash_or_missing(reflex_target) != reflex_before:
+            raise ValueError("Reflex notice changed during the install plan: %s" % reflex_target)
+        else:
+            shutil.copy2(reflex_source, reflex_target)
     shutil.copy2(paths["native_source"], paths["native_target"])
     shutil.copy2(paths["graphics_source"], paths["graphics_target"])
     with open(config_path, "wb") as f: f.write(config)
@@ -2663,14 +2678,21 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                 if sha256(e["backup"]) != e["before_sha256"]: raise ValueError("backup verification failed: %s" % e["key"])
                 made.append(e)
         for e in entries:
-            changed.append(e)
-            if e["key"] == "config":
-                with open(e["target"], "wb") as stream: stream.write(config_bytes)
-            elif e["key"] == "profile":
-                with open(e["target"], "wb") as stream: stream.write(descriptor_bytes)
-            elif e["key"] in generated_ini:
-                with open(e["target"], "wb") as stream: stream.write(generated_ini[e["key"]])
-            else: shutil.copy2(e["source"], e["target"])
+            if e["key"] == "reflex_license" and e["backup"] is None:
+                # A competing creator owns its file. Journal this path only
+                # after our exclusive open succeeds, even if the copy fails.
+                with open(e["source"], "rb") as source, open(e["target"], "xb") as output:
+                    changed.append(e)
+                    shutil.copyfileobj(source, output)
+            else:
+                changed.append(e)
+                if e["key"] == "config":
+                    with open(e["target"], "wb") as stream: stream.write(config_bytes)
+                elif e["key"] == "profile":
+                    with open(e["target"], "wb") as stream: stream.write(descriptor_bytes)
+                elif e["key"] in generated_ini:
+                    with open(e["target"], "wb") as stream: stream.write(generated_ini[e["key"]])
+                else: shutil.copy2(e["source"], e["target"])
             if sha256(e["target"]) != e["installed_sha256"]: raise ValueError("installed hash verification failed: %s" % e["key"])
         journal["state"] = "installed"; _replace_receipt(receipt, journal)
         verify_native_receipt(receipt, target)
@@ -4106,6 +4128,20 @@ def _reflex_license_self_test():
                     (result / "d3d11.dll").write_bytes(b"OLD GRAPHICS")
                 return result
 
+            other_notice = b"concurrent publisher's notice"
+
+            def publish_notice(path):
+                with path.open("xb") as stream:
+                    stream.write(other_notice)
+
+            copyfileobj = shutil.copyfileobj
+
+            def failed_notice(source, destination, *args, **kwargs):
+                if str(source.name) == str(build / fetch_reflex.LICENSE_NAME):
+                    destination.write(b"PARTIAL")
+                    raise OSError("injected PCL notice copy failure")
+                return copyfileobj(source, destination, *args, **kwargs)
+
             for scope in SCOPES:
                 target = game(scope)
                 notice = target / fetch_reflex.LICENSE_NAME
@@ -4126,6 +4162,27 @@ def _reflex_license_self_test():
                 assert restore_native(str(receipt)) == 0
                 assert (notice.read_bytes() if notice.exists() else None) == old_notice
 
+                target = game("race-" + scope)
+                if scope != "flat":
+                    (target / "Openvr" / "win64").mkdir(parents=True)
+                notice = target / fetch_reflex.LICENSE_NAME
+                before = snapshot(target)
+                write_receipt = _write_new_receipt
+
+                def publish_notice_after_receipt(path, value):
+                    write_receipt(path, value)
+                    publish_notice(notice)
+
+                arguments = ["--root", str(root), "--target", str(target), "--scope", scope]
+                with mock.patch.dict(globals(), {"_write_new_receipt": publish_notice_after_receipt}):
+                    assert main(arguments) == 1, "standard %s copy overwrote a concurrent PCL notice" % scope
+                assert notice.read_bytes() == other_notice
+                notice.unlink()
+                assert snapshot(target) == before, "standard %s collision did not roll back" % scope
+                with mock.patch.object(shutil, "copyfileobj", side_effect=failed_notice):
+                    assert main(arguments) == 1
+                assert snapshot(target) == before, "standard %s partial notice did not roll back" % scope
+
             target = game("legacy", legacy=True)
             receipt = Path(temporary) / "legacy-receipt.json"
             arguments = ["--root", str(root), "--target", str(target), "--native-openxr", "--dll",
@@ -4139,19 +4196,26 @@ def _reflex_license_self_test():
             assert not (target / fetch_reflex.LICENSE_NAME).exists()
             assert (target / "d3d11.dll").read_bytes() == b"OLD GRAPHICS"
 
-            # A copy can fail after partially writing the new notice. Its v1
-            # transaction must restore both DLLs and remove only that new file.
+            # A notice that appears after planning belongs to another publisher.
             receipt.unlink()
             before = snapshot(target)
-            copy2 = shutil.copy2
+            notice = target / fetch_reflex.LICENSE_NAME
+            reserve_backup = _reserve_backup
 
-            def failed_notice(source, destination, *args, **kwargs):
-                if str(source) == str(build / fetch_reflex.LICENSE_NAME):
-                    Path(destination).write_bytes(b"PARTIAL")
-                    raise OSError("injected PCL notice copy failure")
-                return copy2(source, destination, *args, **kwargs)
+            def publish_notice_during_backup(path):
+                if not notice.exists():
+                    publish_notice(notice)
+                reserve_backup(path)
 
-            with mock.patch.object(shutil, "copy2", side_effect=failed_notice):
+            with mock.patch.dict(globals(), {"_reserve_backup": publish_notice_during_backup}):
+                assert main(arguments) == 1, "a concurrently created PCL notice was overwritten"
+            assert notice.read_bytes() == other_notice and not receipt.exists(), "rollback touched the other notice"
+            notice.unlink()
+            assert snapshot(target) == before, "PCL notice collision did not restore the DLLs"
+
+            # If our exclusive copy fails mid-write, restore both DLLs and
+            # remove the partial notice we created.
+            with mock.patch.object(shutil, "copyfileobj", side_effect=failed_notice):
                 assert main(arguments) == 1
             assert snapshot(target) == before and not receipt.exists(), "PCL notice failure did not roll back"
 
@@ -4160,6 +4224,20 @@ def _reflex_license_self_test():
                          "--no-backup", "--native-loader", str(build / "openxr_loader.dll")]
             before = snapshot(target)
             assert main(arguments + ["--dry-run"]) == 0 and snapshot(target) == before
+            notice = target / fetch_reflex.LICENSE_NAME
+
+            def game_stopped_after_notice(*args):
+                publish_notice(notice)
+                return True, False
+
+            with mock.patch.dict(globals(), {"strict_game_running": game_stopped_after_notice}):
+                assert main(arguments) == 1, "direct copy overwrote a concurrent PCL notice"
+            assert notice.read_bytes() == other_notice
+            notice.unlink()
+            assert snapshot(target) == before, "direct collision changed the native pair"
+            with mock.patch.object(shutil, "copyfileobj", side_effect=failed_notice):
+                assert main(arguments) == 1
+            assert snapshot(target) == before, "direct copy left a partial notice or changed the native pair"
             assert main(arguments) == 0 and main(arguments + ["--verify-only"]) == 0
             (target / fetch_reflex.LICENSE_NAME).unlink()
             assert main(arguments + ["--verify-only"]) == 1

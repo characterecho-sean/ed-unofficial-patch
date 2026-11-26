@@ -123,7 +123,7 @@ void run() {
                     pass.reset(context.Get());
                     Sleep(3); // Deliberate measured producer work.
                     require(client.applicationSegment(sequence,false), "treatment CPU segment ends");
-                    require(client.producerSegmentEnd(sequence,eye,source.Get())==enabled,
+                    require(client.producerSegmentEnd(sequence,eye,source.Get(),order == 0)==enabled,
                         "GPU treatment segment ends before transfer");
                 }), "producer processing callback");
                 require(service.graphics.invoke([&] {

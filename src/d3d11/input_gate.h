@@ -81,6 +81,10 @@ void inputGateConfigure(Config& cfg);
 // Called lazily by the menu on its first use, from the frame thread. The
 // early factory capture above is already installed before game startup.
 void inputGateInstall();
+// Observe removed game messages for Reflex pings, mouse edges and normal
+// shutdown. This installs only the existing PeekMessageA reader and can run
+// while advanced.input_gate is off. False means no live observation route.
+bool inputGateInstallMessageObserver();
 
 // Install the user32 doors (GetAsyncKeyState, GetKeyState, GetKeyboardState,
 // PeekMessageA) when the first plugin with an input filter initialises, so its

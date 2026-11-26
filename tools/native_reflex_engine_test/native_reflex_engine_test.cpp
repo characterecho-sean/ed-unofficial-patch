@@ -41,15 +41,19 @@ void callbackOrder() {
     check(sleeps == 1 && forwards == 2 && !entered, "callback reentry sleeps once and preserves both originals");
 }
 void exceptionalForward() {
-    bool entered = false; unsigned before = 0, after = 0, original = 0;
+    bool entered = false; unsigned before = 0, after = 0, original = 0, aborted = 0;
     try {
         engine_detail::forwardBoundary(true, true, entered, [&] { ++before; },
-            [&] { ++original; throw std::runtime_error("original"); }, [&] { ++after; });
+            [&] { ++original; throw std::runtime_error("original"); }, [&] { ++after; }, [&] { ++aborted; });
         check(false, "original exception must propagate");
     } catch (const std::runtime_error&) {
-        check(before == 1 && original == 1 && !after && !entered,
+        check(before == 1 && original == 1 && !after && aborted == 1 && !entered,
               "original failure propagates and releases reentry gate without inventing successful completion");
     }
+    engine_detail::forwardBoundary(true, true, entered, [&] { ++before; },
+        [&] { ++original; }, [&] { ++after; }, [&] { ++aborted; });
+    check(before == 2 && original == 2 && after == 1 && aborted == 1 && !entered,
+          "the next call forwards normally and does not invoke exceptional cleanup");
 }
 void callbackTable() {
     struct Fake { uint64_t token = 0; unsigned calls = 0; } fake;
@@ -178,18 +182,23 @@ void mirrorSources() {
     const EdvrNativeReflexSource first{sizeof(EdvrNativeReflexSource),EDVR_NATIVE_REFLEX_FRAME_VERSION_1,4,81,9001};
     const EdvrNativeReflexSource second{sizeof(EdvrNativeReflexSource),EDVR_NATIVE_REFLEX_FRAME_VERSION_1,4,82,9002};
     EdvrNativeReflexSource eyes[2]{first,first};
-    check(validSource(first) && sameSource(selectMirrorSource(eyes,3,{}),first),
+    check(validSource(first) && sameSource(selectMirrorSource(eyes, 3, 3, {}),first),
           "matching retained stereo sources select their exact pose and issuing token");
+    for (unsigned requested : {1u, 2u, 3u}) {
+        for (unsigned drawn = 0; drawn <= 3; ++drawn)
+            check(validSource(selectMirrorSource(eyes, requested, drawn, {})) == (drawn == requested),
+                  "only a draw for every selected eye proves a mirror source after failed maps");
+    }
     eyes[1]=second;
-    check(!validSource(selectMirrorSource(eyes,3,{})), "mixed stereo eye generations remain unowned");
-    check(sameSource(selectMirrorSource(eyes,1,{}),first) && sameSource(selectMirrorSource(eyes,2,{}),second),
+    check(!validSource(selectMirrorSource(eyes, 3, 3, {})), "mixed stereo eye generations remain unowned");
+    check(sameSource(selectMirrorSource(eyes, 1, 1, {}),first) && sameSource(selectMirrorSource(eyes, 2, 2, {}),second),
           "single-eye mirror ownership comes only from the eye actually selected");
-    check(!validSource(selectMirrorSource(eyes,1,first)) && !validSource(selectMirrorSource(eyes,1,second)),
+    check(!validSource(selectMirrorSource(eyes, 1, 1, first)) && !validSource(selectMirrorSource(eyes, 1, 1, second)),
           "repeated and backward sources cannot assign a new Present");
-    check(!validSource(selectMirrorSource(eyes,0,{})) && !validSource(selectMirrorSource(eyes,4,{})),
+    check(!validSource(selectMirrorSource(eyes, 0, 0, {})) && !validSource(selectMirrorSource(eyes, 4, 4, {})),
           "game mirror mode and malformed eye masks cannot fabricate a source");
     eyes[0]={};
-    check(!validSource(selectMirrorSource(eyes,1,{})) && !validSource(selectMirrorSource(eyes,3,{})),
+    check(!validSource(selectMirrorSource(eyes, 1, 1, {})) && !validSource(selectMirrorSource(eyes, 3, 3, {})),
           "unsupported peer and absent eye metadata leave ownership unknown");
     eyes[0]=first; ++eyes[0].version;
     check(!validSource(eyes[0]), "unsupported source schema is rejected");

@@ -232,14 +232,7 @@ REM compiled graphics DLL carries its original SDK notice in every package.
 set "REFLEX=%ROOT%\third_party\reflex"
 if defined EDUP_REFLEX_SDK set "REFLEX=%EDUP_REFLEX_SDK%"
 set "REFLEXFLAGS=/DEDVR_HAVE_REFLEX_PCL=0"
-if /I "%REFLEX%"=="none" (
-    if exist "%BUILD%\NVIDIA-REFLEX-LICENSE.txt" del "%BUILD%\NVIDIA-REFLEX-LICENSE.txt"
-) else (
-    python tools\fetch_reflex.py --dest "%REFLEX%" || exit /b 1
-    python tools\fetch_reflex.py --verify "%REFLEX%" || exit /b 1
-    copy /y "%REFLEX%\license.txt" "%BUILD%\NVIDIA-REFLEX-LICENSE.txt" >nul || exit /b 1
-    set REFLEXFLAGS=/DEDVR_HAVE_REFLEX_PCL=1 /I"%REFLEX%\Reflex_Stats"
-)
+if /I not "%REFLEX%"=="none" set REFLEXFLAGS=/DEDVR_HAVE_REFLEX_PCL=1 /I"%REFLEX%\Reflex_Stats"
 REM Python cannot call compiler-only Interlocked intrinsics through kernel32.
 REM Keep the diagnostic atomic bridge with build tools, outside game packages.
 if not defined EDUP_COMPILE_ONLY (
@@ -797,6 +790,15 @@ if defined EDUP_DLL_ONLY if not defined EDUP_COMPILE_ONLY (
         )
 )
 
+REM The Linux wrapper stages the checkout-local Reflex SDK before taking its
+REM compile-only receipt fingerprint. Wine only verifies the selected copy.
+if /I not "%REFLEX%"=="none" (
+    if not defined EDUP_COMPILE_ONLY (
+        python tools\fetch_reflex.py --dest "%REFLEX%" || exit /b 1
+    )
+    python tools\fetch_reflex.py --verify "%REFLEX%" || exit /b 1
+)
+
 if not exist "%OBJ%\d3d11" mkdir "%OBJ%\d3d11"
 ml64.exe /nologo /c /Fo"%OBJ%\d3d11\thunks.obj" "%GEN%\edvr_thunks_d3d11.asm" >nul
 if errorlevel 1 ( echo [edup] ERROR: ml64 failed & exit /b 1 )
@@ -935,6 +937,14 @@ if defined EDUP_SIGN (
 )
 copy /y "%BUILD%\d3d11.dll" "%BUILD%\edvr_openxr_graphics.dll" >nul || exit /b 1
 echo [edup] built %BUILD%\edvr_openxr_graphics.dll
+REM Change the notice only after both new graphics files are in place.
+if /I "%REFLEX%"=="none" (
+    if exist "%BUILD%\NVIDIA-REFLEX-LICENSE.txt" (
+        del "%BUILD%\NVIDIA-REFLEX-LICENSE.txt" || exit /b 1
+    )
+) else (
+    copy /y "%REFLEX%\license.txt" "%BUILD%\NVIDIA-REFLEX-LICENSE.txt" >nul || exit /b 1
+)
 
 REM The offline-only bench proxy (build\flat_sdk_bench_proxy.dll) is built by :rig_flat_sdk_bench_proxy among the test rigs below: it only reads
 REM the production objects in %OBJ%\d3d11, and nothing in this build loads it.

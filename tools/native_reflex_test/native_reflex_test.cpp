@@ -126,6 +126,14 @@ void modeSelection() {
         check(parseMode(modeWord(mode)) == mode, "each displayed setting round-trips to its driver mode");
 }
 
+void modeHint() {
+    const char* hint = modeStatusHint(ModeStatus::ConfirmedOff, false);
+    check(std::strstr(hint, "driver reports Off") && std::strstr(hint, "Mirror window > Image"),
+          "F8 keeps confirmed Off visible alongside the enablement guidance");
+    check(!std::strstr(modeStatusHint(ModeStatus::Unavailable, false), "driver reports Off"),
+          "F8 does not claim Off without driver evidence");
+}
+
 void modeParameters() {
     constexpr auto off = detail::modeParameters(Mode::Off);
     constexpr auto on = detail::modeParameters(Mode::On);
@@ -151,6 +159,7 @@ void preserveExternalPolicy() {
         presents(history, 65);
         closeMode(history, nullptr, 7);
         check(driver.reads == 1 && driver.writes.empty() && !history.needsReset() &&
+              !history.retryNeeded() && !history.confirmedMode() &&
               std::strcmp(driver.last.reason, i == 3 ? "baseline_unknown" : "existing_driver_policy") == 0,
               "existing or unreadable policy prevents a write, delayed read, and close cleanup");
     }
@@ -244,7 +253,8 @@ void acceptedAndRefusedRequests() {
     driver.writeCode = -104;
     updateMode(history, nullptr, Mode::On, 7);
     check(!history.needsReset() && !history.observing() && driver.last.apiResolved &&
-          driver.last.setStatus == -104 && driver.last.getStatus == detail::kUnavailable,
+          driver.last.setStatus == -104 && driver.last.getStatus == detail::kUnavailable &&
+          !history.confirmedMode() && history.status() == ModeStatus::RequestRefused,
           "a refused setter is distinct from API availability and does not schedule readback");
     closeMode(history, nullptr, 7);
     check(driver.writes.size() == 1, "a refused enable is not cleaned up");
@@ -252,7 +262,8 @@ void acceptedAndRefusedRequests() {
     driver.applyWrites = false;
     updateMode(history, nullptr, Mode::Boost, 7);
     check(history.needsReset() && driver.last.getStatus == 0 &&
-          std::strcmp(driver.last.reason, "driver_mode_differs") == 0,
+          std::strcmp(driver.last.reason, "driver_mode_differs") == 0 &&
+          !history.confirmedMode() && history.status() == ModeStatus::DriverReportsOff,
           "accepted Boost keeps cleanup ownership when the immediate readback disagrees");
     closeMode(history, nullptr, 7);
     check(driver.writes == std::vector<Mode>{Mode::On, Mode::Boost, Mode::Off},
@@ -277,6 +288,10 @@ void delayedCleanup() {
         check(driver.samplePoints == std::vector<unsigned>{4, 16, 64} &&
               !history.observing() && history.needsReset() == (i != 0),
               "only a successful final disabled reading releases cleanup ownership");
+        const auto expected = i == 0 ? ModeStatus::ConfirmedOff : i == 1 ? ModeStatus::DriverReportsOn
+                                                                       : ModeStatus::ReadbackUnavailable;
+        check(history.status() == expected && history.confirmedMode().has_value() == (i == 0) &&
+              history.retryNeeded() == (i != 0), "live evidence distinguishes confirmed, mismatched and unreadable Off");
         closeMode(history, nullptr, 7);
         check(driver.writes.size() == (i == 0 ? 2u : 3u) && driver.writes.back() == Mode::Off,
               "close retries Off only when the final sample is enabled or unavailable");
@@ -292,6 +307,47 @@ void delayedCleanup() {
           "a refused Off leaves cleanup armed without scheduling a readback");
     closeMode(history, nullptr, 7);
     check(driver.writes == std::vector<Mode>{Mode::On, Mode::Off, Mode::Off}, "close retries a refused Off");
+}
+
+void refusedWithdrawal() {
+    driver = {};
+    ModeHistory history;
+    updateMode(history, nullptr, Mode::On, 7);
+    driver.writeCode = -1;
+    updateMode(history, nullptr, Mode::Off, 7);
+    check(driver.status.lowLatencyMode && !history.confirmedMode() && history.status() == ModeStatus::WithdrawalRefused,
+          "the requested Off is unconfirmed after a rejected driver write");
+    driver.writeCode = 0;
+    check(!updateMode(history, nullptr, Mode::Off, 7) && driver.status.lowLatencyMode,
+          "re-reading the same setting does not bypass withdrawal backoff");
+    presents(history, 4);
+    check(updateMode(history, nullptr, Mode::Off, 7) && !driver.status.lowLatencyMode &&
+              driver.writes == std::vector<Mode>{Mode::On, Mode::Off, Mode::Off} && history.confirmedMode() == Mode::Off,
+          "owned Off withdrawal retries after four successful Presents and recovers");
+    presents(history, 64);
+    closeMode(history, nullptr, 7);
+    check(!history.retryNeeded() && driver.writes.size() == 3, "verified withdrawal disarms the live and close retries");
+
+    driver = {};
+    history = {};
+    updateMode(history, nullptr, Mode::On, 7);
+    driver.writeCode = -1;
+    updateMode(history, nullptr, Mode::Off, 7);
+    for (const unsigned delay : {4u, 16u, 64u}) {
+        const size_t before = driver.writes.size();
+        presents(history, delay - 1);
+        check(!updateMode(history, nullptr, Mode::Off, 7) && driver.writes.size() == before,
+              "repeated withdrawal failures wait for the increasing Present backoff");
+        presents(history, 1);
+        check(updateMode(history, nullptr, Mode::Off, 7) && driver.writes.size() == before + 1,
+              "the next retry attempts only the owned Off withdrawal");
+    }
+    presents(history, 256);
+    check(!history.retryNeeded() && !updateMode(history, nullptr, Mode::Off, 7) && driver.writes.size() == 5 &&
+          !history.confirmedMode(), "exhausted live retries cannot be rearmed by an unchanged setting");
+    driver.writeCode = 0;
+    closeMode(history, nullptr, 7);
+    check(driver.writes.size() == 6 && !driver.status.lowLatencyMode, "normal close retains one final withdrawal attempt");
 }
 
 void modulePaths() {
@@ -341,12 +397,14 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "--dry-run") == 0) return 0;
     if (std::strcmp(argv[1], "--self-test") != 0) return 2;
     modeSelection();
+    modeHint();
     modeParameters();
     preserveExternalPolicy();
     reenrollOwnedSleepDevice();
     firstSleepModeRace();
     acceptedAndRefusedRequests();
     delayedCleanup();
+    refusedWithdrawal();
     modulePaths();
     frameTransport();
     std::printf("native_reflex_test: %u checks, %u failures\n", checks, failures);

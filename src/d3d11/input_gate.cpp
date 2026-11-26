@@ -12,6 +12,8 @@
 
 #define DIRECTINPUT_VERSION 0x0800
 #include <dinput.h>
+#pragma comment(lib, "dinput8.lib")  // SDK standard data formats
+#pragma comment(lib, "dxguid.lib")   // the object GUIDs referenced by those descriptors
 #include <Xinput.h>
 
 #include "../common/config.h"
@@ -33,9 +35,7 @@
 namespace edvr {
 namespace {
 
-// dinput.h declares these GUIDs extern and expects dxguid.lib to define
-// them. Spelled out here instead -- the values are the public ones -- so the
-// DLL links against nothing new.
+// Public interface and system-device GUIDs used by the early factory hook.
 const GUID kIidDirectInput8A = {0xBF798030, 0x483A, 0x4DA2,
                                 {0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00}};
 const GUID kIidDirectInput8W = {0xBF798031, 0x483A, 0x4DA2,
@@ -84,6 +84,10 @@ static_assert(DIJOFS_POV(0) == kJoyOfsPov && DIJOFS_BUTTON(0) == kJoyOfsButtons,
 // GetObjectInfo 14, GetDeviceInfo 15.
 constexpr size_t kSlotGetDeviceState = 9;
 constexpr size_t kSlotGetDeviceData = 10;
+constexpr size_t kSlotSetDataFormat = 11;
+constexpr size_t kSlotSetActionMap = 30;
+using SetDataFormat = HRESULT (STDMETHODCALLTYPE*)(void*, LPCDIDATAFORMAT);
+using SetActionMap = HRESULT (STDMETHODCALLTYPE*)(void*, void*, const void*, DWORD); // A/W opaque arguments
 constexpr size_t kSlotGetDeviceInfo = 15;   // checked for plausibility only; nothing calls it
 
 // IDirectInput8's vtable: IUnknown 0-2, CreateDevice 3, EnumDevices 4 (A and W alike,
@@ -141,6 +145,8 @@ struct DiDoor {
     VTableHook hook;
     PFN_GetDeviceState origState = nullptr;
     PFN_GetDeviceData  origData = nullptr;
+    SetDataFormat origFormat = nullptr;
+    SetActionMap origActionMap = nullptr;
     std::atomic<bool> installed{false};
     bool  retired = false;           // a fault took it out for the session
     bool  gameDevice = false;        // observed at the game's CreateDevice return
@@ -300,7 +306,7 @@ struct UserDoor {
     PFN_GetAsyncKeyState origAsync = nullptr;
     PFN_GetKeyState origKeyState = nullptr;
     PFN_GetKeyboardState origKeyboardState = nullptr;
-    PFN_PeekMessageA origPeek = nullptr;
+    std::atomic<bool> filterMessages{false}; // only user32 input-gate installation enables filtering
     bool retired2 = false;   // door 2 (the trio)
     bool retired3 = false;   // door 3 (the pump)
     std::atomic<uint32_t> asyncCalls{0};
@@ -506,7 +512,9 @@ uint64_t      g_keyboardSeq = 0;
 SRWLOCK       g_keyboardsLock = SRWLOCK_INIT;
 std::atomic<bool> g_keyboardFullNoted{false};
 
+void forgetInputFormat(void* device);
 void keyboardForget(void* device) {
+    forgetInputFormat(device);
     AcquireSRWLockExclusive(&g_keyboardsLock);
     for (KeyboardEntry& k : g_keyboards) {
         if (k.device == device) k = KeyboardEntry();
@@ -518,7 +526,7 @@ void keyboardForget(void* device) {
 }
 
 void keyboardRemember(void* device) {
-    bool evicted = false;
+    void* evicted = nullptr;
     AcquireSRWLockExclusive(&g_keyboardsLock);
     KeyboardEntry* slot = nullptr;
     for (KeyboardEntry& k : g_keyboards) {
@@ -540,11 +548,15 @@ void keyboardRemember(void* device) {
         for (KeyboardEntry& k : g_keyboards) {
             if (k.seq < slot->seq) slot = &k;
         }
-        evicted = true;
+        evicted = slot->device;
     }
     slot->device = device;
     slot->seq = ++g_keyboardSeq;
     ReleaseSRWLockExclusive(&g_keyboardsLock);
+    if (evicted) {
+        forgetInputFormat(evicted);
+        if (input_latency_probe::enabled()) input_latency_probe::keyboardReadLost(evicted);
+    }
     if (evicted && !g_keyboardFullNoted.exchange(true)) {
         Log::get().note("keyboard gate: the keyboard registry is full; the oldest keyboard is no longer "
                         "gated. Please report this log.");
@@ -568,15 +580,10 @@ bool keyboardRegistered(const void* self) {
 // the overlay hands each device a table of its own and the keyboard's door never
 // sees the stick (the same reason the keyboard is captured at CreateDevice).
 constexpr size_t kJoyDoors = 8;
-struct JoyDoor {
-    void*      held = nullptr;   // one reference, so the table and our restore target live
-    VTableHook hook;
-    PFN_GetDeviceState origState = nullptr;
-    PFN_GetDeviceData  origData = nullptr;
-    bool       installed = false;
+struct ControllerDoor : DiDoor {
+    VTableHook sharedFormatHook;   // installed only when a keyboard or mouse also uses this table
 };
-JoyDoor g_joyDoors[kJoyDoors];
-
+ControllerDoor g_joyDoors[kJoyDoors];
 // Which modifiers a 256-byte DirectInput state says are down.
 uint32_t modsInState(const uint8_t* st) {
     uint32_t m = 0;
@@ -652,6 +659,115 @@ void noteKeyboardRead(void* self, HRESULT result, DWORD bytes, bool buffered,
             static_cast<unsigned long>(flags), static_cast<unsigned long>(count ? *count : 0),
             native_reflex::currentInputFrameToken());
     });
+}
+
+// The standard formats come from dinput8.lib. Compare object GUIDs, types,
+// offsets and flags, not just byte counts: custom layouts may permute keys
+// or buttons within an otherwise identical packet.
+enum class ProbeFormat { Unknown, Keyboard, Mouse, Mouse2 };
+bool matchesDataFormat(const DIDATAFORMAT& actual, const DIDATAFORMAT& standard) {
+    if (actual.dwSize != standard.dwSize || actual.dwObjSize != standard.dwObjSize ||
+        actual.dwFlags != standard.dwFlags || actual.dwDataSize != standard.dwDataSize ||
+        actual.dwNumObjs != standard.dwNumObjs || !actual.rgodf) return false;
+    for (DWORD i = 0; i < actual.dwNumObjs; ++i) {
+        const auto& a = actual.rgodf[i];
+        const auto& b = standard.rgodf[i];
+        if (a.dwOfs != b.dwOfs || a.dwType != b.dwType || a.dwFlags != b.dwFlags ||
+            (a.pguid == nullptr) != (b.pguid == nullptr) || (a.pguid && !IsEqualGUID(*a.pguid, *b.pguid))) return false;
+    }
+    return true;
+}
+
+bool isGameMouse(void* device);
+struct DeviceFormat {
+    void* device = nullptr;
+    uint64_t lifetime = 0;
+    uint64_t revision = 0;
+    unsigned changing = 0;
+    ProbeFormat layout = ProbeFormat::Unknown;
+    bool overlapping = false;
+};
+DeviceFormat g_formats[kKeyboardDevices + kGameDeviceDoors + 4]{};
+SRWLOCK g_formatsLock = SRWLOCK_INIT;
+uint64_t g_formatRevision = 0; // serialized across address reuse and overlapping Set calls
+
+DeviceFormat* findFormat(void* device) {
+    for (auto& entry : g_formats) if (entry.device == device) return &entry;
+    return nullptr;
+}
+
+void forgetInputFormat(void* device) {
+    AcquireSRWLockExclusive(&g_formatsLock);
+    if (auto* entry = findFormat(device)) *entry = {};
+    ReleaseSRWLockExclusive(&g_formatsLock);
+}
+
+// Invalidate any previously released input before the game may change its
+// format. An overlapping setter, a new lifetime at this address, or an
+// unobserved mapping may not certify a read. No lock spans a DirectInput call.
+template<class Forward>
+HRESULT setObservedFormat(void* device, LPCDIDATAFORMAT requested, Forward forward) {
+    if (!device) return forward();
+    const bool keyboard = observedGameKeyboard(device);
+    if (!keyboard && !isGameMouse(device)) return forward();
+    AcquireSRWLockExclusive(&g_formatsLock);
+    auto* entry = findFormat(device);
+    if (!entry) entry = findFormat(nullptr);
+    if (!entry) { ReleaseSRWLockExclusive(&g_formatsLock); return forward(); }
+    if (!entry->device) {
+        entry->device = device;
+        entry->lifetime = ++g_formatRevision;
+    }
+    const uint64_t lifetime = entry->lifetime;
+    entry->overlapping = entry->changing++ != 0 || entry->overlapping;
+    const uint64_t revision = entry->revision = ++g_formatRevision;
+    const ProbeFormat previous = entry->layout;
+    entry->layout = ProbeFormat::Unknown;
+    if (input_latency_probe::enabled()) {
+        if (keyboard) input_latency_probe::keyboardReadLost(device);
+        else input_latency_probe::mouseReadLost(device);
+    }
+    ReleaseSRWLockExclusive(&g_formatsLock);
+
+    const HRESULT result = forward();
+    ProbeFormat layout = ProbeFormat::Unknown;
+    if (result == DI_OK && requested) guarded("inputGate/format", [&] {
+        if (keyboard) {
+            if (matchesDataFormat(*requested, c_dfDIKeyboard)) layout = ProbeFormat::Keyboard;
+        } else if (matchesDataFormat(*requested, c_dfDIMouse)) layout = ProbeFormat::Mouse;
+        else if (matchesDataFormat(*requested, c_dfDIMouse2)) layout = ProbeFormat::Mouse2;
+    });
+    AcquireSRWLockExclusive(&g_formatsLock);
+    if (entry->lifetime == lifetime) {
+        if (--entry->changing == 0) {
+            if (!entry->overlapping && entry->revision == revision)
+                entry->layout = SUCCEEDED(result) ? layout : previous;
+            entry->overlapping = false;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_formatsLock);
+    return result;
+}
+
+uint64_t inputFormatRevision(void* device) {
+    if (!input_latency_probe::enabled()) return 0;
+    AcquireSRWLockShared(&g_formatsLock);
+    const auto* entry = findFormat(device);
+    const auto revision = entry && entry->layout != ProbeFormat::Unknown ? entry->revision : 0;
+    ReleaseSRWLockShared(&g_formatsLock);
+    return revision;
+}
+
+// Publish a receipt only while the format that preceded the original read
+// is still current. A concurrent setter invalidates the probe's release
+// history under the same lock, so a stale read cannot restore that history.
+template<class Observe>
+void observeWithFormat(void* device, uint64_t revision, Observe observe) {
+    if (!revision) return;
+    AcquireSRWLockShared(&g_formatsLock);
+    const auto* entry = findFormat(device);
+    if (entry && entry->revision == revision && entry->layout != ProbeFormat::Unknown) observe(entry->layout);
+    ReleaseSRWLockShared(&g_formatsLock);
 }
 
 // ---- the joystick watch ---------------------------------------------------
@@ -823,13 +939,14 @@ void observeMouseState(void* device, HRESULT result, DWORD bytes, const void* da
 void observeMouseData(void* device, HRESULT result, DWORD bytes, const DIDEVICEOBJECTDATA* data,
                       const DWORD* count, DWORD flags, DWORD capacity);
 bool isGameMouse(void* device);
-bool mouseInputTableCaptured(void** table);
+bool inputReaderOwnsTable(void** table);
 void noteMouseStateRead(void* device, HRESULT result, DWORD bytes);
 void noteMouseDataRead(void* device, HRESULT result, DWORD bytes, const DIDEVICEOBJECTDATA* data,
                        const DWORD* count, DWORD flags, DWORD capacity);
 
-template <bool Wide>
 HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
+    if (!input_latency_probe::enabled() && isGameMouse(self)) return d.origState(self, cb, data);
+    const uint64_t revision = inputFormatRevision(self);
     const HRESULT hr = d.origState(self, cb, data);
     noteKeyboardRead(self, hr, cb, false);
     d.stateCalls.fetch_add(1, std::memory_order_relaxed);
@@ -838,39 +955,41 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
     if (input_latency_probe::enabled() && observedGameKeyboard(self) &&
         (d.retired || hr != DI_OK || cb != 256 || !data))
         guardedBudget(g_budgetKeyboardProbe, [&] { input_latency_probe::keyboardReadLost(self); });
-    if (d.retired || FAILED(hr) || !data) return hr;
-    bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
-    guardedBudget(g_budgetDi, [&] {
-        const DeviceClass cls = classifyDevice(self);
-        const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
-        if (cls == DeviceClass::Controller) {
-            other = true;
-            if (pluginBlock) {
-                if (cb >= sizeof(DIJOYSTATE)) {
-                    DIJOYSTATE* js = static_cast<DIJOYSTATE*>(data);
-                    for (int p = 0; p < 4; ++p) js->rgdwPOV[p] = 0xFFFFFFFFu;
-                    memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
-                    if (cb >= sizeof(DIJOYSTATE2)) {
-                        DIJOYSTATE2* js2 = static_cast<DIJOYSTATE2*>(data);
-                        memset(js2->rgbButtons + 32, 0, 96);
-                    }
-                } else {
-                    // A short format keeps its axes, like joyDeviceState: hats centred, buttons zeroed.
-                    constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
-                    constexpr DWORD kPovEnd = kPov0 + 4 * sizeof(DWORD);
-                    if (cb >= kPovEnd) {
-                        auto* povPtr = reinterpret_cast<DWORD*>(static_cast<uint8_t*>(data) + kPov0);
-                        for (int p = 0; p < 4; ++p) povPtr[p] = 0xFFFFFFFFu;
-                    }
-                    constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[0]));
-                    if (cb > kBtn0) {
-                        memset(static_cast<uint8_t*>(data) + kBtn0, 0, cb - kBtn0);
-                    }
+    if (input_latency_probe::enabled() && isGameMouse(self) && (d.retired || hr != DI_OK || !data))
+        input_latency_probe::mouseReadLost(self);
+    if (FAILED(hr) || !data) return hr;
+    const DeviceClass cls = classifyDevice(self);
+    const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
+    if (cls == DeviceClass::Controller) {
+        if (pluginBlock) guarded("inputGate/controllerState", [&] {
+            if (cb >= sizeof(DIJOYSTATE)) {
+                DIJOYSTATE* js = static_cast<DIJOYSTATE*>(data);
+                for (int p = 0; p < 4; ++p) js->rgdwPOV[p] = 0xFFFFFFFFu;
+                memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
+                if (cb >= sizeof(DIJOYSTATE2)) {
+                    DIJOYSTATE2* js2 = static_cast<DIJOYSTATE2*>(data);
+                    memset(js2->rgbButtons + 32, 0, 96);
                 }
-                d.zeroed.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                // A short format keeps its axes, with centred hats and released buttons.
+                constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
+                constexpr DWORD kPovEnd = kPov0 + 4 * sizeof(DWORD);
+                if (cb >= kPovEnd) {
+                    auto* povPtr = reinterpret_cast<DWORD*>(static_cast<uint8_t*>(data) + kPov0);
+                    for (int p = 0; p < 4; ++p) povPtr[p] = 0xFFFFFFFFu;
+                }
+                constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[0]));
+                if (cb > kBtn0) {
+                    memset(static_cast<uint8_t*>(data) + kBtn0, 0, cb - kBtn0);
+                }
             }
-            return;
-        }
+            d.zeroed.fetch_add(1, std::memory_order_relaxed);
+        });
+        guardedBudget(g_budgetJoy, [&] { observeControllerState(self, cb, data); });
+        return hr;
+    }
+    if (d.retired) return hr;
+    guardedBudget(g_budgetDi, [&] {
         if (cls != DeviceClass::Keyboard) return;
         d.stateKeyboard.fetch_add(1, std::memory_order_relaxed);
         if (d.gameDevice) g_gameKeyboardCalls.fetch_add(1, std::memory_order_relaxed);
@@ -899,11 +1018,6 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
             for (int k = 0; k < 256; ++k) if (g_heldDik[k].load()) st[k] = 0;
         }
     });
-    // A joystick or HOTAS: copy what the game just read, after its call, into
-    // the watch. Not the keyboard's business and not its budget's.
-    if (other) {
-        guardedBudget(g_budgetJoy, [&] { observeControllerState(self, cb, data); });
-    }
     if (!g_budgetDi.shouldRun() && !d.retired) {
         d.retired = true;
         Log::get().note("keyboard gate: the DirectInput door (%s) faulted repeatedly and "
@@ -911,23 +1025,28 @@ HRESULT filterDeviceState(DiDoor& d, void* self, DWORD cb, LPVOID data) {
                         "with the game while the menu is open.",
                         d.name);
     }
-    observeMouseState(self, hr, cb, data);
-    // Observe exactly what this captured game keyboard returns after privacy,
-    // summon-key and release-tail filtering. Our fallback devices, unknown
-    // layouts and calls outside the original InputManager cannot own a pulse.
-    if (input_latency_probe::enabled() && hr == DI_OK && cb == 256 &&
-        observedGameKeyboard(self)) {
-        guardedBudget(g_budgetKeyboardProbe, [&] {
-            const uint64_t token = native_reflex::currentInputFrameToken();
-            input_latency_probe::keyboardState(self, static_cast<const uint8_t*>(data), token);
-        });
-    }
+    observeWithFormat(self, revision, [&](ProbeFormat layout) {
+        if (layout == ProbeFormat::Keyboard) {
+            if (hr == DI_OK && cb == 256 && observedGameKeyboard(self)) {
+                // The caller owns these bytes. Finish all guarded access before
+                // entering the probe, which holds its callback mutex while decoding.
+                uint8_t snapshot[256];
+                if (guardedBudget(g_budgetKeyboardProbe, [&] { memcpy(snapshot, data, sizeof(snapshot)); }))
+                    input_latency_probe::keyboardState(self, snapshot, native_reflex::currentInputFrameToken());
+                else
+                    input_latency_probe::keyboardReadLost(self);
+            }
+        } else if (cb == (layout == ProbeFormat::Mouse ? sizeof(DIMOUSESTATE) : sizeof(DIMOUSESTATE2))) {
+            observeMouseState(self, hr, cb, data);
+        } else if (input_latency_probe::enabled()) input_latency_probe::mouseReadLost(self);
+    });
     return hr;
 }
 
-template <bool Wide>
 HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDATA rgdod,
                          LPDWORD inOut, DWORD flags) {
+    if (!input_latency_probe::enabled() && isGameMouse(self)) return d.origData(self, cbObj, rgdod, inOut, flags);
+    const uint64_t revision = inputFormatRevision(self);
     DWORD observationCapacity = 0;
     const bool keyboardObservation = input_latency_probe::enabled() && observedGameKeyboard(self);
     if (input_latency_probe::enabled() && (isGameMouse(self) || keyboardObservation) && inOut &&
@@ -944,39 +1063,43 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
         guardedBudget(g_budgetKeyboardProbe, [&] { input_latency_probe::keyboardReadLost(self); });
     if (keyboardObservation && !rgdod && inOut)
         guardedBudget(g_budgetKeyboardProbe, [&] { if (*inOut) input_latency_probe::keyboardReadLost(self); });
-    if (d.retired || FAILED(hr) || !rgdod || !inOut) return hr;
-    if (cbObj != sizeof(DIDEVICEOBJECTDATA)) return hr;   // a layout this was not written for
-    bool other = false;   // a game controller: observed below, never gated; an unknown device is neither
-    guardedBudget(g_budgetDi, [&] {
-        const DeviceClass cls = classifyDevice(self);
-        const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
-        if (cls == DeviceClass::Controller) {
-            other = true;
-            if (pluginBlock && rgdod && inOut && *inOut > 0) {
-                constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[0]));
-                constexpr DWORD kPov3 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[3]));
-                constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[0]));
-                constexpr DWORD kBtn127 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[127]));
-                const uint32_t before = *inOut;
-                uint32_t kept = 0;
-                for (uint32_t i = 0; i < before; ++i) {
-                    const auto& ev = rgdod[i];
-                    const bool isButton = (ev.dwOfs >= kBtn0 && ev.dwOfs <= kBtn127);
-                    const bool isPov = (ev.dwOfs >= kPov0 && ev.dwOfs < kPov3 + sizeof(DWORD));
-                    if (isButton) {
-                        if (ev.dwData & 0x80) continue; // swallow press, allow release
-                    } else if (isPov && !povCentred(ev.dwData)) {
-                        continue; // swallow hat directions; the re-centre passes, like a button release
-                    }
-                    rgdod[kept++] = ev;
+    if (input_latency_probe::enabled() && isGameMouse(self) &&
+        (d.retired || hr != DI_OK || cbObj != sizeof(DIDEVICEOBJECTDATA) || !inOut))
+        input_latency_probe::mouseReadLost(self);
+    if (!rgdod && inOut && input_latency_probe::enabled() && isGameMouse(self))
+        guardedBudget(g_budgetMouse, [&] { if (*inOut) input_latency_probe::mouseReadLost(self); });
+    if (FAILED(hr) || !rgdod || !inOut || cbObj != sizeof(DIDEVICEOBJECTDATA)) return hr;
+    const DeviceClass cls = classifyDevice(self);
+    const bool pluginBlock = g_pluginBlock.load(std::memory_order_relaxed);
+    if (cls == DeviceClass::Controller) {
+        if (pluginBlock) guarded("inputGate/controllerData", [&] {
+            constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[0]));
+            constexpr DWORD kPov3 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[3]));
+            constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[0]));
+            constexpr DWORD kBtn127 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[127]));
+            const uint32_t before = *inOut;
+            uint32_t kept = 0;
+            for (uint32_t i = 0; i < before; ++i) {
+                const auto& ev = rgdod[i];
+                const bool isButton = (ev.dwOfs >= kBtn0 && ev.dwOfs <= kBtn127);
+                const bool isPov = (ev.dwOfs >= kPov0 && ev.dwOfs < kPov3 + sizeof(DWORD));
+                if (isButton) {
+                    if (ev.dwData & 0x80) continue; // swallow press, allow release
+                } else if (isPov && !povCentred(ev.dwData)) {
+                    continue; // swallow hat directions; the re-centre passes, like a button release
                 }
-                *inOut = kept;
-                if (kept < before) {
-                    d.zeroed.fetch_add(before - kept, std::memory_order_relaxed);
-                }
+                rgdod[kept++] = ev;
             }
-            return;
-        }
+            *inOut = kept;
+            if (kept < before) {
+                d.zeroed.fetch_add(before - kept, std::memory_order_relaxed);
+            }
+        });
+        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, rgdod, *inOut); });
+        return hr;
+    }
+    if (d.retired) return hr;
+    guardedBudget(g_budgetDi, [&] {
         if (cls != DeviceClass::Keyboard) return;
         // An empty read is nothing to filter (the check that used to sit above
         // the type test, which now has to run for a joystick's empty read too:
@@ -1012,38 +1135,81 @@ HRESULT filterDeviceData(DiDoor& d, void* self, DWORD cbObj, LPDIDEVICEOBJECTDAT
             (priv ? d.zeroed : d.swallowed).fetch_add(before - kept, std::memory_order_relaxed);
         }
     });
-    // A joystick or HOTAS: the rows the game's read just returned, copied and
-    // untouched (an empty read too: it shows the game is polling the device).
-    if (other) {
-        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, rgdod, *inOut); });
-    }
-    observeMouseData(self, hr, cbObj, rgdod, inOut, flags, observationCapacity);
-    if (keyboardObservation && hr == DI_OK && !(flags & DIGDD_PEEK)) {
-        guardedBudget(g_budgetKeyboardProbe, [&] {
-            if (*inOut > observationCapacity || *inOut > 1024) {
-                input_latency_probe::keyboardReadLost(self); return;
-            }
-            const uint64_t token = native_reflex::currentInputFrameToken();
-            for (DWORD i = 0; i < *inOut; ++i) {
-                const auto& event = rgdod[i];
-                if (event.dwOfs == DIK_UP || event.dwOfs == DIK_DOWN)
-                    input_latency_probe::keyboardBuffered(self, event.dwOfs, (event.dwData & 0x80) != 0, token,
-                        keyboardReceipt.QuadPart > 0 ? uint64_t(keyboardReceipt.QuadPart) : 0);
-            }
-        });
-    }
+    observeWithFormat(self, revision, [&](ProbeFormat layout) {
+        if (layout != ProbeFormat::Keyboard) {
+            observeMouseData(self, hr, cbObj, rgdod, inOut, flags, observationCapacity);
+            return;
+        }
+        if (keyboardObservation && hr == DI_OK && !(flags & DIGDD_PEEK)) {
+            guardedBudget(g_budgetKeyboardProbe, [&] {
+                if (*inOut > observationCapacity || *inOut > 1024) {
+                    input_latency_probe::keyboardReadLost(self); return;
+                }
+                const uint64_t token = native_reflex::currentInputFrameToken();
+                for (DWORD i = 0; i < *inOut; ++i) {
+                    const auto& event = rgdod[i];
+                    if (event.dwOfs == DIK_UP || event.dwOfs == DIK_DOWN)
+                        input_latency_probe::keyboardBuffered(self, event.dwOfs, (event.dwData & 0x80) != 0, token,
+                            keyboardReceipt.QuadPart > 0 ? uint64_t(keyboardReceipt.QuadPart) : 0);
+                }
+            });
+        }
+    });
     return hr;
 }
 
-template <DiDoor* Door, bool Wide>
-HRESULT STDMETHODCALLTYPE hookGetDeviceState(void* self, DWORD cb, LPVOID data) {
-    return filterDeviceState<Wide>(*Door, self, cb, data);
-}
+template<DiDoor* Door> DiDoor& fallbackReader() { return *Door; }
+template<size_t Index> DiDoor& keyboardReader() { return g_gameDi[Index]; }
+template<size_t Index> DiDoor& controllerReader() { return g_joyDoors[Index]; }
 
-template <DiDoor* Door, bool Wide>
-HRESULT STDMETHODCALLTYPE hookGetDeviceData(void* self, DWORD cb, LPDIDEVICEOBJECTDATA data,
-                                            LPDWORD count, DWORD flags) {
-    return filterDeviceData<Wide>(*Door, self, cb, data, count, flags);
+// All shared device tables dispatch by the captured object's identity. A/W
+// action-map payloads are forwarded untouched. A successful action map replaces
+// the active data format, so subsequent offsets need fresh proof.
+template<DiDoor& (*Reader)()> struct ReaderThunks {
+    static HRESULT STDMETHODCALLTYPE state(void* self, DWORD bytes, LPVOID out) {
+        return filterDeviceState(Reader(), self, bytes, out);
+    }
+    static HRESULT STDMETHODCALLTYPE data(void* self, DWORD bytes, LPDIDEVICEOBJECTDATA out, LPDWORD count, DWORD flags) {
+        return filterDeviceData(Reader(), self, bytes, out, count, flags);
+    }
+    static HRESULT STDMETHODCALLTYPE format(void* self, LPCDIDATAFORMAT layout) {
+        return setObservedFormat(self, layout, [&] { return Reader().origFormat(self, layout); });
+    }
+    static HRESULT STDMETHODCALLTYPE actionMap(void* self, void* actionFormat, const void* user, DWORD flags) {
+        return setObservedFormat(self, nullptr, [&] { return Reader().origActionMap(self, actionFormat, user, flags); });
+    }
+    static bool stageReads(DiDoor& door) {
+        return door.hook.replace(kSlotGetDeviceState, reinterpret_cast<void*>(&state), reinterpret_cast<void**>(&door.origState)) &&
+            door.hook.replace(kSlotGetDeviceData, reinterpret_cast<void*>(&data), reinterpret_cast<void**>(&door.origData));
+    }
+    static bool stageFormat(DiDoor& door, VTableHook& hook) {
+        return hook.replace(kSlotSetDataFormat, reinterpret_cast<void*>(&format), reinterpret_cast<void**>(&door.origFormat)) &&
+            hook.replace(kSlotSetActionMap, reinterpret_cast<void*>(&actionMap), reinterpret_cast<void**>(&door.origActionMap));
+    }
+    static bool stage(DiDoor& door) {
+        // An older interface can still filter reads, but cannot certify a format.
+        return stageReads(door) && (door.hook.executablePrefix() <= kSlotSetActionMap || stageFormat(door, door.hook));
+    }
+};
+using StageReader = bool (*)(DiDoor&);
+
+// A controller-only table keeps its two original read hooks. When a keyboard
+// or mouse joins it, add only the two format setters to the same retained
+// table. The existing reader then forwards and observes all three identities.
+// CaptureLock serializes discovery and publication by concurrent factories.
+template<size_t... I>
+void observeSharedControllerFormat(void** table, std::index_sequence<I...>) {
+    using StageFormat = bool (*)(DiDoor&, VTableHook&);
+    static const StageFormat stages[] = {&ReaderThunks<controllerReader<I>>::stageFormat...};
+    for (size_t i = 0; i < kJoyDoors; ++i) {
+        auto& door = g_joyDoors[i];
+        if (!door.installed || door.hook.originalVTable() != table) continue;
+        auto& hook = door.sharedFormatHook;
+        if (hook.committed() || door.hook.executablePrefix() <= kSlotSetActionMap) return;
+        if (!hook.attach(door.dummy, 32) || hook.originalVTable() != table ||
+            !hook.setMode(HookMode::InPlace) || !stages[i](door, hook) || !hook.commit()) hook.uninstall();
+        return;
+    }
 }
 
 SHORT WINAPI hookGetAsyncKeyState(int vk) {
@@ -1155,8 +1321,10 @@ void observeMouseMessage(const MSG* msg, UINT remove) {
 
 BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove) {
     BOOL r = FALSE;
+    // iatHookInstall publishes the forward before it publishes the new slot.
+    const auto original = reinterpret_cast<PFN_PeekMessageA>(g_user.peek.original);
     if (!guarded("inputGate/origPeekMessageA",
-                 [&] { r = g_user.origPeek(msg, hwnd, lo, hi, remove); })) {
+                 [&] { r = original(msg, hwnd, lo, hi, remove); })) {
         return FALSE;
     }
     if (!r || !msg) return r;
@@ -1165,7 +1333,7 @@ BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove
         if (msg->message == WM_QUIT) native_reflex::shutdownFrameTelemetry();
     }
     observeMouseMessage(msg, remove);
-    if (g_user.retired3) return r;
+    if (!g_user.filterMessages.load(std::memory_order_acquire) || g_user.retired3) return r;
     guardedBudget(g_budgetPump, [&] {
         const UINT m = msg->message;
         if (m == WM_INPUT) {
@@ -1212,17 +1380,6 @@ BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove
     return r;
 }
 
-template <size_t Index>
-HRESULT STDMETHODCALLTYPE gameDeviceState(void* self, DWORD cb, LPVOID data) {
-    return filterDeviceState<false>(g_gameDi[Index], self, cb, data);
-}
-
-template <size_t Index>
-HRESULT STDMETHODCALLTYPE gameDeviceData(void* self, DWORD cb, LPDIDEVICEOBJECTDATA data,
-                                         LPDWORD count, DWORD flags) {
-    return filterDeviceData<false>(g_gameDi[Index], self, cb, data, count, flags);
-}
-
 struct CaptureLock {
     CaptureLock() { AcquireSRWLockExclusive(&g_captureLock); }
     ~CaptureLock() { ReleaseSRWLockExclusive(&g_captureLock); }
@@ -1230,24 +1387,19 @@ struct CaptureLock {
 
 template <size_t... I>
 void captureKeyboard(void* device, std::index_sequence<I...>) {
-    // The one driver call a keyboard GUID earns, and only here at CreateDevice: a device made
-    // under it is a keyboard only if GetCapabilities says so, as before. It is remembered before
-    // the table is looked at, so a keyboard on a shared table is classified as one too.
-    if (capsTypeOf(device) != DI8DEVTYPE_KEYBOARD) return;
+    // CreateDevice has already established the type from the system keyboard's
+    // capabilities or the game's enumeration of this exact instance GUID.
+    // Remember it before examining a table that may serve other devices.
     keyboardRemember(device);
-    static const PFN_GetDeviceState stateHooks[] = {&gameDeviceState<I>...};
-    static const PFN_GetDeviceData dataHooks[] = {&gameDeviceData<I>...};
+    static const StageReader stages[] = {&ReaderThunks<keyboardReader<I>>::stage...};
     CaptureLock lock;
     void** table = *reinterpret_cast<void***>(device);
     // A shared system table may already have a fallback hook. Do not stack
     // another gate on it. Private overlay tables each get their own original.
-    for (DiDoor* d : {&g_diW, &g_diA}) {
-        if (d->installed && d->hook.originalVTable() == table) return;
+    if (inputReaderOwnsTable(table)) {
+        observeSharedControllerFormat(table, std::make_index_sequence<kJoyDoors>{});
+        return;
     }
-    for (auto& d : g_gameDi) {
-        if (d.installed && d.hook.originalVTable() == table) return;
-    }
-    if (mouseInputTableCaptured(table)) return;
     for (size_t i = 0; i < kGameDeviceDoors; ++i) {
         auto& d = g_gameDi[i];
         if (d.installed) continue;
@@ -1260,12 +1412,7 @@ void captureKeyboard(void* device, std::index_sequence<I...>) {
         d.dummy = device;
         reinterpret_cast<IUnknown*>(device)->AddRef();
         d.hook.setMode(HookMode::InPlace);
-        const bool staged =
-            d.hook.replace(kSlotGetDeviceState, reinterpret_cast<void*>(stateHooks[i]),
-                           reinterpret_cast<void**>(&d.origState)) &&
-            d.hook.replace(kSlotGetDeviceData, reinterpret_cast<void*>(dataHooks[i]),
-                           reinterpret_cast<void**>(&d.origData));
-        if (!staged || !d.hook.commit()) {
+        if (!stages[i](d) || !d.hook.commit()) {
             d.hook.uninstall();
             reinterpret_cast<IUnknown*>(device)->Release();
             d.dummy = nullptr;
@@ -1301,6 +1448,7 @@ struct MouseDoor {
 MouseDoor g_mouseDoors[kMouseDevices];
 
 bool isGameMouse(void* device) {
+    if (!device) return false;
     for (auto& mouse : g_mice) {
         if (mouse.load(std::memory_order_acquire) == device) return true;
     }
@@ -1310,14 +1458,18 @@ bool isGameMouse(void* device) {
 void mouseForget(void* device) {
     for (auto& mouse : g_mice) {
         void* expected = device;
-        if (mouse.compare_exchange_strong(expected, nullptr)) reinterpret_cast<IUnknown*>(device)->Release();
+        if (mouse.compare_exchange_strong(expected, nullptr)) {
+            if (input_latency_probe::enabled()) input_latency_probe::mouseReadLost(device);
+            reinterpret_cast<IUnknown*>(device)->Release();
+        }
     }
 }
 
-bool mouseInputTableCaptured(void** table) {
-    for (auto& mouse : g_mouseDoors)
-        if (mouse.reader.installed && mouse.observesReads && mouse.reader.hook.originalVTable() == table)
-            return true;
+bool inputReaderOwnsTable(void** table) {
+    const auto owns = [table](const DiDoor& door) { return door.installed && door.hook.originalVTable() == table; };
+    if (owns(g_diW) || owns(g_diA) || std::any_of(std::begin(g_gameDi), std::end(g_gameDi), owns) ||
+        std::any_of(std::begin(g_joyDoors), std::end(g_joyDoors), owns)) return true;
+    for (const auto& mouse : g_mouseDoors) if (mouse.observesReads && owns(mouse.reader)) return true;
     return false;
 }
 
@@ -1337,7 +1489,7 @@ void noteMouseCapture() {
 void noteMouseStateRead(void* device, HRESULT result, DWORD bytes) {
     if (!input_latency_probe::enabled() || !isGameMouse(device) ||
         (g_mouseDiagnosticNotes.fetch_or(2, std::memory_order_relaxed) & 2)) return;
-    Log::get().note("input_latency_input,route=directinput_state,device=%p,result=0x%08lX,bytes=%lu,standard_layout=%u",
+    Log::get().note("input_latency_input,route=directinput_state,device=%p,result=0x%08lX,bytes=%lu,standard_size=%u",
                     device, static_cast<unsigned long>(result), static_cast<unsigned long>(bytes),
                     unsigned(bytes == sizeof(DIMOUSESTATE) || bytes == sizeof(DIMOUSESTATE2)));
 }
@@ -1375,23 +1527,17 @@ void observeMouseData(void* device, HRESULT result, DWORD bytes, const DIDEVICEO
         bytes != sizeof(DIDEVICEOBJECTDATA) || (flags & DIGDD_PEEK)) return;
     guardedBudget(g_budgetMouse, [&] {
         // Bound the diagnostic independently of an unfamiliar driver's count.
-        if (*count > capacity || *count > 1024) return;
+        if (*count > capacity || *count > 1024) {
+            input_latency_probe::mouseReadLost(device);
+            return;
+        }
         for (DWORD i = 0; i < *count; ++i)
             if (data[i].dwOfs == DIMOFS_BUTTON0)
                 input_latency_probe::mouseButton(device, (data[i].dwData & 0x80) != 0, 2);
     });
 }
 
-template <size_t Index>
-HRESULT STDMETHODCALLTYPE mouseDeviceState(void* self, DWORD bytes, LPVOID data) {
-    return filterDeviceState<false>(g_mouseDoors[Index].reader, self, bytes, data);
-}
-
-template <size_t Index>
-HRESULT STDMETHODCALLTYPE mouseDeviceData(void* self, DWORD bytes, LPDIDEVICEOBJECTDATA data,
-                                          LPDWORD count, DWORD flags) {
-    return filterDeviceData<false>(g_mouseDoors[Index].reader, self, bytes, data, count, flags);
-}
+template<size_t Index> DiDoor& mouseReader() { return g_mouseDoors[Index].reader; }
 
 template <size_t Index>
 HRESULT STDMETHODCALLTYPE mouseSetCooperativeLevel(void* self, HWND hwnd, DWORD flags) {
@@ -1402,17 +1548,13 @@ HRESULT STDMETHODCALLTYPE mouseSetCooperativeLevel(void* self, HWND hwnd, DWORD 
 
 template <size_t... Index>
 void captureMouseTable(void* device, std::index_sequence<Index...>) {
-    static const PFN_GetDeviceState stateHooks[] = {&mouseDeviceState<Index>...};
-    static const PFN_GetDeviceData dataHooks[] = {&mouseDeviceData<Index>...};
+    static const StageReader stages[] = {&ReaderThunks<mouseReader<Index>>::stage...};
     static const PFN_SetCooperativeLevel cooperativeHooks[] = {&mouseSetCooperativeLevel<Index>...};
     void** table = *reinterpret_cast<void***>(device);
     for (auto& mouse : g_mouseDoors)
         if (mouse.reader.installed && mouse.reader.hook.originalVTable() == table) return;
-    bool sharedReader = false;
-    for (DiDoor* reader : {&g_diA, &g_diW})
-        sharedReader = sharedReader || (reader->installed && reader->hook.originalVTable() == table);
-    for (auto& reader : g_gameDi)
-        sharedReader = sharedReader || (reader.installed && reader.hook.originalVTable() == table);
+    const bool sharedReader = inputReaderOwnsTable(table);
+    if (sharedReader) observeSharedControllerFormat(table, std::make_index_sequence<kJoyDoors>{});
     for (size_t i = 0; i < kMouseDevices; ++i) {
         auto& mouse = g_mouseDoors[i];
         auto& reader = mouse.reader;
@@ -1428,12 +1570,7 @@ void captureMouseTable(void* device, std::index_sequence<Index...>) {
         reader.hook.setMode(HookMode::InPlace);
         bool staged = reader.hook.replace(kSlotSetCooperativeLevel, reinterpret_cast<void*>(cooperativeHooks[i]),
                                            reinterpret_cast<void**>(&mouse.originalCooperative));
-        if (!sharedReader) {
-            staged = staged && reader.hook.replace(kSlotGetDeviceState, reinterpret_cast<void*>(stateHooks[i]),
-                                                   reinterpret_cast<void**>(&reader.origState)) &&
-                     reader.hook.replace(kSlotGetDeviceData, reinterpret_cast<void*>(dataHooks[i]),
-                                         reinterpret_cast<void**>(&reader.origData));
-        }
+        if (!sharedReader) staged = staged && stages[i](reader);
         if (!staged || !reader.hook.commit()) {
             reader.hook.uninstall();
             reinterpret_cast<IUnknown*>(device)->Release();
@@ -1463,69 +1600,6 @@ void captureMouse(void* device) {
 }
 
 // ---- the joystick doors: observation and plugin gating ------------------
-
-template <size_t Index>
-HRESULT STDMETHODCALLTYPE joyDeviceState(void* self, DWORD cb, LPVOID data) {
-    JoyDoor& j = g_joyDoors[Index];
-    const HRESULT hr = j.origState(self, cb, data);
-    if (SUCCEEDED(hr) && data) {
-        if (g_pluginBlock.load(std::memory_order_relaxed)) {
-            if (cb >= sizeof(DIJOYSTATE)) {
-                DIJOYSTATE* js = static_cast<DIJOYSTATE*>(data);
-                for (int p = 0; p < 4; ++p) js->rgdwPOV[p] = 0xFFFFFFFFu;
-                memset(js->rgbButtons, 0, sizeof(js->rgbButtons));
-                if (cb >= sizeof(DIJOYSTATE2)) {
-                    DIJOYSTATE2* js2 = static_cast<DIJOYSTATE2*>(data);
-                    memset(js2->rgbButtons + 32, 0, 96);
-                }
-            } else {
-                constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgdwPOV[0]));
-                constexpr DWORD kPovEnd = kPov0 + 4 * sizeof(DWORD);
-                if (cb >= kPovEnd) {
-                    auto* povPtr = reinterpret_cast<DWORD*>(static_cast<uint8_t*>(data) + kPov0);
-                    for (int p = 0; p < 4; ++p) povPtr[p] = 0xFFFFFFFFu;
-                }
-                constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE, rgbButtons[0]));
-                if (cb > kBtn0) {
-                    memset(static_cast<uint8_t*>(data) + kBtn0, 0, cb - kBtn0);
-                }
-            }
-        }
-        guardedBudget(g_budgetJoy, [&] { observeControllerState(self, cb, data); });
-    }
-    return hr;
-}
-
-template <size_t Index>
-HRESULT STDMETHODCALLTYPE joyDeviceData(void* self, DWORD cb, LPDIDEVICEOBJECTDATA data, LPDWORD count,
-                                        DWORD flags) {
-    JoyDoor& j = g_joyDoors[Index];
-    const HRESULT hr = j.origData(self, cb, data, count, flags);
-    if (SUCCEEDED(hr) && data && count && cb == sizeof(DIDEVICEOBJECTDATA)) {
-        const DWORD returned = *count;
-        if (g_pluginBlock.load(std::memory_order_relaxed) && returned > 0) {
-            constexpr DWORD kPov0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[0]));
-            constexpr DWORD kPov3 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgdwPOV[3]));
-            constexpr DWORD kBtn0 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[0]));
-            constexpr DWORD kBtn127 = static_cast<DWORD>(offsetof(DIJOYSTATE2, rgbButtons[127]));
-            uint32_t kept = 0;
-            for (uint32_t i = 0; i < returned; ++i) {
-                const auto& ev = data[i];
-                const bool isButton = (ev.dwOfs >= kBtn0 && ev.dwOfs <= kBtn127);
-                const bool isPov = (ev.dwOfs >= kPov0 && ev.dwOfs < kPov3 + sizeof(DWORD));
-                if (isButton) {
-                    if (ev.dwData & 0x80) continue; // swallow press, allow release
-                } else if (isPov && !povCentred(ev.dwData)) {
-                    continue; // swallow hat directions; the re-centre passes, like a button release
-                }
-                data[kept++] = ev;
-            }
-            *count = kept;
-        }
-        guardedBudget(g_budgetJoy, [&] { observeControllerData(self, data, *count); });
-    }
-    return hr;
-}
 
 // What the factory door hands the game's own EnumDevices callback in place of the
 // callback: the game's callback and its pvRef, carried for this one call on the stack.
@@ -1568,38 +1642,26 @@ BOOL CALLBACK enumThunkW(LPCDIDEVICEINSTANCEW inst, LPVOID ref) {
 // the AddRef below is the one reference, which keeps the table alive for the reclaim.
 template <size_t... I>
 void captureController(void* device, std::index_sequence<I...>) {
-    static const PFN_GetDeviceState stateHooks[] = {&joyDeviceState<I>...};
-    static const PFN_GetDeviceData dataHooks[] = {&joyDeviceData<I>...};
+    static const StageReader stages[] = {&ReaderThunks<controllerReader<I>>::stageReads...};
     CaptureLock lock;
     void** table = *reinterpret_cast<void***>(device);
-    for (DiDoor* d : {&g_diW, &g_diA}) {
-        if (d->installed && d->hook.originalVTable() == table) return;
-    }
-    for (auto& d : g_gameDi) {
-        if (d.installed && d.hook.originalVTable() == table) return;
-    }
-    for (auto& j : g_joyDoors) {
-        if (j.installed && j.hook.originalVTable() == table) return;
-    }
+    if (inputReaderOwnsTable(table)) return;
     for (size_t i = 0; i < kJoyDoors; ++i) {
-        JoyDoor& j = g_joyDoors[i];
+        DiDoor& j = g_joyDoors[i];
         if (j.installed) continue;
         if (!j.hook.attach(device, 32) || j.hook.executablePrefix() <= kSlotGetDeviceData) {
             j.hook.uninstall();
             return;
         }
         reinterpret_cast<IUnknown*>(device)->AddRef();
-        j.held = device;
+        j.dummy = device;
         j.hook.setMode(HookMode::InPlace);
-        const bool staged =
-            j.hook.replace(kSlotGetDeviceState, reinterpret_cast<void*>(stateHooks[i]),
-                           reinterpret_cast<void**>(&j.origState)) &&
-            j.hook.replace(kSlotGetDeviceData, reinterpret_cast<void*>(dataHooks[i]),
-                           reinterpret_cast<void**>(&j.origData));
-        if (!staged || !j.hook.commit()) {
+        j.name = "joystick watch";
+        j.gameDevice = true;
+        if (!stages[i](j) || !j.hook.commit()) {
             j.hook.uninstall();
             reinterpret_cast<IUnknown*>(device)->Release();
-            j.held = nullptr;
+            j.dummy = nullptr;
             return;
         }
         j.installed = true;
@@ -1637,7 +1699,8 @@ HRESULT STDMETHODCALLTYPE factoryCreateDevice(void* self, REFGUID guid, void** d
         mouseForget(*device);
         if (isKeyboardGuid(guid)) {
             guardedBudget(g_budgetDi, [&] {
-                captureKeyboard(*device, std::make_index_sequence<kGameDeviceDoors>{});
+                if (capsTypeOf(*device) == DI8DEVTYPE_KEYBOARD)
+                    captureKeyboard(*device, std::make_index_sequence<kGameDeviceDoors>{});
             });
         } else if (isMouseGuid(guid)) {
             // The mouse is only watched: its cooperative level is logged (desktop_window_cursor.cpp), and nothing about it is changed. VR scope.
@@ -1648,7 +1711,7 @@ HRESULT STDMETHODCALLTYPE factoryCreateDevice(void* self, REFGUID guid, void** d
             guardedBudget(g_budgetDi, [&] {
                 EnumRecord rec;
                 if (enumeratedRecord(guid, &rec) && GET_DIDEVICE_TYPE(rec.devType) == DI8DEVTYPE_KEYBOARD) {
-                    keyboardRemember(*device);
+                    captureKeyboard(*device, std::make_index_sequence<kGameDeviceDoors>{});
                 }
             });
             // A controller the game enumerated is registered BEFORE the table is looked at:
@@ -1744,12 +1807,13 @@ void installDiDoor(PFN_DirectInput8Create create, HINSTANCE inst, const GUID& ii
     // The IDirectInput8 object itself is not needed past this point; the
     // device keeps its own reference to what it needs.
     reinterpret_cast<IUnknown*>(di)->Release();
+    CaptureLock lock;
     d.dummy = dev;
 
     void** table = *reinterpret_cast<void***>(dev);
-    if (mouseInputTableCaptured(table)) {
+    if (inputReaderOwnsTable(table)) {
         *sharedTableOut = table;
-        return;  // The shared mouse reader also applies the keyboard gate.
+        return;  // The existing reader also applies the keyboard gate.
     }
     if (*sharedTableOut && *sharedTableOut == table) {
         // The two interfaces share one table on this dinput8: patching it
@@ -1771,11 +1835,7 @@ void installDiDoor(PFN_DirectInput8Create create, HINSTANCE inst, const GUID& ii
     iatHookEntryModule(table[kSlotGetDeviceState], modState, sizeof(modState));
     iatHookEntryModule(table[kSlotGetDeviceData], modData, sizeof(modData));
     d.hook.setMode(HookMode::InPlace);
-    d.hook.replace(kSlotGetDeviceState, reinterpret_cast<void*>(&hookGetDeviceState<Door, Wide>),
-                   reinterpret_cast<void**>(&d.origState));
-    d.hook.replace(kSlotGetDeviceData, reinterpret_cast<void*>(&hookGetDeviceData<Door, Wide>),
-                   reinterpret_cast<void**>(&d.origData));
-    if (!d.hook.commit()) {
+    if (!ReaderThunks<fallbackReader<Door>>::stage(d) || !d.hook.commit()) {
         Log::get().note("keyboard gate: patching the %s keyboard table failed; that door "
                         "is not installed.",
                         name);
@@ -1822,10 +1882,7 @@ void installUserDoors() {
         g_user.origKeyboardState =
             reinterpret_cast<PFN_GetKeyboardState>(g_user.keyboardState.original);
     }
-    if (iatHookInstall("user32.dll", "PeekMessageA",
-                       reinterpret_cast<void*>(&hookPeekMessageA), &g_user.peek)) {
-        g_user.origPeek = reinterpret_cast<PFN_PeekMessageA>(g_user.peek.original);
-    }
+    if (inputGateInstallMessageObserver()) g_user.filterMessages.store(true, std::memory_order_release);
     iatHookEntryModule(g_user.asyncKey.original, mod, sizeof(mod));
     Log::get().note(
         "keyboard gate: the executable's import table -- GetAsyncKeyState %s, GetKeyState "
@@ -1876,6 +1933,7 @@ void probeLine() {
 void doorEvidence(bool* di, bool* reached) {
     bool any = (g_diW.installed && !g_diW.retired) || (g_diA.installed && !g_diA.retired);
     for (const auto& d : g_gameDi) any |= d.installed && !d.retired;
+    for (const auto& d : g_joyDoors) any |= d.installed && !d.retired;
     for (const auto& mouse : g_mouseDoors)
         any |= mouse.observesReads && mouse.reader.installed && !mouse.reader.retired;
     // The budget is what actually decides pass-through: once it is spent
@@ -1970,6 +2028,12 @@ void inputGateConfigure(Config& cfg) {
         g_private.store(0);
         cancelReleaseTail();
     }
+}
+
+bool inputGateInstallMessageObserver() {
+    CaptureLock lock;
+    if (g_user.peek.applied) return g_user.peek.slot && *g_user.peek.slot == g_user.peek.replacement;
+    return iatHookInstall("user32.dll", "PeekMessageA", reinterpret_cast<void*>(&hookPeekMessageA), &g_user.peek);
 }
 
 static void installKeyboardDoors() {
@@ -2184,7 +2248,7 @@ void inputGateTick() {
         // The joystick doors only look: a table another tool re-points is
         // named in the log, never patched back (observation is not worth a
         // fight over a shared slot).
-        for (JoyDoor& j : g_joyDoors) {
+        for (auto& j : g_joyDoors) {
             if (j.installed) j.hook.reclaim("joystick watch");
         }
         for (auto& mouse : g_mouseDoors) {
@@ -2254,7 +2318,11 @@ void inputGateShutdown() {
     g_summon.store(0);
     cancelReleaseTail();
     iatHookUninstall(&g_createImport);
-    iatHookUninstall(&g_user.peek);
+    {
+        CaptureLock lock;
+        g_user.filterMessages.store(false, std::memory_order_release);
+        iatHookUninstall(&g_user.peek);
+    }
     iatHookUninstall(&g_user.keyboardState);
     iatHookUninstall(&g_user.keyState);
     iatHookUninstall(&g_user.asyncKey);
@@ -2273,10 +2341,11 @@ void inputGateShutdown() {
         d.dummy = nullptr;
     }
     for (auto& j : g_joyDoors) {
+        j.sharedFormatHook.uninstall();
         j.hook.uninstall();
         j.installed = false;
-        if (j.held) reinterpret_cast<IUnknown*>(j.held)->Release();
-        j.held = nullptr;
+        if (j.dummy) reinterpret_cast<IUnknown*>(j.dummy)->Release();
+        j.dummy = nullptr;
     }
     for (auto& f : g_factories) {
         f.hook.uninstall();
@@ -2293,6 +2362,9 @@ void inputGateShutdown() {
     for (auto& mouse : g_mice) {
         if (void* device = mouse.exchange(nullptr)) reinterpret_cast<IUnknown*>(device)->Release();
     }
+    AcquireSRWLockExclusive(&g_formatsLock);
+    for (auto& entry : g_formats) entry = {};
+    ReleaseSRWLockExclusive(&g_formatsLock);
 }
 
 void inputGateInstallEarly() {

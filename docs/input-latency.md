@@ -2,15 +2,17 @@
 
 ## Status
 
-The per-frame native Reflex integration and v3 real-UI diagnostic passed full
-native Windows validation. In a six-pass GPU-saturated stationary VR
-comparison, median keyboard injection to observed UI GPU completion was 104.64
-ms with Reflex Off, 86.39 ms On and 85.60 ms On + Boost. Each enabled pass
-improved both median and p95 against both bracketing Off passes. A lighter
-workload and an earlier head-pose comparison showed no useful, repeatable
-improvement. These are software endpoints, not physical HMD latency; Boost did
-not establish an additional benefit over On. See the comparisons below for
-scope and limits.
+The per-frame native Reflex integration and v4 response diagnostic passed full
+native Windows validation, including the additional review regressions. The
+measurements below retain their original build provenance; the v4 follow-up has
+no new runtime benchmark or physical headset flight. In a six-pass
+GPU-saturated stationary VR comparison, median sender arm publication to
+observed UI GPU completion was 104.64 ms with Reflex Off, 86.39 ms On and 85.60
+ms On + Boost. Each enabled pass improved both median and p95 against both
+bracketing Off passes. A lighter workload and an earlier head-pose comparison
+showed no useful, repeatable improvement. These are software endpoints, not
+physical HMD latency; Boost did not establish an additional benefit over On.
+See the comparisons below for scope and limits.
 
 The optional response diagnostic, `advanced.input_latency_probe`, remains off
 by default. Its earlier 180-pulse synthetic comparison used code commit
@@ -27,41 +29,53 @@ The native VR session calls NVIDIA's Sleep once at the guarded application
 iteration boundary, before input. Off still makes that call. The normal
 update's return ends the simulation region. The retained render-job ticket
 identifies the HMD pose returned to that job and its submitted eye textures.
-The first real command on the game's immediate context begins render
-submission. Its end waits for both the render job and the eye-mirror draw.
-Simulation, rendering and Present can overlap.
+The first tracked immediate-context command entry after pose receipt begins the
+CPU render-submission region. ED-UP may subsequently suppress that draw; this
+timestamp identifies CPU submission work, not the first forwarded driver
+command or GPU execution. Its end waits for both the render job and the
+successfully drawn eye mirror. Simulation, rendering and Present can overlap.
 
 The optional source capability is shared by the graphics and native runtime
 modules. It checks device, session, job, pose sequence and actual acceptance of
 both eyes. The finished texture carries that source into the desktop mirror.
 Mixed, reused, backward or unqualified sources emit no Present markers. Present
-markers surround the real DXGI call on its calling thread. The game's original
-mirror route has no qualified source yet.
+markers surround the first real DXGI call on its calling thread. Failed or
+occluded Presents cannot certify completion. A successful same-source retry can
+publish CPU completion without repeating those markers; its driver timing is
+not paired to the retry. The game's original mirror route has no qualified
+source yet.
 
 PCL statistics remain active in every mode and on other GPU vendors. Removed
 PCL ping messages wait for the next actual InputManager boundary. Normal game
-shutdown stops the SDK worker outside loader teardown. The pinned NVIDIA SDK
-license ships with binaries using its statistics header. Removed game-window
-left-button presses, including double-clicks, also queue the SDK flash marker
-for the next actual InputManager boundary. This does not depend on the optional
-response probe or a flash-indicator setting.
+shutdown stops the SDK worker outside loader teardown. Passive message
+observation remains available when `advanced.input_gate = 0`; it does not
+enable keyboard suppression. The pinned NVIDIA SDK license ships with binaries
+using its statistics header. Removed game-window left-button presses, including
+double-clicks, also queue the SDK flash marker for the next actual InputManager
+boundary. This does not depend on the optional response probe or a
+flash-indicator setting.
 
-The graphics log's `native_reflex_frame` rows use QPC for the interval from the
-game's HMD pose receipt to desktop Present return. This is a CPU interval.
-`native_reflex_latency` rows retain NVIDIA's separate microsecond clock for
-simulation-to-GPU completion. Neither is physical head-motion-to-photon
-latency. The integration follows the [native Reflex SDK
+With `advanced.app_gpu_timing = on`, the graphics log's `native_reflex_frame`
+rows use QPC for the interval from the game's HMD pose receipt to desktop
+Present return. This is a CPU interval. `native_reflex_latency` rows retain
+NVIDIA's separate microsecond clock for simulation-to-GPU completion. Neither
+is physical head-motion-to-photon latency. Detailed frame rows and driver
+timing reads are off otherwise; baseline SDK markers, availability and
+aggregate health remain active. The integration follows the [native Reflex SDK
 guide](https://github.com/NVIDIA-RTX/REFLEX/blob/main/NVIDIA%20Reflex%20SDK%20Integration%20Guide.pdf)
 and [NVAPI interfaces](https://docs.nvidia.com/nvapi/group__dx.html).
 
 ## Real UI response probe
 
-The optional v3 keyboard route uses `--input-key UP` or `DOWN` and configured
+The optional v4 keyboard route uses `--input-key UP` or `DOWN` and configured
 per-eye response regions. State receipts use source 4; ordinary buffered
 keyboard receipts use source 5. Both require the captured game device and a
 successful standard read inside the guarded InputManager. Peeked events,
 overflow, read loss and unsupported layouts cannot certify a receipt. An empty
-buffer does not prove release.
+buffer does not prove release. DirectInput receipts also require a successful
+per-device data-format witness for the expected objects and offsets. A
+same-size custom layout is not sufficient. Format changes and action mapping
+revoke that proof until a qualifying format is observed.
 
 The sender first performs an untimed cycle of the requested key and its
 opposite. These preparation inputs are recorded separately from latency
@@ -75,7 +89,23 @@ not paint a response. Unsupported formats, failed input ownership, unchanged
 pixels and mixed sequences reject the sample. Captured keyboard reads outside
 the guarded invocation provide diagnostics only. They cannot satisfy release
 readiness or consume the request. The preparation log distinguishes missing
-pixel baseline from missing qualified keyboard release.
+pixel baseline from missing qualified keyboard release. A competing arrow press
+on any qualified captured keyboard invalidates the prepared baseline through
+response qualification. Duplicate held states and the measured key's release
+remain valid. The timing provider must negotiate full, unflipped eye-region
+proof; cropped or unqualified regions cannot complete the diagnostic, while
+ordinary GPU timing remains available.
+
+IPC v4 preserves the 32-word layout and reserves receiver readiness value 2 as
+a permanent stopped latch. Retirement publishes it before cleanup, and a
+terminal-result acknowledgement cannot clear it. The sender checks liveness
+before every new input down and still releases input it already owns. Both
+response routes require v4; legacy receivers cannot certify full-image bounds.
+A driver-mode change, including shutdown, retires the receiver first; it
+resumes only when accepted driver proof matches the saved mode. Known
+non-NVIDIA adapters can use saved Off without an NVIDIA driver write. A
+retained old mapping cannot be reused as a new receiver while a sender still
+holds it.
 
 This is a fallback for a controlled UI response. VR head motion is supplied by
 the existing testing framework's pose controls. Framework command receipt, game
@@ -114,6 +144,12 @@ markers. The probe itself does not change the selected driver policy; identical
 instrumentation is used for Off, On and On + Boost.
 
 ## Collection and rejection
+
+For both response routes, the sender records a local QPC immediately before
+sending the measured input, after validating the armed request. The shared
+`sentQpc` remains the earlier arm-publication stamp for request ownership.
+Injection intervals use the local send stamp, so the final shared-memory
+validation is excluded.
 
 Enable `advanced.app_gpu_timing = on` and `advanced.input_latency_probe = on`
 in the VR profile. Keep the game foreground, use a stationary training scene
@@ -159,7 +195,12 @@ measured inputs per pass after at least 90 new source frames and a successful
 Reflex mode. DLL, sender, protocol, INI and graphics-file hashes were checked;
 preparation inputs and correctness preflights were excluded from measurements.
 
-| Workload | Mode | Samples | Injection to observed UI GPU completion median / p95 (ms) | Injection to paired submit median / p95 (ms) |
+These historical intervals start at the sender's shared arm-publication
+`sentQpc`, before publishing Armed and calling `SendInput`. They include that
+publication work. The current v4 sender uses the later local `injectionQpc` at
+the OS call. The historical values below have not been retimed.
+
+| Workload | Mode | Samples | Arm publication to observed UI GPU completion median / p95 (ms) | Arm publication to paired submit median / p95 (ms) |
 | --- | --- | ---: | ---: | ---: |
 | Lighter: DLSS K, 1484 by 835 input, 2560 by 1440 output per eye | Off | 60 | 87.16 / 92.43 | 83.51 / 89.08 |
 | Same | On | 60 | 87.43 / 92.83 | 83.76 / 89.18 |
@@ -286,11 +327,12 @@ API does not expose a separate Boost readback bit.
 | On | 60 | 0.33 / 0.56 | 24.16 / 35.52 | 20.32 / 31.72 |
 | On + Boost | 60 | 0.33 / 0.47 | 22.05 / 34.01 | 17.89 / 30.32 |
 
-All values start at the sender's injection timestamp. Percentiles use nearest
-rank; the median uses the middle pair. Raw QPC endpoints independently
-reproduce the reported values. The initial three-pulse check and incomplete
-setup attempts are excluded. Captures before and after each mode show the same
-docked view.
+All values start at the sender's shared arm-publication timestamp, before
+calling `SendInput`; the current v4 sender uses a later local stamp.
+Percentiles use nearest rank; the median uses the middle pair. Raw QPC
+endpoints independently reproduce the reported values. The initial three-pulse
+check and incomplete setup attempts are excluded. Captures before and after
+each mode show the same docked view.
 
 On did not lower the median or p95 in this run. Boost's median was 1.25 ms
 below Off, while its p95 was only 0.34 ms below Off. One sequential comparison

@@ -41,6 +41,8 @@ struct State {
     edvr::native_reflex::ModeHistory lowLatency;
     edvr::native_reflex::FrameDriver* lowLatencyDriver = nullptr; // borrowed from explicit session owner
     DWORD lowLatencyProducerThread = 0;
+    edvr::native_reflex::Mode savedProbeMode = edvr::native_reflex::Mode::Off;
+    bool probeWithoutReflex = false;
     uint64_t sequenceFloor = 0;
     bool active = false;
     bool invalidated = false;
@@ -74,6 +76,9 @@ constexpr uint64_t kLowLatencyTransportFault = uint64_t{1} << 61;
 constexpr uint64_t kLowLatencyAvailable = uint64_t{1} << 60;
 constexpr uint64_t kLowLatencyNoSession = UINT64_MAX;
 std::atomic<uint64_t> g_lowLatencyStamp{kLowLatencyNoSession};
+std::atomic<edvr::native_reflex::ModeStatus> g_lowLatencyStatus{edvr::native_reflex::ModeStatus::Unavailable};
+std::atomic<uint64_t> g_probeConfigStamp{UINT64_MAX};
+std::atomic<bool> g_probeWanted{false};
 
 uint64_t lowLatencyConfigStamp() {
     return (uint64_t(edvr::Config::get().generation()) << 1) | uint64_t(edvr::runtimeVrProfile()) |
@@ -94,11 +99,18 @@ void refreshLowLatency(State& state, uint64_t cached, bool fromPresent) {
             mode = parseMode(edvr::Config::get().getString("fix.nvidia_reflex", "off"));
         }
         if (stamp != lowLatencyConfigStamp()) return;
+        // Retire measurements before a driver write can invalidate the mode
+        // proof. InputManager can be active on a different thread.
+        if (state.lowLatency.requestDue(mode, state.lowLatencyDriver != nullptr) && edvr::input_latency_probe::enabled()) {
+            edvr::input_latency_probe::stop();
+            if (stamp != lowLatencyConfigStamp()) return;
+        }
         changed = updateMode(state.lowLatency, state.device, mode, state.generation, state.lowLatencyDriver);
     }
     // The Present that changed the mode precedes the new request.
     if (fromPresent && !changed) notePresent(state.lowLatency, state.device, state.generation);
     if (fromPresent) reportFrameSession(state.generation);
+    g_lowLatencyStatus.store(state.lowLatency.status(), std::memory_order_release);
     g_lowLatencyStamp.store(stamp | (state.lowLatency.observing() ? kLowLatencyObservationPending : 0) |
                                (state.lowLatency.retryNeeded() ? kLowLatencyNeedsRefresh : 0),
                             std::memory_order_release);
@@ -689,11 +701,15 @@ HRESULT WINAPI close(void* context) {
         edvr::retireGlitchConsumer();
         state->consumerAnnounced = false;
     }
+    // Retire the sender and observer before shutdown can change the driver mode.
+    edvr::input_latency_probe::stop();
     edvr::native_reflex::stopFrameSession(state->generation);
     state->lowLatencyDriver = nullptr;
     edvr::native_reflex::closeMode(state->lowLatency, state->device, state->generation);
-    edvr::input_latency_probe::stop();
     g_lowLatencyStamp.store(kLowLatencyNoSession, std::memory_order_release);
+    g_lowLatencyStatus.store(edvr::native_reflex::ModeStatus::Unavailable, std::memory_order_release);
+    g_probeConfigStamp.store(UINT64_MAX, std::memory_order_release);
+    g_probeWanted.store(false, std::memory_order_release);
     state->active = false;
     state->device = nullptr;
     state->invalidated = true;
@@ -711,18 +727,20 @@ HRESULT WINAPI close(void* context) {
 
 namespace edvr {
 
+native_reflex::ModeStatus native_reflex::modeStatusForUser() noexcept {
+    return g_lowLatencyStatus.load(std::memory_order_acquire);
+}
+
 void native_reflex::updateOnGamePresent(ID3D11Device* device) {
     if (!device) return;
     const auto cached = g_lowLatencyStamp.load(std::memory_order_acquire);
     const auto stamp = lowLatencyConfigStamp();
     // Foreign Presents may arrive concurrently. The atomic cache is only
     // refreshed by the enrolled producer below the existing device fence.
-    static std::atomic<uint64_t> probeStamp{UINT64_MAX};
-    static std::atomic<bool> probeWanted{false};
     const bool probeLive = input_latency_probe::enabled();
     if (!probeLive && cached == kLowLatencyNoSession) return;
-    const bool probeChanged = probeStamp.load(std::memory_order_acquire) != stamp;
-    if (!probeChanged && !probeWanted.load(std::memory_order_acquire) &&
+    const bool probeChanged = g_probeConfigStamp.load(std::memory_order_acquire) != stamp;
+    if (!probeChanged && !g_probeWanted.load(std::memory_order_acquire) &&
         !probeLive && cached == stamp) {
         reportFrameSession(0);
         return;
@@ -732,14 +750,19 @@ void native_reflex::updateOnGamePresent(ID3D11Device* device) {
         (device != g_current->device && !sameDevice(g_current->device, device))) {
         return;
     }
-    if (probeStamp.load(std::memory_order_relaxed) != stamp) {
-        probeWanted.store((stamp & 1) && !graphicsRuntimeDisabled() &&
-            Config::get().getBool("advanced.input_latency_probe", false),
-            std::memory_order_release);
-        probeStamp.store(stamp, std::memory_order_release);
+    if (g_probeConfigStamp.load(std::memory_order_relaxed) != stamp) {
+        auto& config = Config::get();
+        const bool wanted = (stamp & 1) && !graphicsRuntimeDisabled() &&
+            config.getBool("advanced.input_latency_probe", false);
+        if (wanted) g_current->savedProbeMode = parseMode(config.getString("fix.nvidia_reflex", "off"));
+        // Keep measuring with Reflex Off on known non-NVIDIA devices. A
+        // missing NVIDIA frame driver could conceal existing driver policy.
+        g_current->probeWithoutReflex = wanted && !g_current->lowLatencyDriver &&
+            g_current->savedProbeMode == Mode::Off && isNonNvidiaAdapter(g_current->device);
+        g_probeWanted.store(wanted, std::memory_order_release);
+        g_probeConfigStamp.store(stamp, std::memory_order_release);
     }
-    const bool wanted = probeWanted.load(std::memory_order_relaxed);
-    const bool probeActive = wanted || input_latency_probe::enabled();
+    const bool wanted = g_probeWanted.load(std::memory_order_relaxed);
     if (cached != kLowLatencyNoSession && cached != stamp)
         refreshLowLatency(*g_current, g_lowLatencyStamp.load(std::memory_order_relaxed), true);
     else
@@ -749,9 +772,13 @@ void native_reflex::updateOnGamePresent(ID3D11Device* device) {
     // Install the game import observer even when the settings menu has never
     // opened. The existing input owner installs each door once.
     if (wanted) inputGateInstall();
-    if (probeActive)
-        input_latency_probe::configure(device, wanted,
-            g_current->lowLatency.requested(), Config::get().generation());
+    auto mode = g_current->lowLatency.confirmedMode();
+    if (g_current->probeWithoutReflex) mode = Mode::Off;
+    const uint32_t generation = static_cast<uint32_t>(stamp >> 1);
+    // The safe driver fallback can be Off while saved On or Boost awaits a source.
+    const bool confirmed = wanted && mode == g_current->savedProbeMode && stamp == lowLatencyConfigStamp();
+    if (confirmed || probeLive)
+        input_latency_probe::configure(g_current->device, confirmed, mode.value_or(Mode::Off), generation);
 }
 
 // For temporal_pass.cpp's edges-mode fovea (same DLL, no table needed):

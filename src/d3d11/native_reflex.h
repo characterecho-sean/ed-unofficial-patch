@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include "../common/native_reflex_setting.h"
 
 struct ID3D11Device;
@@ -54,26 +55,91 @@ struct LatencyBatch {
 
 class FrameDriver;
 
+enum class ModeStatus : uint8_t {
+    Unavailable, Pending, ConfirmedOff, ConfirmedOn, ConfirmedOnWithBoostRequested,
+    RequestRefused, WithdrawalRefused, ReadbackUnavailable, DriverReportsOff, DriverReportsOn,
+};
+
+// Snapshot of the current session's driver evidence for the settings menu.
+ModeStatus modeStatusForUser() noexcept;
+
+inline constexpr const char* kModeUnavailableHint =
+    "On and On + Boost need supported NVIDIA VR and an eye view under Mirror window > Image. Off remains available.";
+
+// F8 shows driver evidence separately from the saved choice and eligibility.
+constexpr const char* modeStatusHint(ModeStatus status, bool canEnable) noexcept {
+    switch (status) {
+        case ModeStatus::WithdrawalRefused:
+            return "The Off request failed. Close the VR session to retry Off, or restart Elite.";
+        case ModeStatus::DriverReportsOn:
+            return "The driver still reports On. Check the graphics log or restart Elite.";
+        case ModeStatus::RequestRefused:
+            return "ED-UP couldn't apply the saved mode. Check the graphics log.";
+        case ModeStatus::ReadbackUnavailable:
+            return "ED-UP couldn't verify the driver mode. Check the graphics log.";
+        case ModeStatus::DriverReportsOff:
+            return "The driver still reports Off. Check the graphics log.";
+        case ModeStatus::Pending:
+            return "Waiting to apply the saved mode.";
+        case ModeStatus::ConfirmedOff:
+            if (canEnable) return "The driver reports Off.";
+            return "The driver reports Off. On and On + Boost need supported NVIDIA VR "
+                   "and an eye view under Mirror window > Image.";
+        case ModeStatus::ConfirmedOn:
+            return canEnable ? "The driver reports On." : kModeUnavailableHint;
+        case ModeStatus::ConfirmedOnWithBoostRequested:
+            return canEnable ? "The driver reports On. Boost was requested." : kModeUnavailableHint;
+        case ModeStatus::Unavailable:
+            return kModeUnavailableHint;
+    }
+    return kModeUnavailableHint;
+}
+
 // Per native frame session. The provider serializes config updates, Presents
 // and close. Cleanup ownership begins when an enable request is accepted.
 class ModeHistory {
 public:
+    // Lets the provider retire active measurements before issuing a write.
+    bool requestDue(Mode mode, bool frameDriver) const noexcept {
+        return !noted_ || mode != requested_ || frameDriver != frameDriver_ || (retryNeeded_ && !retryDelay_);
+    }
+
     bool change(Mode mode, bool frameDriver = false) noexcept {
-        if (noted_ && requested_ == mode && frameDriver_ == frameDriver && !retryNeeded_) return false;
+        if (!requestDue(mode, frameDriver)) return false;
+        if (mode != requested_ || frameDriver != frameDriver_)
+            withdrawalRetries_ = 0;
         requested_ = mode;
         frameDriver_ = frameDriver;
         noted_ = true;
         observing_ = false;
         retryNeeded_ = false;
+        retryDelay_ = 0;
+        status_ = ModeStatus::Unavailable;
         return true;
     }
 
     Mode requested() const noexcept { return requested_; }
+    ModeStatus status() const noexcept { return status_; }
+
+    // Only label a sample when the driver accepted the request and its latest
+    // latency bit agrees. NVAPI has no independent Boost readback bit.
+    std::optional<Mode> confirmedMode() const noexcept {
+        switch (status_) {
+            case ModeStatus::ConfirmedOff: return Mode::Off;
+            case ModeStatus::ConfirmedOn: return Mode::On;
+            case ModeStatus::ConfirmedOnWithBoostRequested: return Mode::Boost;
+            default: return std::nullopt;
+        }
+    }
+
     bool requiresDriver() const noexcept { return requested_ != Mode::Off || needsReset_ || frameDriver_; }
     bool needsReset() const noexcept { return needsReset_; }
     bool observing() const noexcept { return observing_; }
     bool retryNeeded() const noexcept { return retryNeeded_; }
-    void deferRequest() noexcept { retryNeeded_ = true; }
+    void deferRequest() noexcept {
+        status_ = ModeStatus::Pending;
+        retryNeeded_ = true;
+    }
 
     void acceptRequest() noexcept {
         if (requested_ != Mode::Off) needsReset_ = true;
@@ -81,25 +147,54 @@ public:
         observing_ = true;
     }
 
+    void refuseRequest() noexcept {
+        status_ = requested_ == Mode::Off && needsReset_ ? ModeStatus::WithdrawalRefused : ModeStatus::RequestRefused;
+        scheduleWithdrawalRetry();
+    }
+
+    void recordReadback(bool readable, bool enabled) noexcept {
+        if (!readable) status_ = ModeStatus::ReadbackUnavailable;
+        else if (requested_ == Mode::Off)
+            status_ = enabled ? ModeStatus::DriverReportsOn : ModeStatus::ConfirmedOff;
+        else if (!enabled) status_ = ModeStatus::DriverReportsOff;
+        else status_ = requested_ == Mode::Boost ? ModeStatus::ConfirmedOnWithBoostRequested : ModeStatus::ConfirmedOn;
+    }
+
     static constexpr unsigned kLastObservation = 64;
 
-    // Only count successful Presents from the acquired device and producer.
-    // Return the sample number when a readback is due.
+    // Count only successful Presents from the acquired device and producer.
+    // Advance any withdrawal backoff and return a readback number when due.
     unsigned notePresent() noexcept {
+        if (retryDelay_) --retryDelay_;
         if (!observing_) return 0;
         ++presents_;
         return presents_ == 4 || presents_ == 16 || presents_ == kLastObservation ? presents_ : 0;
     }
 
-    // An enabled or unreadable final Off sample keeps close-time cleanup armed.
-    void finishObservation(bool driverDisabled) noexcept {
-        if (requested_ == Mode::Off && driverDisabled) needsReset_ = false;
+    // An enabled or unreadable final Off sample keeps cleanup armed and can
+    // use the same bounded retry schedule as a refused setter.
+    void finishObservation() noexcept {
         observing_ = false;
+        if (requested_ != Mode::Off) return;
+        if (status_ == ModeStatus::ConfirmedOff) needsReset_ = false;
+        else scheduleWithdrawalRetry();
     }
 
 private:
+    // Start after the failed attempt or its last readback. Config edits that
+    // leave the requested mode unchanged cannot restart the retry budget.
+    void scheduleWithdrawalRetry() noexcept {
+        constexpr std::array<unsigned, 3> delays{4, 16, 64};
+        if (requested_ != Mode::Off || !needsReset_ || withdrawalRetries_ == delays.size()) return;
+        retryDelay_ = delays[withdrawalRetries_++];
+        retryNeeded_ = true;
+    }
+
     Mode requested_ = Mode::Off;
+    ModeStatus status_ = ModeStatus::Unavailable;
     unsigned presents_ = 0;
+    unsigned withdrawalRetries_ = 0;
+    unsigned retryDelay_ = 0;
     bool noted_ = false;
     bool frameDriver_ = false;
     bool needsReset_ = false;
@@ -413,8 +508,12 @@ private:
 // be carried over only from an accepted ED-UP Sleep on this same device.
 std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device);
 
-// Return true when an effective setting first arrives or changes. Accepted
-// requests start a new observation window on the same device.
+// A verified non-NVIDIA device can measure response with Reflex Off, even
+// without a frame driver. Unknown adapters and NVIDIA policy need readback.
+bool isNonNvidiaAdapter(ID3D11Device* device);
+
+// Return true when a request first arrives, changes or retries. Accepted
+// requests begin a new observation window on the same device.
 inline bool updateMode(ModeHistory& history, ID3D11Device* device, Mode mode, uint64_t session,
                        FrameDriver* frameDriver = nullptr) {
     const bool isRetry = history.retryNeeded() && history.requested() == mode;
@@ -427,8 +526,12 @@ inline bool updateMode(ModeHistory& history, ID3D11Device* device, Mode mode, ui
     if (result.retry) {
         history.deferRequest();
         if (isRetry) return true;
+    } else if (result.setStatus == 0) {
+        history.acceptRequest();
+        history.recordReadback(result.getStatus == 0, result.readback.lowLatencyMode != 0);
+    } else if (history.requiresDriver()) {
+        history.refuseRequest();
     }
-    if (result.setStatus == 0) history.acceptRequest();
     detail::logMode(mode, "apply", session, result);
     return true;
 }
@@ -437,9 +540,10 @@ inline void notePresent(ModeHistory& history, ID3D11Device* device, uint64_t ses
     const unsigned presents = history.notePresent();
     if (!presents) return;
     const auto result = detail::observe(device, history.requested());
+    history.recordReadback(result.getStatus == 0, result.readback.lowLatencyMode != 0);
     detail::logMode(history.requested(), "observe", session, result, presents);
     if (presents == ModeHistory::kLastObservation)
-        history.finishObservation(result.getStatus == 0 && !result.readback.lowLatencyMode);
+        history.finishObservation();
 }
 
 // Try Off on normal close when a prior enable still belongs to this session.

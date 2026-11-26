@@ -53,13 +53,15 @@ The last folder is the cache from before the rename to ED-UP. The build reads
 it as a fallback and leaves it in place. `python tools\sdk_paths.py` lists the
 shared cache locations.
 
-`fetch_reflex.py` stages and verifies NVIDIA's pinned Reflex statistics
-header and license in `third_party\reflex` by default. The native build
-fetches and verifies this dependency automatically. Set `EDUP_REFLEX_SDK`
-to use another verified SDK directory, or set it to `none` to build without
-the statistics integration. Binaries containing the statistics integration
-require `NVIDIA-REFLEX-LICENSE.txt`. Packaging and installation preserve
-that license beside the game.
+`fetch_reflex.py` stages and verifies NVIDIA's pinned Reflex statistics header
+and license in `third_party\reflex` by default. The native build fetches and
+verifies this dependency automatically. Set `EDUP_REFLEX_SDK` to use another
+verified SDK directory, or set it to `none` to build without the statistics
+integration and without the On / On + Boost modes. The Linux wrapper stages the
+default SDK before fingerprinting compile inputs; an explicit Wine SDK path
+must already contain the verified files. Binaries containing the statistics
+integration require `NVIDIA-REFLEX-LICENSE.txt`. Packaging and installation
+preserve that license beside the game.
 
 `fetch_fsr4.py` stages AMD's FidelityFX (FSR 4.1) headers and its two signed
 D3D12 DLLs (about 29 MB) into `%LOCALAPPDATA%\EDUP\fsr4-sdk`; `third_party\fsr4`

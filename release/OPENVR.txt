@@ -15,6 +15,7 @@ INSTALL
    this folder into Openvr\win64.
 4. Copy d3d11.dll to the folder containing EliteDangerous64.exe. Keep the
    existing EDHM d3d11.dll chain intact if EDHM is installed.
+   If the archive root contains NVIDIA-REFLEX-LICENSE.txt, copy it beside d3d11.dll.
    Keep your edup.ini, or copy the supplied one for a fresh installation.
 5. Start the game.
 

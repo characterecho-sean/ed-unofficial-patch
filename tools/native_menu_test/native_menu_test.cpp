@@ -54,6 +54,7 @@ void gpuCensusEnd(ID3D11DeviceContext*, GpuCensusSection) noexcept {}
 // enable or exercise the separately tested latency probe.
 namespace input_latency_probe {
 void mouseButton(void*, bool, unsigned) noexcept {}
+void mouseReadLost(void*) noexcept {}
 void keyboardState(void*, const uint8_t*, uint64_t) noexcept {}
 void keyboardBuffered(void*, unsigned, bool, uint64_t, uint64_t) noexcept {}
 void keyboardReadLost(void*) noexcept {}

@@ -25,9 +25,9 @@ constexpr bool sameSource(const EdvrNativeReflexSource& a, const EdvrNativeRefle
 // Select only the eyes actually drawn. An absent/mixed pair or a repeated
 // source cannot assign a new Present to an old rendered frame.
 inline EdvrNativeReflexSource selectMirrorSource(const EdvrNativeReflexSource (&eyes)[2],
-                                                unsigned mask, const EdvrNativeReflexSource& previous) noexcept {
+                                                unsigned mask, unsigned drawnMask, const EdvrNativeReflexSource& previous) noexcept {
     EdvrNativeReflexSource selected{};
-    if (!mask || (mask & ~3u)) return selected;
+    if (!mask || (mask & ~3u) || drawnMask != mask) return selected;
     for (unsigned eye = 0; eye < 2; ++eye) if (mask & (1u << eye)) {
         if (!validSource(eyes[eye]) || (validSource(selected) && !sameSource(selected, eyes[eye]))) return {};
         selected = eyes[eye];

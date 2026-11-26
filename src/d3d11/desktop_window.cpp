@@ -889,13 +889,14 @@ struct SavedState {
 };
 
 struct EyeDraw {
+    unsigned eye;
     ID3D11ShaderResourceView* view;
     const float* bounds;
     DwPixelRect rect;
 };
 
 // Clears the buffer to black and draws the eyes, on Elite's immediate context, under the world route's internal scope so EDVR's own hooks and census step aside.
-void drawEyes(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target, const EyeDraw* eyes, unsigned count) {
+unsigned drawEyes(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target, const EyeDraw* eyes, unsigned count) {
     VrWorldInternalScope internal;
     SavedState saved;
     saved.capture(ctx);
@@ -917,6 +918,7 @@ void drawEyes(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target, const Ey
     ID3D11Buffer* cb = p.cb.Get();
     ctx->PSSetSamplers(0, 1, &sampler);
     ctx->PSSetConstantBuffers(0, 1, &cb);
+    unsigned drawnEyes = 0;
     for (unsigned i = 0; i < count; ++i) {
         const EyeDraw& e = eyes[i];
         D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -931,10 +933,12 @@ void drawEyes(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target, const Ey
         ctx->RSSetViewports(1, &vp);
         ctx->PSSetShaderResources(0, 1, &e.view);
         ctx->Draw(3, 0);
+        drawnEyes |= 1u << e.eye;
     }
     ID3D11ShaderResourceView* none = nullptr;
     ctx->PSSetShaderResources(0, 1, &none);   // the eye textures are not left bound
     saved.restore(ctx);
+    return drawnEyes;
 }
 
 enum class Outcome { Drew, Declined };
@@ -1142,13 +1146,14 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
         if (native_reflex::readSource(snap.texture[eye].Get(),live) && native_reflex::sameSource(live,snap.source[eye]))
             sources[eye]=snap.source[eye];
     }
-    auto source=native_reflex::selectMirrorSource(sources,need,g_lastPresentedSource);
     for (unsigned i = 0; i < count; ++i) {
+        draws[i].eye = eyeIndex[i];
         draws[i].view = use[eyeIndex[i]].view.Get();
         draws[i].bounds = cropBounds[eyeIndex[i]];
         draws[i].rect = rects[i];
     }
-    drawEyes(ctx.Get(), rtv.Get(), draws, count);
+    const unsigned drawnEyes = drawEyes(ctx.Get(), rtv.Get(), draws, count);
+    auto source = native_reflex::selectMirrorSource(sources, need, drawnEyes, g_lastPresentedSource);
     // The held COM reference preserves the object, not its contents. A
     // changed source stamp during selection/draw makes ownership unknown.
     for (unsigned eye = 0; eye < 2; ++eye) if (need & (1u << eye)) {

@@ -29,6 +29,8 @@ void stop() noexcept;
 // device identifies the DirectInput device or the owned window's HWND.
 // Never changes game input or message results.
 void mouseButton(void* device, bool pressed, unsigned source) noexcept;
+// An unreadable or changed DirectInput layout revokes only that device's release evidence.
+void mouseReadLost(void* device) noexcept;
 
 // source4: the input gate supplies an unchanged, successful 256-byte state
 // from its captured game keyboard, within a qualified InputManager invocation.
@@ -53,7 +55,9 @@ void keyboardReadLost(void* device) noexcept;
 // ROIs and verifies the real pixels. Both eyes must belong to the same native
 // sequence and be accepted. Fence CPU notification is a completion upper bound;
 // only the producer thread issues context commands or maps staging textures.
-void eyeRendered(ID3D11Device*, ID3D11Texture2D*, uint64_t sequence, unsigned eye) noexcept;
+// fullImage is positive proof that the submitted UV bounds cover the entire
+// allocation without an axis flip; older timing clients cannot supply this.
+void eyeRendered(ID3D11Device*, ID3D11Texture2D*, uint64_t sequence, unsigned eye, bool fullImage) noexcept;
 
 // Only a successful paired native submission qualifies. This CPU endpoint is
 // distinct from GPU completion and from display/optical presentation.

@@ -7,7 +7,7 @@ Windows session. Each pulse moves the cursor to a caller-selected client point
 actual input reader and paired eye response. Choose a benign point while the
 game is stationary. This tool never activates a window.
 
-Explicit --input-key UP|DOWN selects real UI response mode (IPC v3). It requires
+Explicit --input-key UP|DOWN selects real UI response mode (IPC v4). It requires
 normalized --response-region x0,y0,x1,y1, --expected-orange-state on|off, and
 --orange-low-ppm/--orange-high-ppm classification bounds. The right-eye region
 defaults to the same rectangle, or --response-region-right overrides it. The
@@ -30,10 +30,11 @@ the opposite key down/up, while the receiver is inactive. This primes actual
 game-observed releases; it does not
 assume an empty event buffer proves release or claim a UI state without pixels.
 The separate priming record has no metrics and is excluded from sample counts.
-IPC v1/v2 UI receivers are refused before any priming input is sent.
+Both collection routes require a v4 receiver with a permanent stop indicator and full-eye bounds proof.
 Each Preparing request carries the priming-start QPC fence in sentQpc. The
 receiver must acknowledge fresh qualified cycles and clear sentQpc to zero
-before Prepared; Armed then uses the measured send timestamp as before.
+before Prepared; Armed then carries the arm-publication clock. Each successful
+measured down records its own local injectionQpc immediately before SendInput.
 UI mode requires source 4 (successful 256-byte keyboard state read) or source 5
 (successful non-peek buffered keyboard events), both inside the validated game
 InputManager tick and carrying its nonzero tick token.
@@ -56,7 +57,7 @@ The IPC word layout is owned by src/common/input_latency_protocol.h.
 """
 
 import argparse
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import ctypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -75,7 +76,8 @@ from unittest import mock
 
 
 MAGIC = 0x45445550494C5031
-VERSION = 3
+VERSION = 4
+RECEIVER_STOPPED = 2
 WORD_COUNT = 32
 SHARED_SIZE = WORD_COUNT * 8
 UINT64_MAX = (1 << 64) - 1
@@ -101,10 +103,10 @@ TIMEOUT_SECONDS = 3.0
 POLL_SECONDS = 0.01
 DEFAULT_ATOMIC_HELPER = Path(__file__).resolve().parent.parent / "build" / "tools" / "input_latency_atomic.dll"
 METRICS = {
-    "injection_to_consumption_ms": "sentQpc to game input API receipt (not gameplay processing)",
+    "injection_to_consumption_ms": "injectionQpc to game input API receipt (not gameplay processing)",
     "consumption_to_gpu_notification_ms": "game input API receipt to GPU-fence CPU notification (upper bound)",
-    "injection_to_gpu_notification_ms": "sentQpc to GPU-fence CPU notification (upper bound)",
-    "injection_to_paired_submit_ms": "sentQpc to successful paired native-submit CPU endpoint",
+    "injection_to_gpu_notification_ms": "injectionQpc to GPU-fence CPU notification (upper bound)",
+    "injection_to_paired_submit_ms": "injectionQpc to successful paired native-submit CPU endpoint",
 }
 
 
@@ -490,13 +492,24 @@ class WindowsBackend:
             self._error("QueryPerformanceCounter")
         return value.value
 
+    def _send(self, event, name, pressed):
+        """Return the actual pre-SendInput down clock. Releases need no clock."""
+        address, size = ctypes.byref(event), ctypes.sizeof(event)
+        try:
+            injection = self.qpc() if pressed else None
+        except ProbeError as error:
+            # No OS input call has run, so the caller owns no key/button release.
+            raise InputRefused("cannot timestamp input; no event was inserted") from error
+        if self.user.SendInput(1, address, size) != 1:
+            failure = InputRefused if pressed else ProbeError
+            raise failure("SendInput %s %s inserted zero events (Win32 error %d); stopping" %
+                          (name, "down" if pressed else "up", ctypes.get_last_error()))
+        return injection
+
     def button(self, pressed):
         event = self.Input()
         event.type, event.mi.dwFlags = 0, 0x0002 if pressed else 0x0004
-        if self.user.SendInput(1, ctypes.byref(event), ctypes.sizeof(event)) != 1:
-            failure = InputRefused if pressed else ProbeError
-            raise failure("SendInput left-button %s inserted zero events (Win32 error %d); stopping" %
-                          ("down" if pressed else "up", ctypes.get_last_error()))
+        return self._send(event, "left-button", pressed)
 
     def key(self, key, pressed):
         """Send only an owned extended UP/DOWN scan-code edge, never a character."""
@@ -505,10 +518,7 @@ class WindowsBackend:
         event = self.Input()
         event.type, event.ki.wScan = 1, KEYS[key][2]
         event.ki.dwFlags = 0x0008 | 0x0001 | (0 if pressed else 0x0002)
-        if self.user.SendInput(1, ctypes.byref(event), ctypes.sizeof(event)) != 1:
-            failure = InputRefused if pressed else ProbeError
-            raise failure("SendInput %s %s inserted zero events (Win32 error %d); stopping" %
-                          (key, "down" if pressed else "up", ctypes.get_last_error()))
+        return self._send(event, key, pressed)
 
     @staticmethod
     def now():
@@ -535,7 +545,6 @@ class Collector:
     def __init__(self, config, backend):
         self.config, self.backend = config, backend
         self.generation = None
-        self.version = None
         self.last_request = 0
         self.latest = None
         self.next_key = config.input_key
@@ -553,15 +562,13 @@ class Collector:
         for name, value in expected.items():
             if data[name] != value:
                 raise ProbeError("mapping %s mismatch (expected %d, observed %d)" % (name, value, data[name]))
-        if data["version"] not in ((3,) if self.config.ui else (1, 2, 3)):
-            raise ProbeError("UI mode requires IPC v3 before priming" if self.config.ui else "unsupported mapping protocol version")
-        if self.version is None:
-            self.version = data["version"]
-        if self.version != data["version"]:
-            raise ProbeError("mapping protocol version changed")
+        if data["version"] != VERSION:
+            raise ProbeError("qualified input capture requires IPC v4 before any input")
         if (data["frequency"] <= 0 or not data["generation"]
-                or data["state"] not in range(10 if self.version >= 2 else 8) or data["ready"] not in (0, 1)):
+                or data["state"] not in range(10) or data["ready"] not in (0, 1, RECEIVER_STOPPED)):
             raise ProbeError("invalid mapping frequency/generation/state/ready")
+        if data["ready"] == RECEIVER_STOPPED and data["state"] not in (COMPLETE, REJECTED):
+            raise ProbeError("receiver permanently stopped; no new input is permitted")
         if self.generation is None:
             self.generation = data["generation"]
         if data["generation"] != self.generation:
@@ -575,8 +582,6 @@ class Collector:
         self.backend.sleep(min(POLL_SECONDS, remaining))
 
     def _parameters(self, key, target_on):
-        if self.version == 1:
-            return None
         if not self.config.ui:
             return dict.fromkeys(REQUEST_FIELDS, 0)
         return dict(zip(REQUEST_FIELDS, (1, KEYS[key][0], pack_roi(self.config.response_region),
@@ -629,7 +634,7 @@ class Collector:
 
         def guard(exempt_key=None):
             self.backend.validate_identity()
-            current = self.snapshot()  # Enforces v3 before acquiring or using the lease.
+            current = self.snapshot()  # Check receiver liveness and version before using the lease.
             if current["state"] != (RESERVED if leased else IDLE):
                 raise ProbeError("receiver changed during untimed priming; no further input")
             if leased:
@@ -687,10 +692,23 @@ class Collector:
                     record.update(status="error", error="owned priming key release failed: " + str(error))
             if leased:
                 try:
-                    self.backend.validate_identity()
+                    # Cleanup addresses only our retained mapping. Foreground
+                    # changes stop new input but cannot transfer an owned lease.
                     current = self.snapshot()
                     self._check_request(current, lease_request, lease_parameters, lease_sent)
-                    if current["state"] != RESERVED or self.backend.compare_state(RESERVED, IDLE) != RESERVED:
+                    previous = current["state"]
+                    if previous == RESERVED:
+                        previous = self.backend.compare_state(RESERVED, IDLE)
+                    if previous == REJECTED:
+                        current = self.snapshot()
+                        self._check_request(current, lease_request, lease_parameters, lease_sent)
+                        if (current["state"] != REJECTED or current["reason"] != REASONS.index("Timeout")
+                                or self.backend.compare_state(REJECTED, IDLE) != REJECTED):
+                            raise ProbeError("priming lease changed; receiver state was not overwritten")
+                        record["status"] = "error"
+                        record.setdefault("error", "receiver timed out the priming lease")
+                        record["lease"]["rejection"] = "Timeout"
+                    elif previous != RESERVED:
                         raise ProbeError("priming lease changed; receiver state was not overwritten")
                     record["lease"]["released"] = True
                 except BaseException as error:
@@ -743,9 +761,8 @@ class Collector:
             data = self.snapshot()
             if data["state"] != RESERVED or (not self.config.ui and data["ready"] != 1) or not released():
                 raise ProbeError("receiver or left-button readiness changed before arm")
-            if parameters is not None:
-                for name, value in parameters.items():
-                    self.backend.write_word(name, value)
+            for name, value in parameters.items():
+                self.backend.write_word(name, value)
             self.backend.write_word("request", request)
             published = True
             arm_phase = RESERVED
@@ -768,7 +785,11 @@ class Collector:
                         record["baseline"] = baseline
                         break
                     if data["state"] == REJECTED:
-                        self._check_request(data, request, parameters, self.prime_begin_qpc)
+                        # A published Prepared may have been invalidated by an extra
+                        # game key before the sender ever saw it; its fence is already zero.
+                        if data["sentQpc"] not in (self.prime_begin_qpc, 0):
+                            raise ProbeError("rejected preparation has a foreign priming fence")
+                        sent = data["sentQpc"]
                         terminal = True
                         terminal_evidence = {name: data[name] for name in ("state",) + FIELDS[12:20] + FIELDS[27:]}
                         reason = data["reason"]
@@ -787,20 +808,37 @@ class Collector:
                     raise ProbeError("selected key became held before Armed publication")
                 data = self.snapshot()
                 self._check_request(data, request, parameters, 0)
+                if data["state"] == REJECTED:
+                    prepared, terminal = False, True
+                    raise ReceiverRejected("receiver withdrew the prepared baseline before input")
                 if data["state"] != PREPARED or self._baseline(data, target_on) != baseline:
                     raise ProbeError("UI baseline changed before Armed publication")
                 arm_phase = PREPARED
             sent = self.backend.qpc()
             self.backend.write_word("sentQpc", sent)
-            if self.backend.compare_state(arm_phase, ARMED) != arm_phase:
+            previous = self.backend.compare_state(arm_phase, ARMED)
+            if previous != arm_phase:
+                if previous == REJECTED:
+                    reserved, prepared, terminal = False, False, True
+                    raise ReceiverRejected("receiver rejected the request before Armed publication")
                 raise ProbeError("Armed publication refused; no input was injected")
             armed, reserved, prepared = True, False, False
             self.last_request = request
+            # Publication can race retirement or a final pre-injection refusal.
+            # Confirm this exact live request immediately before sending its down.
+            data = self.snapshot()
+            self._check_request(data, request, parameters, sent)
+            if data["state"] != ARMED or data["ready"] == RECEIVER_STOPPED:
+                if data["state"] == REJECTED:
+                    terminal = True
+                    raise ReceiverRejected("receiver rejected the armed request before input")
+                raise ProbeError("receiver withdrew the armed request before input")
             # Own a potentially inserted down across interrupts/foreign-call
             # errors. Only an explicit zero-insert refusal cancels ownership.
             owned_input = True
             try:
-                send(True)
+                injection = send(True)
+                record["injectionQpc"] = injection
             except InputRefused:
                 owned_input = False
                 raise
@@ -830,7 +868,7 @@ class Collector:
                 record.update(status="rejected", error="receiver rejected pulse: " +
                               (REASONS[reason] if reason < len(REASONS) else str(reason)))
             else:
-                if (data["reason"] != 0 or not 0 < sent <= data["consumedQpc"]
+                if (data["reason"] != 0 or not 0 < sent <= injection <= data["consumedQpc"]
                         or not data["renderSequence"] or data["eyeMask"] != 3 or data["submitMask"] != 3
                         or data["gpuCompleteQpc"] < data["consumedQpc"]
                         or data["submitCompleteQpc"] < data["consumedQpc"]
@@ -848,10 +886,10 @@ class Collector:
                                           "consumed_tick_token": data["consumedTickToken"]}
                 scale = 1000.0 / data["frequency"]
                 record.update(status="complete", source=data["source"], source_label=SOURCES[data["source"]], metrics={
-                    "injection_to_consumption_ms": (data["consumedQpc"] - sent) * scale,
+                    "injection_to_consumption_ms": (data["consumedQpc"] - injection) * scale,
                     "consumption_to_gpu_notification_ms": (data["gpuCompleteQpc"] - data["consumedQpc"]) * scale,
-                    "injection_to_gpu_notification_ms": (data["gpuCompleteQpc"] - sent) * scale,
-                    "injection_to_paired_submit_ms": (data["submitCompleteQpc"] - sent) * scale,
+                    "injection_to_gpu_notification_ms": (data["gpuCompleteQpc"] - injection) * scale,
+                    "injection_to_paired_submit_ms": (data["submitCompleteQpc"] - injection) * scale,
                 })
         except ReceiverRejected as error:
             record.update(status="rejected", error=str(error))
@@ -928,24 +966,30 @@ def collect(config, backend_factory):
     """Exclusive-create output first, then preserve metadata, failures and summary."""
     samples, backend, error, priming = [], None, None, None
     with config.output.open("x", encoding="utf-8", newline="\n") as stream:
-        write_jsonl(stream, {"kind": "metadata", "protocol_version": VERSION,
-                            "started_utc": datetime.now(timezone.utc).isoformat(),
-                            "target": {"pid": config.pid, "creation_time": config.creation_time,
-                                       "session": config.session, "image": config.image, "hwnd": config.hwnd},
-                            "mode": config.mode, "mapping": config.mapping_name,
-                            "atomic_helper": str(atomic_helper_path(config.atomic_helper)),
-                            "count": config.count, "interval_ms": config.interval_ms, "hold_ms": config.hold_ms,
-                            "client_point": {"x": config.x, "y": config.y}, "metric_definitions": METRICS,
-                            "response_kind": "real_ui" if config.ui else "diagnostic_marker",
-                            "ui": {"first_key": config.input_key, "first_expected_orange_state": config.expected_orange_state,
-                                   "left_region": config.response_region,
-                                   "right_region": config.response_region_right or config.response_region,
-                                   "orange_low_ppm": config.orange_low_ppm, "orange_high_ppm": config.orange_high_ppm,
-                                   "alternate_only_after_complete": True} if config.ui else None,
-                            "input_source_definitions": SOURCES,
-                            "limits": "GPU-fence notification is an upper bound, not photons or gameplay physics"})
+        metadata = {"kind": "metadata", "sender_protocol_version": VERSION, "protocol_version": None,
+                    "started_utc": datetime.now(timezone.utc).isoformat(),
+                    "target": {"pid": config.pid, "creation_time": config.creation_time,
+                               "session": config.session, "image": config.image, "hwnd": config.hwnd},
+                    "mode": config.mode, "mapping": config.mapping_name,
+                    "atomic_helper": str(atomic_helper_path(config.atomic_helper)),
+                    "count": config.count, "interval_ms": config.interval_ms, "hold_ms": config.hold_ms,
+                    "client_point": {"x": config.x, "y": config.y}, "metric_definitions": METRICS,
+                    "response_kind": "real_ui" if config.ui else "diagnostic_marker",
+                    "ui": {"first_key": config.input_key, "first_expected_orange_state": config.expected_orange_state,
+                           "left_region": config.response_region,
+                           "right_region": config.response_region_right or config.response_region,
+                           "orange_low_ppm": config.orange_low_ppm, "orange_high_ppm": config.orange_high_ppm,
+                           "alternate_only_after_complete": True} if config.ui else None,
+                    "input_source_definitions": SOURCES,
+                    "limits": "GPU-fence notification is an upper bound, not photons or gameplay physics"}
         try:
-            backend = backend_factory(config)
+            try:
+                backend = backend_factory(config)
+                # Record what the receiver actually declares, including an
+                # unsupported version. A failed attach leaves the field null.
+                metadata["protocol_version"] = decode(backend.snapshot())["version"]
+            finally:
+                write_jsonl(stream, metadata)
             collector = Collector(config, backend)
             if config.ui:
                 priming = collector.prime()
@@ -1094,6 +1138,7 @@ class FakeBackend:
         return int(self.clock * self.frequency)
 
     def button(self, pressed):
+        injection = self.qpc() if pressed else None
         self.events.append("down" if pressed else "up")
         if pressed and self.behavior == "send_refused":
             raise InputRefused("SendInput refused")
@@ -1103,7 +1148,7 @@ class FakeBackend:
         if pressed:
             self.words[INDEX["ready"]] = 0
             if self.behavior not in ("timeout", "identity_after_down"):
-                sent = self.words[INDEX["sentQpc"]]
+                sent = injection
                 result = {"state": COMPLETE, "consumedQpc": sent + 1000, "renderSequence": 8,
                           "eyeMask": 3, "submitMask": 3, "gpuCompleteQpc": sent + 4000,
                           "submitCompleteQpc": sent + 3000, "source": self.source}
@@ -1123,6 +1168,7 @@ class FakeBackend:
                     self.words[INDEX[name]] = value
         else:
             self.words[INDEX["ready"]] = 1
+        return injection
 
     def now(self):
         return self.clock
@@ -1196,7 +1242,7 @@ class FakeUIBackend(FakeBackend):
                 raise OSError("ambiguous error after priming down insertion")
             return
         self.held_key = key if pressed else None
-        super().button(pressed)
+        injection = super().button(pressed)
         if pressed and self.words[INDEX["state"]] == COMPLETE:
             response = 1000000 if self.words[INDEX["targetOn"]] else 0
             values = {"renderSequence": self.baseline_sequence + 3, "responseLeftPpm": response,
@@ -1215,6 +1261,7 @@ class FakeUIBackend(FakeBackend):
                 values["baselineLeftPpm"] = 1000000 - self.words[INDEX["baselineLeftPpm"]]
             for name, value in values.items():
                 self.words[INDEX[name]] = value
+        return injection
 
     def released(self, key=None):
         if self.behavior == "key_held_prepared" and self.words[INDEX["state"]] == PREPARED:
@@ -1281,8 +1328,8 @@ def self_test():
                                             ("key", "DOWN", True), ("key", "DOWN", False)])
                 self.assertLess(backend.events.index(("key", "DOWN", False)), backend.events.index(("cas", RESERVED, PREPARING)))
 
-        def test_ui_v2_receiver_refuses_before_any_untimed_priming(self):
-            for version in (1, 2):
+        def test_ui_older_receiver_refuses_before_any_untimed_priming(self):
+            for version in (1, 2, 3):
                 with self.subTest(version=version), tempfile.TemporaryDirectory() as folder:
                     config = self.ui_config(output=Path(folder) / "old.jsonl", count=2)
                     backend = FakeUIBackend(config)
@@ -1465,17 +1512,71 @@ def self_test():
                     self.assertNotIn("position", backend.events)
                     self.assertNotIn("metrics", record)
 
-        def test_protocol_v1_mouse_compatibility_and_ui_refusal(self):
-            for ui in (False, True):
-                config = self.ui_config() if ui else self.config()
-                backend = FakeUIBackend(config) if ui else FakeBackend(config)
-                backend.words[INDEX["version"]] = 1
-                record = Collector(config, backend).sample(1)
-                self.assertEqual(record["status"], "error" if ui else "complete")
-                if ui:
+        def test_mouse_old_receivers_never_inject_and_record_actual_version(self):
+            for version in (1, 2, 3):
+                with self.subTest(version=version), tempfile.TemporaryDirectory() as folder:
+                    config = self.config(output=Path(folder) / "old.jsonl", count=1)
+                    backend = FakeBackend(config)
+                    backend.words[INDEX["version"]] = version
+                    self.assertEqual(collect(config, lambda _: backend)["complete"], 0)
                     self.assertNotIn("down", backend.events)
-                else:
-                    self.assertFalse(any(isinstance(event, tuple) and event[0] in REQUEST_FIELDS for event in backend.events))
+                    metadata = json.loads(config.output.read_text().splitlines()[0])
+                    self.assertEqual(metadata["protocol_version"], version)
+                    self.assertEqual(metadata["sender_protocol_version"], VERSION)
+
+        def test_guard_delay_does_not_count_as_injection_latency(self):
+            class DelayedSnapshot(FakeBackend):
+                def snapshot(self):
+                    if self.words[INDEX["state"]] == ARMED:
+                        self.clock += .050
+                    return super().snapshot()
+
+                def button(self, pressed):
+                    super().button(pressed)
+                    if pressed:
+                        stamp = int(self.clock * self.frequency)
+                        self.words[INDEX["consumedQpc"]] = stamp + (1000 if self.behavior == "complete" else -1)
+                        self.words[INDEX["gpuCompleteQpc"]] = stamp + 4000
+                        self.words[INDEX["submitCompleteQpc"]] = stamp + 3000
+                        return stamp
+
+            config = self.config()
+            backend = DelayedSnapshot(config)
+            record = Collector(config, backend).sample(1)
+            self.assertEqual(record["metrics"]["injection_to_consumption_ms"], 1.0)
+            self.assertEqual(record["injectionQpc"] - record["snapshot"]["sentQpc"], 50000)
+            self.assertEqual(record["metrics"]["injection_to_gpu_notification_ms"], 4.0)
+            self.assertEqual(record["metrics"]["injection_to_paired_submit_ms"], 3.0)
+            backend = DelayedSnapshot(config, "old_receipt")
+            self.assertEqual(Collector(config, backend).sample(1)["status"], "error")
+
+        def test_owned_priming_timeout_releases_key_and_mapping_for_next_collector(self):
+            class PausedSender(FakeUIBackend):
+                def sleep(self, seconds):
+                    super().sleep(seconds)
+                    if self.down and self.behavior in ("pause", "foreign") and self.words[INDEX["state"]] == RESERVED:
+                        self.clock += 2.1
+                        if self.behavior == "foreign":
+                            self.words[INDEX["request"]] += 1
+                        self.words[INDEX["reason"]] = REASONS.index("Timeout")
+                        self.words[INDEX["state"]] = REJECTED
+
+            config = self.ui_config()
+            backend = PausedSender(config, "pause")
+            record = Collector(config, backend).prime()
+            self.assertEqual(record["status"], "error")
+            self.assertEqual(record["snapshot"]["reason"], REASONS.index("Timeout"))
+            self.assertEqual(backend.events.count(("key", "UP", False)), 1)
+            self.assertEqual(backend.words[INDEX["state"]], IDLE)
+            self.assertTrue(record["lease"]["released"])
+            backend.behavior = "complete"
+            self.assertEqual(Collector(config, backend).prime()["status"], "complete")
+            foreign = PausedSender(config, "foreign")
+            record = Collector(config, foreign).prime()
+            self.assertEqual(record["status"], "error")
+            self.assertEqual(foreign.events.count(("key", "UP", False)), 1)
+            self.assertEqual(foreign.words[INDEX["state"]], REJECTED)
+            self.assertFalse(record["lease"]["released"])
 
         def test_ui_main_dry_run_and_jsonl_use_explicit_regions_and_source(self):
             with tempfile.TemporaryDirectory() as folder:
@@ -1501,6 +1602,55 @@ def self_test():
                 self.assertNotEqual(samples[0]["snapshot"]["roiLeft"], samples[0]["snapshot"]["roiRight"])
                 self.assertEqual(rows[-1]["complete"], 2)
 
+        def test_ui_cli_refuses_retained_mapping_before_priming(self):
+            with tempfile.TemporaryDirectory() as folder:
+                output = Path(folder) / "retired.jsonl"
+                config = self.ui_config(output=output)
+                backend = FakeUIBackend(config, "preparation_timeout")
+                backend.words[INDEX["ready"]] = 2  # The permanently stopped receiver left an acknowledged Idle.
+                arguments = ["--pid", "123", "--creation-time", "456", "--session", "2", "--image", config.image,
+                             "--hwnd", "789", "--mode", "on", "--output", str(output), "--input-key", "UP",
+                             "--response-region", "0.1,0.2,0.3,0.4", "--expected-orange-state", "off",
+                             "--orange-low-ppm", "10000", "--orange-high-ppm", "200000", "--count", "1"]
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(arguments, lambda _: backend), 1)
+                self.assertFalse(any(isinstance(e, tuple) and e[0] == "key" for e in backend.events))
+                rows = [json.loads(line) for line in output.read_text().splitlines()]
+                self.assertIn("stopped", rows[-1]["error"])
+                self.assertEqual(rows[-1]["attempted"], 0)
+
+        def test_retirement_after_arm_and_terminal_acknowledgement(self):
+            config = self.ui_config()
+
+            class RetiringBackend(FakeUIBackend):
+                def compare_state(self, expected, desired):
+                    previous = super().compare_state(expected, desired)
+                    if desired == ARMED and previous == PREPARED:
+                        self.words[INDEX["ready"]] = RECEIVER_STOPPED
+                        self.words[INDEX["state"]] = STOPPED
+                    return previous
+
+            backend = RetiringBackend(config)
+            collector = self.primed_collector(config, backend)
+            self.assertEqual(collector.sample(1)["status"], "error")
+            self.assertFalse(any(isinstance(e, tuple) and e[0] == "key" for e in backend.events))
+
+            class FinishedBackend(FakeUIBackend):
+                def key(self, key, pressed):
+                    stamp = super().key(key, pressed)
+                    if self.words[INDEX["state"]] == COMPLETE:
+                        self.words[INDEX["ready"]] = RECEIVER_STOPPED
+                    return stamp
+
+            backend = FinishedBackend(config)
+            collector = self.primed_collector(config, backend)
+            self.assertEqual(collector.sample(1)["status"], "complete")
+            self.assertEqual(backend.words[INDEX["state"]], IDLE)
+            self.assertEqual(backend.words[INDEX["ready"]], RECEIVER_STOPPED)
+            backend.events.clear()
+            self.assertEqual(Collector(config, backend).prime()["status"], "error")
+            self.assertFalse(any(isinstance(e, tuple) and e[0] == "key" for e in backend.events))
+
         def test_complete_order_metrics_and_raw_words(self):
             record, backend = self.sample()
             self.assertEqual(record["status"], "complete")
@@ -1510,7 +1660,7 @@ def self_test():
             events = backend.events
             self.assertLess(events.index(("cas", IDLE, RESERVED)), events.index("position"))
             at = events.index(("sentQpc", 1000000)) - 1
-            self.assertEqual(events[at + 1:at + 4], [("sentQpc", 1000000), ("cas", RESERVED, ARMED), "down"])
+            self.assertEqual(events[at + 1:at + 5], [("sentQpc", 1000000), ("cas", RESERVED, ARMED), "qpc", "down"])
             self.assertEqual(events.count("down"), 1)
             self.assertEqual(events.count("up"), 1)
             self.assertFalse(backend.down)
@@ -1705,9 +1855,10 @@ def self_test():
                 return 1
 
             backend.user.SendInput.side_effect = capture
+            backend.qpc = mock.Mock(return_value=1234)
             for key in ("UP", "DOWN"):
-                backend.key(key, True)
-                backend.key(key, False)
+                self.assertEqual(backend.key(key, True), 1234)
+                self.assertIsNone(backend.key(key, False))
             self.assertEqual(edges, [(1, 0, 0x48, 9), (1, 0, 0x48, 11), (1, 0, 0x50, 9), (1, 0, 0x50, 11)])
             with self.assertRaises(ProbeError):
                 backend.key("ENTER", True)

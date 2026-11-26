@@ -392,6 +392,7 @@ jobs:
             build/full_build_receipt.json
             build/d3d11.dll
             build/edvr_openxr_graphics.dll
+            build/NVIDIA-REFLEX-LICENSE.txt
             build/openvr_api.dll
             build/edvr_openxr_runtime.dll
             build/openxr_loader.dll

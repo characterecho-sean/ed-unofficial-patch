@@ -24,6 +24,9 @@ struct FrameBoundaryCallbacks {
     void (*normalPhaseReturned)(void*, uint64_t token) noexcept = nullptr;
     void (*lateWorkerBegin)(void*, uint64_t token) noexcept = nullptr;
     void (*lateWorkerEnd)(void*, uint64_t token) noexcept = nullptr;
+    // Aborted originals release borrowed state without emitting an end marker.
+    void (*tickAborted)(void*, uint64_t token) noexcept = nullptr;
+    void (*lateWorkerAborted)(void*, uint64_t token) noexcept = nullptr;
 };
 
 // One attempt, supported build 334925/callsite/receiver guarded. Scheduler,
@@ -177,9 +180,10 @@ public:
 };
 // Production forwarding gate, also exercised with fake callbacks in the
 // portable rig. Rejected/nested calls always execute original exactly once.
-template<class Before, class Original, class After>
+struct IgnoreBoundaryAbort { void operator()() const noexcept {} };
+template<class Before, class Original, class After, class Abort = IgnoreBoundaryAbort>
 bool forwardBoundary(bool callerQualified, bool receiverQualified, bool& entered,
-                     Before before, Original original, After after) {
+                     Before before, Original original, After after, Abort abort = {}) {
     if (!callerQualified || !receiverQualified || entered) { original(); return false; }
     struct Restore {
         bool& entered;
@@ -187,7 +191,8 @@ bool forwardBoundary(bool callerQualified, bool receiverQualified, bool& entered
     } restore{entered};
     entered = true;
     before();
-    original();
+    try { original(); }
+    catch (...) { abort(); throw; }
     after();
     return true;
 }

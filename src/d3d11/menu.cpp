@@ -27,7 +27,6 @@
 #include "../common/iniedit.h"
 #include "../common/log.h"
 #include "../common/mirror_location.h"
-#include "../common/native_reflex_setting.h"
 #include "../common/native_render_settings.h"
 #include "../common/openxr_resolution_entries.h"
 #include "../common/parallel_projection_notice.h"
@@ -64,6 +63,7 @@
 #include "menu_pages.h"
 #include "menu_restart.h"
 #include "native_menu.h"
+#include "native_reflex.h"
 #include "native_reflex_session.h"
 #include "native_render_labels.h"
 #include "vr_runtime.h"
@@ -498,9 +498,6 @@ bool dlssPresetDisabled() {
 bool isNvidiaLowLatencyRow(const MenuRowDef& d) {
     return strcmp(d.section, "fix") == 0 && strcmp(d.key, "nvidia_reflex") == 0;
 }
-
-constexpr const char* kNvidiaLowLatencyUnavailable =
-    "NVIDIA low latency is unavailable in this session. Off is still available.";
 
 // fix.render_sharpness (the Sharpening row). VR sharpens whatever it submits,
 // so there its row never dims. The flat profile sharpens the temporal pass's
@@ -2972,7 +2969,10 @@ void buildContent(MenuContent& c) {
             const bool hotkeyRow = d.kind == MenuKind::Hotkey;
             const bool noteOnThis = hotkeyRow && s.noteDef == e.def && s.noteUntilMs > s.tickMs;
             const bool dlssRow = isDlssPresetRow(d);
-            const bool unavailableNvidiaLowLatency = isNvidiaLowLatencyRow(d) && !native_reflex::availableForUser();
+            const bool nvidiaLowLatencyRow = isNvidiaLowLatencyRow(d);
+            const bool unavailableNvidiaLowLatency = nvidiaLowLatencyRow && !native_reflex::availableForUser();
+            const char* nvidiaHint = hi && nvidiaLowLatencyRow
+                ? native_reflex::modeStatusHint(native_reflex::modeStatusForUser(), !unavailableNvidiaLowLatency) : nullptr;
             const bool sharpenRow = isSharpenRow(d);
             const bool hudAaRow = isHudAntiAliasingRow(d);
             const bool glassDirtRow = isCockpitGlassDirtRow(d);
@@ -3069,8 +3069,8 @@ void buildContent(MenuContent& c) {
                       : hi        ? kMenuRowHi
                       : dim       ? kMenuDim
                                   : kMenuRow;
-            if (hi && unavailableNvidiaLowLatency)
-                snprintf(c.hint, sizeof(c.hint), "%s", kNvidiaLowLatencyUnavailable);
+            if (nvidiaHint)
+                snprintf(c.hint, sizeof(c.hint), "%s", nvidiaHint);
             else if (hi && dim && hudAaRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", hudAntiAliasingHint());
             else if (hi && dim && glassDirtRow)
@@ -3151,11 +3151,13 @@ void buildContent(MenuContent& c) {
                 }
                 if (!openxrScaleRow) {
                     body += std::string("Shipped ") + displayValue(d, d.shipped) + ".  " +
-                            (d.applies == 1   ? "Applies at once."
+                            (nvidiaLowLatencyRow ? "Requests a live driver change."
+                             : d.applies == 1   ? "Applies at once."
                              : d.applies == 2 ? "Takes effect at the next launch."
                                               : "When it applies is not documented.");
                 }
                 if (openxrScaleRow) body += "\n" + openxrResolutionTooltip(res);
+                if (nvidiaHint) body += std::string("\n") + nvidiaHint;
                 if (editingThis) {
                     body += s.editBad ? "\nThat is not a value this key accepts."
                                       : "\nEnter writes it, Escape leaves it alone.";
@@ -3182,11 +3184,9 @@ void buildContent(MenuContent& c) {
                         }
                         body += "\nPress R again to remove this headset's entry (back to " + fallback + ").";
                     }
-                } else if (unavailableNvidiaLowLatency) {
-                    body += std::string("\n") + kNvidiaLowLatencyUnavailable;
                 } else if (dim && dittoRow) {
                     body += std::string("\n") + dittoRowHint();
-                } else if (dim) {
+                } else if (dim && !nvidiaLowLatencyRow) {
                     body += "\nInactive: only DLSS and DLAA read this preset.";
                 } else if (s.resetArmedEntry == i) {
                     body += "\nPress R again to reset it to the shipped value.";
@@ -3479,7 +3479,7 @@ void enqueueChange(WriteJob& job, bool held = false) {
 void applyChange(int defIndex, const std::string& fileValue, bool held = false) {
     const MenuRowDef& d = kMenuRows[defIndex];
     if (isNvidiaLowLatencyRow(d) && fileValue != "off" && !native_reflex::availableForUser()) {
-        g_s.lastWrite = kNvidiaLowLatencyUnavailable;
+        g_s.lastWrite = native_reflex::kModeUnavailableHint;
         g_s.contentDirty = true;
         return;
     }
@@ -5642,9 +5642,12 @@ void menuTick(ID3D11Device* dev) {
     guardedBudget(g_budget, [&] {
         if (world) {
             static bool lastNvidiaLowLatencyAvailable = false;
+            static native_reflex::ModeStatus lastNvidiaModeStatus = native_reflex::ModeStatus::Unavailable;
             const bool nvidiaLowLatencyAvailable = native_reflex::availableForUser();
-            if (nvidiaLowLatencyAvailable != lastNvidiaLowLatencyAvailable) {
+            const auto nvidiaModeStatus = native_reflex::modeStatusForUser();
+            if (nvidiaLowLatencyAvailable != lastNvidiaLowLatencyAvailable || nvidiaModeStatus != lastNvidiaModeStatus) {
                 lastNvidiaLowLatencyAvailable = nvidiaLowLatencyAvailable;
+                lastNvidiaModeStatus = nvidiaModeStatus;
                 s.contentDirty = true;
             }
             static uint64_t lastNativeRevision = 0;

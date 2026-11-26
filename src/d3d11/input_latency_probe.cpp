@@ -83,7 +83,7 @@ struct Probe {
     uint64_t pendingFence = 0, pendingRequest = 0, reservationAt = 0;
     native_reflex::Mode mode = native_reflex::Mode::Off;
     Pulse pulse;
-    ButtonEdges buttons;
+    ButtonEdges buttons, windowButtons;
     KeyboardReleaseCache keyboard;
     PairBoundary pairs;
     UiRequest ui;
@@ -112,6 +112,7 @@ ID3D11Device* attemptedDevice = nullptr;
 uint64_t attemptedGeneration = 0;
 native_reflex::Mode attemptedMode = native_reflex::Mode::Off;
 bool attempted = false;
+ULONGLONG retryMappingAfter = 0; // a retired sender may still retain this PID's named mapping
 
 void clearUiFrames(UiRequest& ui) noexcept {
     for (auto& frame : ui.frames) {
@@ -145,7 +146,7 @@ void reportLocked(Probe& probe) noexcept {
     if (probe.pulse.phase() == Phase::Complete) {
         const double scale = 1000.0 / double(probe.frequency);
         Log::get().note("input_latency_probe,request=%llu,state=complete,mode=%u,generation=%llu,sequence=%llu,source=%u,"
-            "sent_to_consumed_ms=%.4f,consumed_to_gpu_notification_upper_bound_ms=%.4f,consumed_to_submit_ms=%.4f,"
+            "arm_to_consumed_ms=%.4f,consumed_to_gpu_notification_upper_bound_ms=%.4f,consumed_to_submit_ms=%.4f,"
             "input_tick=%llu,response_kind=%llu,left_ppm=%llu,right_ppm=%llu,photons=unmeasured",
             result.request, unsigned(probe.mode), probe.generation, result.sequence, result.source,
             double(result.consumedQpc - result.sentQpc) * scale,
@@ -254,7 +255,7 @@ void publishPreparedLocked(Probe& probe) noexcept {
     ui.prepared = true;
     probe.shared->renderSequence = ui.baselineSequence;
     probe.shared->eyeMask = probe.shared->submitMask = 3;
-    probe.shared->sentQpc = 0; // switch from priming fence to measured-stamp ownership
+    probe.shared->sentQpc = 0; // return the arm timestamp to sender ownership
     writeWord(probe.shared->ready, 1);
     writeWord(probe.shared->state, uint64_t(Phase::Prepared));
 }
@@ -285,7 +286,7 @@ void refreshKeyboardReadyLocked(Probe& probe) noexcept {
 }
 
 // Import one release-published external request and bound its entire lifetime
-// from SendInput's QPC stamp. No heartbeat or mouse packet is required for expiry.
+// from its arm publication timestamp. No heartbeat or mouse packet is required for expiry.
 void synchronizeLocked(Probe& probe, uint64_t now) noexcept {
     const auto phase = Phase(readWord(probe.shared->state));
     if (phase == Phase::Idle && probe.ui.active) {
@@ -301,8 +302,10 @@ void synchronizeLocked(Probe& probe, uint64_t now) noexcept {
             clearUiRequest(probe); writeWord(probe.shared->ready, 0);
         }
         if (!probe.reservationAt) probe.reservationAt = now;
-        if (!now || now < probe.reservationAt || now - probe.reservationAt > probe.frequency * 2)
+        if (!now || now < probe.reservationAt || now - probe.reservationAt > probe.frequency * 2) {
+            probe.reservationAt = 0;
             rejectLocked(probe, Refusal::Timeout);
+        }
         return;
     }
     probe.reservationAt = 0;
@@ -345,6 +348,23 @@ void synchronizeLocked(Probe& probe, uint64_t now) noexcept {
     if (probe.pulse.expire(now)) publishLocked(probe);
 }
 
+// Keep a published result readable across close. A result acknowledgement can
+// race this loop, but never clears the independent, irreversible ready latch.
+void stopRequestsLocked(Probe& probe, Refusal reason) noexcept {
+    auto& shared = *probe.shared;
+    writeWord(shared.ready, kReceiverStopped);
+    if (probe.pulse.active()) {
+        probe.pulse.reject(reason);
+        publishLocked(probe);
+    }
+    for (;;) {
+        const auto phase = Phase(readWord(shared.state));
+        if (phase == Phase::Complete || phase == Phase::Rejected || phase == Phase::Stopped) return;
+        if (InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(&shared.state),
+                LONG64(Phase::Stopped), LONG64(phase)) == LONG64(phase)) return;
+    }
+}
+
 DWORD WINAPI observeFence(void* argument) noexcept {
     auto& probe = *static_cast<Probe*>(argument);
     const HANDLE events[]{probe.stopEvent, probe.fenceEvent};
@@ -354,8 +374,7 @@ DWORD WINAPI observeFence(void* argument) noexcept {
         std::lock_guard<std::mutex> lock(callbacks);
         if (current != &probe) return 0;
         if (waited != WAIT_OBJECT_0 + 1) {
-            rejectLocked(probe, Refusal::GraphicsFailure);
-            writeWord(probe.shared->ready, 0);
+            stopRequestsLocked(probe, Refusal::GraphicsFailure);
             live.store(false, std::memory_order_release);
             Log::get().note("input_latency_probe,state=unavailable,reason=worker_wait_failed");
             return 0;
@@ -387,7 +406,7 @@ DWORD WINAPI observeFence(void* argument) noexcept {
 }
 
 std::unique_ptr<Probe> createProbe(ID3D11Device* device, native_reflex::Mode mode,
-                                 uint64_t generation, const char*& failure) noexcept {
+                                 uint64_t generation, const char*& failure, bool& mappingBusy) noexcept {
     auto probe = std::unique_ptr<Probe>(new (std::nothrow) Probe);
     if (!probe) { failure = "allocation"; return {}; }
     probe->device = device; probe->mode = mode; probe->generation = generation;
@@ -417,10 +436,15 @@ std::unique_ptr<Probe> createProbe(ID3D11Device* device, native_reflex::Mode mod
     if (count <= 0 || size_t(count) >= sizeof(name) / sizeof(*name)) { failure = "mapping_name"; return {}; }
     probe->mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(Shared), name);
     const DWORD mappingError = GetLastError();
-    if (!probe->mapping || mappingError == ERROR_ALREADY_EXISTS) { failure = "mapping_collision_or_failure"; return {}; }
+    if (!probe->mapping) { failure = "mapping_creation"; return {}; }
+    if (mappingError == ERROR_ALREADY_EXISTS) { mappingBusy = true; failure = "mapping_in_use"; return {}; }
     probe->shared = static_cast<Shared*>(MapViewOfFile(probe->mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(Shared)));
     if (!probe->shared) { failure = "mapping_view"; return {}; }
-    *probe->shared = Shared{};
+    // The name becomes visible before setup finishes. Withhold the protocol
+    // signature until the worker and callback owner are both ready.
+    Shared unpublished{};
+    unpublished.magic = 0;
+    *probe->shared = unpublished;
     probe->shared->pid = GetCurrentProcessId(); probe->shared->creationTime = creationTime;
     probe->shared->frequency = probe->frequency; probe->shared->generation = generation;
     probe->shared->mode = uint64_t(mode);
@@ -435,12 +459,9 @@ void retireProbe() noexcept {
     std::unique_ptr<Probe> retired;
     {
         std::lock_guard<std::mutex> lock(callbacks);
-        live.store(false, std::memory_order_release);
         if (!current) return;
-        synchronizeLocked(*current, nowQpc());
-        rejectLocked(*current, Refusal::Stopped);
-        writeWord(current->shared->ready, 0);
-        if (!current->pulse.terminal()) writeWord(current->shared->state, uint64_t(Phase::Stopped));
+        stopRequestsLocked(*current, Refusal::Stopped);
+        live.store(false, std::memory_order_release);
         SetEvent(current->stopEvent);
         retired.reset(current);
         current = nullptr;
@@ -618,6 +639,7 @@ void configure(ID3D11Device* device, bool wanted, native_reflex::Mode mode, uint
     {
         std::lock_guard<std::mutex> lock(callbacks);
         if (current) {
+            if (!enabled()) return; // fatal observer failure permanently closed this mapping
             synchronizeLocked(*current, nowQpc());
             if (current->ownerThread != GetCurrentThreadId()) {
                 rejectLocked(*current, Refusal::WrongThread); return;
@@ -625,7 +647,7 @@ void configure(ID3D11Device* device, bool wanted, native_reflex::Mode mode, uint
             replace = current->device.Get() != device;
             if (replace || current->mode != mode || current->generation != generation) {
                 rejectLocked(*current, Refusal::GenerationChanged);
-                current->buttons.reset(); current->pairs.reset();
+                current->buttons.reset(); current->windowButtons.reset(); current->pairs.reset();
                 current->keyboard.reset();
                 current->keyboardThread = 0;
                 writeWord(current->shared->ready, 0);
@@ -640,15 +662,22 @@ void configure(ID3D11Device* device, bool wanted, native_reflex::Mode mode, uint
         }
     }
     if (replace) retireProbe();
-    if (attempted && attemptedDevice == device && attemptedMode == mode && attemptedGeneration == generation) return;
+    const bool sameAttempt = attempted && attemptedDevice == device && attemptedMode == mode && attemptedGeneration == generation;
+    if (sameAttempt && (!retryMappingAfter || GetTickCount64() < retryMappingAfter)) return;
     attempted = true; attemptedDevice = device; attemptedMode = mode; attemptedGeneration = generation;
     const char* failure = "unknown";
     std::lock_guard<std::mutex> lock(callbacks);
-    auto probe = createProbe(device, mode, generation, failure);
-    if (!probe) { Log::get().note("input_latency_probe,state=unavailable,reason=%s", failure); return; }
+    bool mappingBusy = false;
+    auto probe = createProbe(device, mode, generation, failure, mappingBusy);
+    retryMappingAfter = mappingBusy ? GetTickCount64() + 500 : 0;
+    if (!probe) {
+        if (!sameAttempt || !mappingBusy) Log::get().note("input_latency_probe,state=unavailable,reason=%s", failure);
+        return;
+    }
     current = probe.release();
     writeWord(current->shared->ready, 0);
     live.store(true, std::memory_order_release);
+    writeWord(current->shared->magic, kMagic);
     Log::get().note("input_latency_probe,state=waiting_for_release,mode=%u,generation=%llu,response=16x16,gpu_endpoint=cpu_fence_notification_upper_bound,photons=unmeasured",
         unsigned(mode), generation);
 }
@@ -661,18 +690,28 @@ void stop() noexcept {
 void mouseButton(void* device, bool pressed, unsigned source) noexcept {
     if (!enabled()) return;
     std::lock_guard<std::mutex> lock(callbacks);
-    if (!current || !device || (source != 1 && source != 2 && source != 3)) return;
+    if (!current || !enabled() || !device || (source != 1 && source != 2 && source != 3)) return;
     auto& probe = *current;
     const uint64_t now = nowQpc();
     synchronizeLocked(probe, now);
     if (probe.shared->responseKind == uint64_t(ResponseKind::GameUi)) return;
     const uintptr_t identity = reinterpret_cast<uintptr_t>(device);
-    const bool edge = probe.buttons.press(identity, pressed);
-    writeWord(probe.shared->ready, !pressed && probe.buttons.released(identity) ? 1 : 0);
+    auto& buttons = source == 3 ? probe.windowButtons : probe.buttons;
+    const bool edge = buttons.press(identity, pressed);
+    writeWord(probe.shared->ready, !pressed && buttons.released(identity) ? 1 : 0);
     if (edge && probe.pulse.consume(now, source)) {
         probe.pairs.consumed();
         publishLocked(probe);
     }
+}
+
+void mouseReadLost(void* device) noexcept {
+    if (!enabled() || !device) return;
+    std::lock_guard<std::mutex> lock(callbacks);
+    if (!current || !enabled()) return;
+    current->buttons.invalidate(reinterpret_cast<uintptr_t>(device));
+    if (current->shared->responseKind == uint64_t(ResponseKind::OwnedMarker))
+        writeWord(current->shared->ready, current->buttons.anyReleased() || current->windowButtons.anyReleased());
 }
 
 namespace {
@@ -698,12 +737,19 @@ void keyboardEventLocked(Probe& probe, void* device, unsigned scanCode, bool pre
         Log::get().note("input_latency_ui_keyboard,request=%llu,input_tick=%llu,scan_code=%u,pressed=%u,source=%u,qualified=1",
             ui.request, inputTickToken, scanCode, unsigned(pressed), source);
     const uintptr_t identity = reinterpret_cast<uintptr_t>(device);
-    const bool edge = probe.keyboard.observe(identity, scanCode, pressed, received, inputTickToken);
+    const auto press = probe.keyboard.observe(identity, scanCode, pressed, received, inputTickToken);
     if (!ui.active) return; // priming/readiness is retained before Preparing
+    const bool measuredPress = press == KeyboardPress::FromRelease && probe.pulse.phase() == Phase::Armed &&
+        identity == ui.keyboardDevice && scanCode == ui.scanCode && received >= probe.pulse.result().sentQpc;
+    // Between the baseline and its accepted pixel response, any other new
+    // arrow down could explain the change, including a first read from a
+    // different keyboard. A held state or release cannot create a second press.
+    if (ui.prepared && press != KeyboardPress::None && !measuredPress) {
+        rejectLocked(probe, Refusal::BaselineMismatch); return;
+    }
     refreshKeyboardReadyLocked(probe);
     publishPreparedLocked(probe);
-    if (identity == ui.keyboardDevice && scanCode == ui.scanCode && edge &&
-        probe.pulse.consume(received, source, inputTickToken)) {
+    if (measuredPress && probe.pulse.consume(received, source, inputTickToken)) {
         probe.pairs.consumed();
         publishLocked(probe);
     }
@@ -714,7 +760,7 @@ void keyboardState(void* device, const uint8_t* state256, uint64_t inputTickToke
     if (!enabled() || !device || !state256) return;
     const uint64_t received = nowQpc();
     std::lock_guard<std::mutex> lock(callbacks);
-    if (!current) return;
+    if (!current || !enabled()) return;
     synchronizeLocked(*current, nowQpc());
     for (unsigned dik : {0xC8u, 0xD0u})
         keyboardEventLocked(*current, device, dik, (state256[dik] & 0x80) != 0, 4, received, inputTickToken);
@@ -724,7 +770,7 @@ void keyboardBuffered(void* device, unsigned scanCode, bool pressed, uint64_t in
     if (!enabled() || !device) return;
     if (!received) { keyboardReadLost(device); return; }
     std::lock_guard<std::mutex> lock(callbacks);
-    if (!current) return;
+    if (!current || !enabled()) return;
     synchronizeLocked(*current, nowQpc());
     keyboardEventLocked(*current, device, scanCode, pressed, 5, received, inputTickToken);
 }
@@ -732,15 +778,15 @@ void keyboardBuffered(void* device, unsigned scanCode, bool pressed, uint64_t in
 void keyboardReadLost(void* device) noexcept {
     if (!enabled() || !device) return;
     std::lock_guard<std::mutex> lock(callbacks);
-    if (!current) return;
+    if (!current || !enabled()) return;
     const bool known = current->keyboard.invalidate(reinterpret_cast<uintptr_t>(device));
     if (known && current->ui.active) rejectLocked(*current, Refusal::InputReadLost);
 }
 
-void eyeRendered(ID3D11Device* device, ID3D11Texture2D* texture, uint64_t sequence, unsigned eye) noexcept {
+void eyeRendered(ID3D11Device* device, ID3D11Texture2D* texture, uint64_t sequence, unsigned eye, bool fullImage) noexcept {
     if (!enabled()) return;
     std::lock_guard<std::mutex> lock(callbacks);
-    if (!current) return;
+    if (!current || !enabled()) return;
     auto& probe = *current;
     const uint64_t now = nowQpc();
     synchronizeLocked(probe, now);
@@ -761,6 +807,7 @@ void eyeRendered(ID3D11Device* device, ID3D11Texture2D* texture, uint64_t sequen
         if (probe.pulse.phase() != Phase::Consumed && probe.pulse.phase() != Phase::Rendering) return;
         if (probe.pulse.phase() == Phase::Consumed && !probe.pairs.allowsResponse(sequence)) return;
     }
+    if (!fullImage) { rejectLocked(probe, Refusal::TextureUnsupported); return; }
     if (FAILED(device->GetDeviceRemovedReason())) { rejectLocked(probe, Refusal::DeviceRemoved); return; }
     ComPtr<ID3D11Device> textureDevice;
     texture->GetDevice(&textureDevice);
@@ -824,7 +871,7 @@ void eyeRendered(ID3D11Device* device, ID3D11Texture2D* texture, uint64_t sequen
 void eyeSubmitted(uint64_t sequence, unsigned eye, bool accepted) noexcept {
     if (!enabled()) return;
     std::lock_guard<std::mutex> lock(callbacks);
-    if (!current) return;
+    if (!current || !enabled()) return;
     auto& probe = *current;
     const uint64_t now = nowQpc();
     synchronizeLocked(probe, now);

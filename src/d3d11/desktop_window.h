@@ -39,6 +39,7 @@ bool desktopWindowPresent(IDXGISwapChain* swapChain, ID3D11Device* device, unsig
 // every desktopWindowPresent call; absent, mixed, reused and repeated sources
 // return zero. Read immediately after drawing, before the actual DXGI call.
 EdvrNativeReflexSource desktopWindowPresentSource() noexcept;
+// Consume this exact retained source after its real DXGI Present returns S_OK.
 void desktopWindowCommitPresentSource(const EdvrNativeReflexSource&) noexcept;
 
 }  // namespace edvr

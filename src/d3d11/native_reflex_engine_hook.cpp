@@ -144,6 +144,13 @@ void publish(FrameBoundaryRecord record) noexcept {
     ReleaseSRWLockExclusive(&historyLock);
 }
 
+void retireTickTicket(uint64_t token) noexcept {
+    AcquireSRWLockExclusive(&ticketLock);
+    const unsigned abandoned = tickets.retire(token);
+    ReleaseSRWLockExclusive(&ticketLock);
+    abandonedTickets.fetch_add(abandoned, std::memory_order_relaxed);
+}
+
 void hookedTick(uintptr_t app, float delta) {
     const auto original = reinterpret_cast<PhaseFunction>(tickOriginal.load(std::memory_order_acquire));
     const auto* observer = callbacks.load(std::memory_order_acquire);
@@ -181,11 +188,13 @@ void hookedTick(uintptr_t app, float delta) {
             scope.record.returnQpc = qpcNow();
             if (scope.record.token && observer->afterTick) observer->afterTick(observer->context, scope.record.token);
             scope.record.endQpc = qpcNow();
-            AcquireSRWLockExclusive(&ticketLock);
-            const unsigned abandoned = tickets.retire(scope.record.token);
-            ReleaseSRWLockExclusive(&ticketLock);
-            abandonedTickets.fetch_add(abandoned, std::memory_order_relaxed);
+            retireTickTicket(scope.record.token);
             publish(scope.record);
+            scope = {};
+        },
+        [&] {
+            if (scope.record.token && observer->tickAborted) observer->tickAborted(observer->context, scope.record.token);
+            retireTickTicket(scope.record.token);
             scope = {};
         });
 }
@@ -276,7 +285,8 @@ void hookedLate(uintptr_t app) {
     engine_detail::forwardBoundary(true, true, lateEntered,
         [&] { if (observer->lateWorkerBegin) observer->lateWorkerBegin(observer->context, ticket.token); },
         [&] { forwardLate(original, app, true); },
-        [&] { if (observer->lateWorkerEnd) observer->lateWorkerEnd(observer->context, ticket.token); });
+        [&] { if (observer->lateWorkerEnd) observer->lateWorkerEnd(observer->context, ticket.token); },
+        [&] { if (observer->lateWorkerAborted) observer->lateWorkerAborted(observer->context, ticket.token); });
 }
 
 void forwardInput(PhaseFunction original, uintptr_t manager, float delta, bool qualified) {

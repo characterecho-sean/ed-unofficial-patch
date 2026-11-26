@@ -32,6 +32,8 @@ namespace edvr::input_latency_probe {
 struct TestMouseRead { void* device; bool pressed; unsigned source; };
 std::array<TestMouseRead, 64> testMouseReads{};
 size_t testMouseReadCount = 0;
+void* testLastMouseLoss = nullptr;
+void mouseReadLost(void* device) noexcept { testLastMouseLoss = device; }
 void mouseButton(void* device, bool pressed, unsigned source) noexcept {
     if (testMouseReadCount < testMouseReads.size())
         testMouseReads[testMouseReadCount++] = {device, pressed, source};
@@ -128,6 +130,8 @@ struct Device {
     DIDEVICEOBJECTDATA events[4]{};
     DWORD count = 0;
     bool customState = false;
+    unsigned formatCalls = 0;
+    bool denyStateAfterRead = false;
 };
 ULONG STDMETHODCALLTYPE retainDevice(Device* d) { return ++d->refs; }
 ULONG STDMETHODCALLTYPE releaseDevice(Device* d) { return --d->refs; }
@@ -147,6 +151,10 @@ HRESULT STDMETHODCALLTYPE state(Device* d, DWORD bytes, void* out) {
     }
     if (bytes != 256) return DIERR_INVALIDPARAM;
     memcpy(out, d->keys, 256);
+    if (d->denyStateAfterRead) {
+        DWORD old = 0;
+        VirtualProtect(out, 256, PAGE_NOACCESS, &old);
+    }
     return d->result;
 }
 HRESULT STDMETHODCALLTYPE data(Device* d, DWORD bytes, DIDEVICEOBJECTDATA* out,
@@ -160,6 +168,17 @@ HRESULT STDMETHODCALLTYPE data(Device* d, DWORD bytes, DIDEVICEOBJECTDATA* out,
     if (!(flags & DIGDD_PEEK) && out) d->count = 0;
     return d->result;
 }
+HRESULT STDMETHODCALLTYPE setDeviceFormat(Device* device, LPCDIDATAFORMAT) {
+    ++device->formatCalls;
+    return device->result;
+}
+HRESULT STDMETHODCALLTYPE setDeviceActionMap(Device* device, void*, const void*, DWORD) {
+    return device->result;
+}
+HRESULT setFormat(Device& device, const DIDATAFORMAT& format) {
+    using Set = HRESULT (STDMETHODCALLTYPE*)(void*, LPCDIDATAFORMAT);
+    return reinterpret_cast<Set>(device.table[11])(&device, &format);
+}
 std::array<void*, 32> deviceTable() {
     std::array<void*, 32> t;
     t.fill(reinterpret_cast<void*>(&unused));
@@ -168,6 +187,8 @@ std::array<void*, 32> deviceTable() {
     t[3] = reinterpret_cast<void*>(&caps);
     t[9] = reinterpret_cast<void*>(&state);
     t[10] = reinterpret_cast<void*>(&data);
+    t[11] = reinterpret_cast<void*>(&setDeviceFormat);
+    t[30] = reinterpret_cast<void*>(&setDeviceActionMap);
     return t;
 }
 struct Factory {
@@ -1127,6 +1148,121 @@ static void releaseTailInterleavingCases() {
     if (!e->aborted) delete e;   // an aborted run leaves detached workers pointing into it
 }
 
+// One shared table must dispatch the original once and restore it in either creation order.
+static void sharedMouseControllerCases() {
+    for (bool mouseFirst : {false, true}) {
+        inputGateShutdown();
+        auto table = deviceTable();
+        Device mouse{table.data()}, stick{table.data()};
+        mouse.type = DI8DEVTYPE_MOUSE;
+        stick.type = DI8DEVTYPE_JOYSTICK;
+        auto factorySlots = factoryTable();
+        Factory factory{factorySlots.data(), 1, mouseFirst ? &mouse : &stick};
+        captureFactory(&factory, false, std::make_index_sequence<kFactoryDoors>{});
+        enumerate(factory, kGuidSomeStick, DI8DEVTYPE_JOYSTICK, 0x0200231D);
+        void* returned = nullptr;
+        createAs(factory, mouseFirst ? kGuidSysMouse : kGuidSomeStick, &returned);
+        auto* reader = table[9];
+        factory.next = mouseFirst ? &stick : &mouse;
+        createAs(factory, mouseFirst ? kGuidSomeStick : kGuidSysMouse, &returned);
+        check(table[9] == reader, "mouse and controller share the existing state reader in either creation order");
+        setFormat(mouse, c_dfDIMouse);
+        edvr::input_latency_probe::live.store(true);
+        edvr::input_latency_probe::testMouseReadCount = 0;
+        DIMOUSESTATE out{};
+        const auto before = mouse.calls;
+        reinterpret_cast<PFN_GetDeviceState>(table[9])(&mouse, sizeof(out), &out);
+        check(mouse.calls == before + 1 && edvr::input_latency_probe::testMouseReadCount == 1,
+              "shared-table mouse read forwards and observes exactly once");
+        edvr::input_latency_probe::live.store(false);
+        Device keyboard{table.data()};
+        factory.next = &keyboard;
+        createThrough(factory, &returned);
+        g_pluginBlock.store(true);
+        keyboard.keys[DIK_A] = 0x80;
+        BYTE keys[256]{};
+        stick.customState = true;
+        DIJOYSTATE stickPacket{};
+        stickPacket.lX = 246;
+        stickPacket.rgbButtons[0] = 0x80;
+        memcpy(stick.keys, &stickPacket, sizeof(stickPacket));
+        reinterpret_cast<PFN_GetDeviceState>(table[9])(&stick, sizeof(stickPacket), &stickPacket);
+        check(readState(keyboard, keys) == DI_OK && released(keys) && stickPacket.lX == 246 &&
+              !stickPacket.rgbButtons[0] && !stick.capsCalls && table[9] == reader,
+              "the same reader preserves plugin keyboard and controller ownership with the mouse probe off");
+        inputGateShutdown();
+        check(table[9] == reinterpret_cast<void*>(&state) && table[10] == reinterpret_cast<void*>(&data) &&
+              table[11] == reinterpret_cast<void*>(&setDeviceFormat) && table[30] == reinterpret_cast<void*>(&setDeviceActionMap) &&
+              table[13] == reinterpret_cast<void*>(&unused) && mouse.refs == 1 && stick.refs == 1 && keyboard.refs == 1,
+              "shutdown restores the original shared mouse/controller table in either creation order");
+    }
+}
+
+static void remappedInputCases() {
+    using namespace edvr::input_latency_probe;
+    for (bool keyboard : {false, true}) {
+        inputGateShutdown();
+        auto table = deviceTable();
+        Device device{table.data()};
+        device.type = keyboard ? DI8DEVTYPE_KEYBOARD : DI8DEVTYPE_MOUSE;
+        auto factorySlots = factoryTable();
+        Factory factory{factorySlots.data(), 1, &device};
+        captureFactory(&factory, false, std::make_index_sequence<kFactoryDoors>{});
+        void* returned = nullptr;
+        createAs(factory, keyboard ? kGuidSysKeyboard : kGuidSysMouse, &returned);
+        const DIDATAFORMAT& standard = keyboard ? c_dfDIKeyboard : c_dfDIMouse;
+        DIDATAFORMAT custom = standard;
+        std::vector<DIOBJECTDATAFORMAT> objects(standard.rgodf, standard.rgodf + standard.dwNumObjs);
+        const DWORD offset = keyboard ? DIK_UP : DIMOFS_BUTTON0;
+        auto observed = std::find_if(objects.begin(), objects.end(), [&](const auto& obj) { return obj.dwOfs == offset; });
+        const DWORD other = keyboard ? DIK_DOWN : DIMOFS_BUTTON1;
+        auto swapped = std::find_if(objects.begin(), objects.end(), [&](const auto& obj) { return obj.dwOfs == other; });
+        if (observed == objects.end() || swapped == objects.end()) { check(false, "SDK stock input layout contains the tested offsets"); continue; }
+        std::swap(observed->dwOfs, swapped->dwOfs);
+        custom.rgodf = objects.data();
+        live.store(true);
+        testMouseReadCount = testKeyboardReadCount = testBufferedKeyCount = 0;
+        setFormat(device, custom);
+        BYTE bytes[256]{};
+        device.keys[offset] = 0x80;
+        auto read = reinterpret_cast<PFN_GetDeviceState>(table[9]);
+        auto buffered = reinterpret_cast<PFN_GetDeviceData>(table[10]);
+        check(read(&device, standard.dwDataSize, bytes) == DI_OK && !testMouseReadCount && !testKeyboardReadCount,
+              "same-size remapped keyboard or mouse state is forwarded without a diagnostic receipt");
+        device.events[0] = {offset, 0x80, 77, 1, 0}; device.count = 1;
+        DWORD count = 1; DIDEVICEOBJECTDATA row{};
+        check(buffered(&device, sizeof(row), &row, &count, 0) == DI_OK && count == 1 &&
+              !testMouseReadCount && !testBufferedKeyCount,
+              "standard-stride buffered rows on a remapped device cannot certify physical input");
+        check(device.formatCalls == 1 && setFormat(device, standard) == DI_OK && device.formatCalls == 2,
+              "SetDataFormat forwards the exact original once for both remapped and stock descriptors");
+        read(&device, standard.dwDataSize, bytes);
+        check(keyboard ? testKeyboardReadCount == 1 : testMouseReadCount == 1,
+              "a later successful stock format restores this device's input observation");
+        device.result = DIERR_ACQUIRED;
+        const auto failed = setFormat(device, custom);
+        device.result = DI_OK;
+        read(&device, standard.dwDataSize, bytes);
+        check(failed == DIERR_ACQUIRED && (keyboard ? testKeyboardReadCount : testMouseReadCount) == 2,
+              "a rejected format change preserves the previous stock mapping and original status");
+        testLastMouseLoss = testLastKeyboardLoss = nullptr;
+        reinterpret_cast<SetActionMap>(table[30])(&device, nullptr, nullptr, 0);
+        read(&device, standard.dwDataSize, bytes);
+        check((keyboard ? testLastKeyboardLoss : testLastMouseLoss) == &device &&
+              (keyboard ? testKeyboardReadCount : testMouseReadCount) == 2,
+              "an accepted action map revokes the preceding stock mapping and its release evidence");
+        setFormat(device, standard);
+        testLastMouseLoss = testLastKeyboardLoss = nullptr;
+        setFormat(device, custom);
+        read(&device, standard.dwDataSize, bytes);
+        check((keyboard ? testLastKeyboardLoss : testLastMouseLoss) == &device &&
+              (keyboard ? testKeyboardReadCount : testMouseReadCount) == 2,
+              "a later same-size remap withdraws an established format for this device");
+        live.store(false);
+        inputGateShutdown();
+    }
+}
+
 static void mouseInputLatencyCases() {
     using namespace edvr::input_latency_probe;
     for (bool wide : {false, true}) {
@@ -1153,6 +1289,7 @@ static void mouseInputLatencyCases() {
               "disabled mouse observation forwards state without a callback or buffer change");
         live.store(true);
         for (DWORD bytes : {DWORD(sizeof(DIMOUSESTATE)), DWORD(sizeof(DIMOUSESTATE2))}) {
+            setFormat(mouse, bytes == sizeof(DIMOUSESTATE) ? c_dfDIMouse : c_dfDIMouse2);
             check(read(&mouse, bytes, &out) == DI_OK && testMouseReadCount > 0 && !testMouseReads[testMouseReadCount-1].pressed &&
                   testMouseReads[testMouseReadCount-1].device == &mouse &&
                   testMouseReads[testMouseReadCount-1].source == 1 && memcmp(&out, &packet, bytes) == 0,
@@ -1222,9 +1359,16 @@ static void mouseInputLatencyCases() {
     {
         auto table = deviceTable();
         Device keyboard{table.data()}, mouse{table.data()}; mouse.type = DI8DEVTYPE_MOUSE;
-        captureKeyboard(&keyboard, std::make_index_sequence<kGameDeviceDoors>{});
+        auto factorySlots = factoryTable();
+        Factory factory{factorySlots.data(), 1, &keyboard};
+        captureFactory(&factory, false, std::make_index_sequence<kFactoryDoors>{});
+        void* returned = nullptr;
+        check(createThrough(factory, &returned) == DI_OK && returned == &keyboard, "keyboard-first factory creates the keyboard");
         void* keyboardReader = table[9];
-        captureMouse(&mouse);
+        factory.next = &mouse;
+        check(createAs(factory, kGuidSysMouse, &returned) == DI_OK && returned == &mouse && !keyboardRegistered(&mouse),
+              "a newly created shared-table mouse has its own device identity");
+        check(setFormat(mouse, c_dfDIMouse) == DI_OK && mouse.formatCalls == 1, "the shared table accepts the stock mouse format once");
         testMouseReadCount = 0; live.store(true);
         DIMOUSESTATE stateOut{};
         check(table[9] == keyboardReader && reinterpret_cast<PFN_GetDeviceState>(table[9])(&mouse, sizeof(stateOut), &stateOut) == DI_OK &&
@@ -1234,6 +1378,44 @@ static void mouseInputLatencyCases() {
         inputGateShutdown();
         check(mouse.refs == 1 && keyboard.refs == 1 && table[9] == reinterpret_cast<void*>(&state),
               "keyboard-first shutdown restores the original reader without a retained mouse hook");
+    }
+}
+
+// Instance GUIDs get their keyboard type from the game's own enumeration.
+// A private table still needs its own reader and both format setters.
+static void enumeratedKeyboardCases() {
+    using namespace edvr::input_latency_probe;
+    const GUID instance = {0xA1B20001,0x3210,0x2222,{1,2,3,4,5,6,7,8}};
+    for (bool wide : {false, true}) {
+        inputGateShutdown();
+        auto table = deviceTable();
+        auto original = table;
+        auto factorySlots = factoryTable();
+        Device keyboard{table.data()};
+        Factory factory{factorySlots.data(), 1, &keyboard};
+        factory.wide = wide;
+        captureFactory(&factory, wide, std::make_index_sequence<kFactoryDoors>{});
+        enumerate(factory, instance, DI8DEVTYPE_KEYBOARD, 0);
+        void* returned = nullptr;
+        check(createAs(factory, instance, &returned) == DI_OK && returned == &keyboard &&
+              keyboardRegistered(&keyboard) && !keyboard.capsCalls,
+              "A/W enumerated instance keyboard uses the game's type witness without a driver query");
+        check(table[9] != original[9] && table[10] != original[10] && table[11] != original[11] && table[30] != original[30],
+              "a private enumerated keyboard's own read and format methods are observed");
+        keyboard.keys[DIK_UP] = 0x80;
+        BYTE out[256]{};
+        live.store(true); testKeyboardReadCount = 0;
+        readState(keyboard, out);
+        check(!testKeyboardReadCount, "the enumerated keyboard cannot issue receipts before its format is observed");
+        setFormat(keyboard, c_dfDIKeyboard);
+        readState(keyboard, out);
+        check(testKeyboardReadCount == 1 && testKeyboardReads[0].device == &keyboard && testKeyboardReads[0].state[DIK_UP] == 0x80,
+              "the private enumerated keyboard issues a receipt after an accepted standard format");
+        live.store(false); g_private.store(1);
+        check(readState(keyboard, out) == DI_OK && released(out) && !keyboard.capsCalls,
+              "the same private enumerated reader applies keyboard privacy without a capability query");
+        inputGateShutdown();
+        check(table == original && keyboard.refs == 1, "the enumerated keyboard's complete original table and reference are restored");
     }
 }
 
@@ -1251,6 +1433,7 @@ static void keyboardInputLatencyCases() {
         void* returned = nullptr;
         check(createThrough(factory, &returned) == DI_OK && returned == &keyboard && keyboardRegistered(&keyboard),
               "A/W keyboard receipt fixture uses the game's captured factory identity");
+        setFormat(keyboard, c_dfDIKeyboard);
         g_private.store(0); g_summon.store(0); cancelReleaseTail();
         keyboard.keys[DIK_UP] = 0x80; keyboard.keys[DIK_A] = 0x80;
         BYTE observed[256]{};
@@ -1353,12 +1536,26 @@ static void keyboardInputLatencyCases() {
               bufferedRows[0].dwOfs == DIK_DOWN && bufferedRows[1].dwOfs == DIK_UP,
               "buffered observation receives only the post-filtered release rows actually returned to the game");
         g_private.store(0);
+        if (!wide) {
+            auto* page = static_cast<BYTE*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            check(page != nullptr, "a private page is available for the keyboard packet lifetime test");
+            if (page) {
+                const auto receipts = testKeyboardReadCount;
+                const auto lossesBeforeFault = testKeyboardLossCount;
+                keyboard.denyStateAfterRead = true;
+                const auto result = read(&keyboard, 256, page);
+                keyboard.denyStateAfterRead = false;
+                check(result == DI_OK && testKeyboardReadCount == receipts && testKeyboardLossCount == lossesBeforeFault + 1,
+                      "a returned keyboard packet that became unreadable never enters the receiver and withdraws release evidence");
+                VirtualFree(page, 0, MEM_RELEASE);
+            }
+        }
         const size_t beforeForget = testKeyboardLossCount;
         keyboardForget(&keyboard);
         check(!keyboardRegistered(&keyboard) && readState(keyboard, observed) == DI_OK &&
-              testKeyboardReadCount == before + 3 && testKeyboardReads[before + 2].device == &keyboard &&
+              testKeyboardReadCount == before + 2 &&
               testKeyboardLossCount == beforeForget + 1,
-              "the retained captured door remains positive keyboard ownership after registry eviction");
+              "forgetting an object revokes its format proof even when the shared reader retains its COM identity");
         live.store(false); native_reflex::testInputFrameToken = 0;
         inputGateShutdown();
         check(keyboard.refs == 1, "keyboard receipt holds no additional device references");
@@ -1382,16 +1579,47 @@ BOOL WINAPI mousePeekOriginal(LPMSG out, HWND hwnd, UINT lo, UINT hi, UINT remov
 }
 }
 
+static void passiveMessageCases() {
+    inputGateShutdown();
+    Config::get().set("advanced.input_gate", "0");
+    inputGateInstall();
+    check(inputGateInstallMessageObserver() && g_user.peek.applied && !g_user.asyncKey.applied && !g_gateEnabled,
+          "disabled input gate retains only a passive game message observer");
+    if (g_user.peek.applied) {
+        MSG observed{};
+        PeekMessageA(&observed, nullptr, WM_APP, WM_APP, PM_NOREMOVE);  // create the rig thread's queue
+        g_private.store(1);
+        const auto pings = native_reflex::pcl::testRemovedMessages;
+        const UINT ping = WM_APP + 27;
+        check(PostThreadMessageA(GetCurrentThreadId(), ping, 0, 0) &&
+              PeekMessageA(&observed, nullptr, ping, ping, PM_NOREMOVE) &&
+              native_reflex::pcl::testRemovedMessages == pings &&
+              PeekMessageA(&observed, nullptr, ping, ping, PM_REMOVE) && observed.message == ping &&
+              native_reflex::pcl::testRemovedMessages == pings + 1,
+              "the executable import routes only a removed ping to PCL with the keyboard gate off");
+        check(PostThreadMessageA(GetCurrentThreadId(), WM_KEYDOWN, VK_RETURN, 0) &&
+              PeekMessageA(&observed, nullptr, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE) && observed.message == WM_KEYDOWN,
+              "passive observer leaves key messages untouched even when privacy was requested");
+        PostQuitMessage(37);
+        const auto quits = native_reflex::testNormalQuits;
+        check(PeekMessageA(&observed, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE) && observed.wParam == 37 &&
+              native_reflex::testNormalQuits == quits + 1 && observed.message == WM_QUIT,
+              "passive observer forwards normal shutdown with input gating disabled");
+    }
+    inputGateShutdown(); g_installTried = false;
+    Config::get().set("advanced.input_gate", "1");
+}
+
 static void mouseMessageLatencyCases() {
     using namespace edvr::input_latency_probe;
     HWND ownWindow = CreateWindowExW(0, L"STATIC", L"EDUP input receipt rig", 0,
                                     0, 0, 1, 1, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     check(ownWindow != nullptr, "mouse message rig creates a real same-process window");
     if (!ownWindow) return;
-    const auto savedPeek = g_user.origPeek;
+    const auto savedPeek = g_user.peek.original;
     const bool savedRetired = g_user.retired3;
     const int savedPrivate = g_private.load();
-    g_user.origPeek = &mousePeekOriginal;
+    g_user.peek.original = reinterpret_cast<void*>(&mousePeekOriginal);
     g_user.retired3 = false;
     g_private.store(1);
     mousePeekCalls = 0; testMouseReadCount = 0; mousePeekResult = 7;
@@ -1486,7 +1714,7 @@ static void mouseMessageLatencyCases() {
     check(edvr::native_reflex::testNormalQuits == quitBefore + 1,
           "a failed dequeue with stale quit bytes cannot shut down telemetry");
     live.store(false);
-    g_user.origPeek = savedPeek; g_user.retired3 = savedRetired; g_private.store(savedPrivate);
+    g_user.peek.original = savedPeek; g_user.retired3 = savedRetired; g_private.store(savedPrivate);
     DestroyWindow(ownWindow);
 }
 
@@ -1499,7 +1727,11 @@ int main(int argc, char** argv) {
         printf("\nINPUT GATE TEST %s\n", failures ? "FAILED" : "PASSED");
         return failures ? 1 : 0;
     }
+    passiveMessageCases();
+    sharedMouseControllerCases();
+    remappedInputCases();
     mouseInputLatencyCases();
+    enumeratedKeyboardCases();
     keyboardInputLatencyCases();
     mouseMessageLatencyCases();
     padHookCases();
@@ -1583,7 +1815,8 @@ int main(int argc, char** argv) {
     g_user.origAsync = &physicalKey;
     g_user.origKeyState = &physicalKey;
     g_user.origKeyboardState = &physicalState;
-    g_user.origPeek = &nextMessage;
+    g_user.peek.original = reinterpret_cast<void*>(&nextMessage);
+    g_user.filterMessages.store(true);
     physical[VK_ESCAPE] = physical[VK_TAB] = true;
     check(hookGetAsyncKeyState(VK_ESCAPE) == 0 && hookGetKeyState(VK_TAB) == 0,
           "user32 polling is private while the menu is open");

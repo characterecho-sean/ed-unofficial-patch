@@ -50,7 +50,9 @@ inline HRESULT WINAPI publishDeviceGpu(void*,const EdvrNativeDeviceGpuSample*) {
 } // namespace edvr::openxr::test::timing_fixture
 
 #pragma comment(linker, "/export:edvrAcquireNativeTiming")
-extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest*,EdvrNativeTimingTable* table) {
+extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest* request,EdvrNativeTimingTable* table) {
+  // This legacy provider exercises the client's v3 fallback.
+  if(request->version != EDVR_NATIVE_TIMING_VERSION_3) return E_INVALIDARG;
   using namespace edvr::openxr::test::timing_fixture;
   *table={sizeof(*table),EDVR_NATIVE_TIMING_VERSION_3,&state,waitBegin,waitEnd,gpuEye,publishCpu,invalidate,close,gpuEnabled,publishDeviceGpu};
   return S_OK;

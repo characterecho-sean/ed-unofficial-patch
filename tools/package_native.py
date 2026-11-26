@@ -125,8 +125,10 @@ FILES = (
     PackagedFile("dittosr_license", "DITTOSR-LICENSE.txt", "core", "game", "DITTOSR-LICENSE.txt", _EITHER, "owned"),
     PackagedFile("dittosr_gsr_license", "DITTOSR-GSR-LICENSE.txt", "core", "game",
                  "DITTOSR-GSR-LICENSE.txt", _EITHER, "owned"),
+    # The exact notice accompanies the linked graphics DLL. Back up and replace
+    # a conflicting notice, as for the OpenXR loader's required notice.
     PackagedFile("reflex_license", fetch_reflex.LICENSE_NAME, "core", "game",
-                 fetch_reflex.LICENSE_NAME, _EITHER, "owned"),
+                 fetch_reflex.LICENSE_NAME, _EITHER, "replace"),
     PackagedFile("dlss", "nvngx_dlss.dll", "dlss", "game", "nvngx_dlss.dll", _NVIDIA, "owned"),
     PackagedFile("xess", "libxess.dll", "xess", "game", "libxess.dll", None, "owned"),
     PackagedFile("xess_license", "INTEL-XESS-LICENSE.txt", "xess", "game", "INTEL-XESS-LICENSE.txt", None, "owned"),
@@ -1388,6 +1390,7 @@ def self_test():
                     entry = next(item for item in pcl_manifest["files"] if item["id"] == "reflex_license")
                     assert entry["target"] == {"root": "game", "path": fetch_reflex.LICENSE_NAME}
                     assert entry["sha256"] == hashlib.sha256(reflex_payload).hexdigest()
+                    assert entry["existing"] == "replace", "a conflicting Reflex notice must be backed up and replaced"
                 graphics.write_bytes(graphics_before)
                 assert package(root, "4.0.1", no_dlss=True) == 0
                 with zipfile.ZipFile(dist / "ed-up-core-4.0.1.zip") as archive:

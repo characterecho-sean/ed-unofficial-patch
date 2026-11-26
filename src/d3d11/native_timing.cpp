@@ -26,6 +26,7 @@ constexpr double kMaxFieldMs = 600000.0;            // malformed input guard
 
 struct Context {
     bool active = false;
+    bool suppliesEyeBounds = false;
     ID3D11Device* device = nullptr;
     DWORD producer = 0;
     uint64_t generation = 0;
@@ -279,12 +280,12 @@ uint32_t WINAPI gpuEye(void* p, uint64_t sequence, uint32_t eye, uint32_t begin,
     if (eye == 3u || eye == 4u || (eye >= 5u && eye <= 6u)) {
         if (GetCurrentThreadId() != c->producer) return 0;
         if (eye >= 5u) {
-            if (begin != 0 || accepted != 1 || !texture || !c->waitValid || c->published) return 0;
+            if (begin != 0 || accepted > 1 || (!c->suppliesEyeBounds && !accepted) || !texture || !c->waitValid || c->published) return 0;
             // This is the final treated eye texture, before runtime transfer.
             // The diagnostic's response therefore follows the game's actual
             // input receipt and is not paired to an unrelated next Present.
             if (edvr::input_latency_probe::enabled())
-                edvr::input_latency_probe::eyeRendered(c->device, texture, sequence, eye - 5u);
+                edvr::input_latency_probe::eyeRendered(c->device, texture, sequence, eye - 5u, c->suppliesEyeBounds && accepted);
             return edvrGpuFrameEvent(edvr::kGpuFrameProtocol,
                 static_cast<unsigned>(edvr::GpuFrameEvent::SegmentEnd), sequence,
                 eye - 5u, 1u, texture) ? 1u : 0u;
@@ -598,15 +599,18 @@ extern "C" HRESULT WINAPI edvrReadNativePresentTrace(
 
 extern "C" HRESULT WINAPI edvrAcquireNativeTiming(const EdvrNativeTimingRequest* request,
                                                     EdvrNativeTimingTable* table) {
-    if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_TIMING_VERSION_3)
+    if (!table || table->size != sizeof(*table) ||
+        (table->version != EDVR_NATIVE_TIMING_VERSION_3 && table->version != EDVR_NATIVE_TIMING_VERSION_6))
         return E_INVALIDARG;
-    *table = {sizeof(*table), EDVR_NATIVE_TIMING_VERSION_3};
-    if (!request || request->size != sizeof(*request) || request->version != EDVR_NATIVE_TIMING_VERSION_3 ||
+    const uint32_t version = table->version;
+    *table = {sizeof(*table), version};
+    if (!request || request->size != sizeof(*request) || request->version != version ||
         !request->device || !request->generation) return E_INVALIDARG;
     std::lock_guard<std::mutex> lock(lifetime);
     if (current || used == kCapacity) return E_PENDING;
     Context& c = pool[used++];
     c = {}; c.active = true; c.device = request->device; c.producer = GetCurrentThreadId();
+    c.suppliesEyeBounds = version == EDVR_NATIVE_TIMING_VERSION_6;
     c.generation = request->generation; current = &c;
     // The Map-wait totals have one consumer, the publish line below, and it
     // lives exactly as long as this context. Arm its collection with it, so

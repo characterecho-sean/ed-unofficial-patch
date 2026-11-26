@@ -17,11 +17,17 @@ class NativeTimingClient final {
     if (!provider || !device || !generation) return E_INVALIDARG;
     const auto entry = GetProcAddress(provider, "edvrAcquireNativeTiming");
     if (!owned(provider, entry)) return E_NOINTERFACE;
-    EdvrNativeTimingRequest request{sizeof(request), EDVR_NATIVE_TIMING_VERSION_3, device, generation};
-    EdvrNativeTimingTable candidate{sizeof(candidate), EDVR_NATIVE_TIMING_VERSION_3};
-    const auto result = reinterpret_cast<decltype(&edvrAcquireNativeTiming)>(entry)(&request, &candidate);
+    const auto acquireTiming = reinterpret_cast<decltype(&edvrAcquireNativeTiming)>(entry);
+    EdvrNativeTimingRequest request{sizeof(request), EDVR_NATIVE_TIMING_VERSION_6, device, generation};
+    EdvrNativeTimingTable candidate{sizeof(candidate), request.version};
+    auto result = acquireTiming(&request, &candidate);
+    if (result == E_INVALIDARG) {
+      request.version = EDVR_NATIVE_TIMING_VERSION_3;
+      candidate = {sizeof(candidate), request.version};
+      result = acquireTiming(&request, &candidate);
+    }
     if (result != S_OK) return FAILED(result) ? result : E_NOINTERFACE;
-    if (candidate.size != sizeof(candidate) || candidate.version != EDVR_NATIVE_TIMING_VERSION_3 ||
+    if (candidate.size != sizeof(candidate) || candidate.version != request.version ||
         !candidate.context || !owned(provider, candidate.waitBegin) ||
         !owned(provider, candidate.waitEnd) || !owned(provider, candidate.gpuEye) ||
         !owned(provider, candidate.publishCpu) || !owned(provider, candidate.invalidate) ||
@@ -85,10 +91,10 @@ class NativeTimingClient final {
     std::lock_guard<std::mutex> lock(mutex_);
     return table_.context && table_.gpuEye(table_.context, sequence, 4u, 0u, 1u, nullptr) != 0;
   }
-  bool producerSegmentEnd(uint64_t sequence, unsigned eye, ID3D11Texture2D* texture) {
+  bool producerSegmentEnd(uint64_t sequence, unsigned eye, ID3D11Texture2D* texture, bool fullImage) {
     std::lock_guard<std::mutex> lock(mutex_);
     return eye < 2 && table_.context && table_.gpuEye(table_.context, sequence, 5u + eye,
-                                                       0u, 1u, texture) != 0;
+        0u, table_.version == EDVR_NATIVE_TIMING_VERSION_3 || fullImage ? 1u : 0u, texture) != 0;
   }
   HRESULT publishCpu(const EdvrNativeTimingFrame& frame) {
     std::lock_guard<std::mutex> lock(mutex_);

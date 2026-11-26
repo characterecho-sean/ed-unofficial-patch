@@ -1,7 +1,7 @@
 # Installing native OpenXR by hand
 
-The launcher validates the game revision, preserves settings and
-handles graphics-mod chaining. Use it for upgrades or an uncertain existing
+The launcher validates the game revision, preserves settings and handles
+graphics-mod chaining. Use it for upgrades or an uncertain existing
 installation. These steps describe a fresh manual install of the complete
 native package, from the release's `ed-up-<version>.zip`.
 
@@ -13,9 +13,9 @@ native package, from the release's `ed-up-<version>.zip`.
    `advanced.real_dll` chain as described in [Running alongside EDHM by
    hand](#running-alongside-edhm-by-hand) below. Never overwrite another mod's
    only DLL.
-4. Place the release's `d3d11.dll` beside `EliteDangerous64.exe`. Copy
-   `edvr.ini` and `edvr-flat.ini` there only if you do not already have them;
-   otherwise keep your existing settings.
+4. Place the release's `d3d11.dll` beside `EliteDangerous64.exe`. If the
+   archive includes `NVIDIA-REFLEX-LICENSE.txt`, copy it beside the DLL. Copy
+   `edup.ini` and `edup-flat.ini` there only if you do not already have them.
 5. For a VR install, preserve the game's original `Openvr\win64\openvr_api.dll`
    as `openvr_api_orig.dll`. If that original already exists, use the launcher
    rather than renaming a previously installed ED-UP DLL over it. The original
@@ -42,7 +42,7 @@ OpenVR/LibOVR backend fallback. Logs go into `edvr_logs` beside the game.
 
 For uninstall, close Elite and use the launcher, or remove the ED-UP files and
 restore the original `openvr_api.dll` and any graphics-mod chain. Restore the
-original before launching the unmodified game. Preserve your `edvr.ini` if you
+original before launching the unmodified game. Preserve your `edup.ini` if you
 intend to reinstall.
 
 ## Which files each scope needs
@@ -62,11 +62,11 @@ scope says what is installed; Elite's 3D mode decides which of those runs.
 
 | Scope | Files |
 |---|---|
-| `both` | `d3d11.dll`, the `Openvr\win64` runtime from steps 5 and 6, `edvr.ini` and `edvr-flat.ini` |
-| `vr` | the same, without `edvr-flat.ini` |
-| `flat` | `d3d11.dll` and `edvr-flat.ini`; no runtime files, so the game's `openvr_api.dll` stays |
+| `both` | `d3d11.dll`, `NVIDIA-REFLEX-LICENSE.txt` if supplied, the `Openvr\win64` runtime from steps 5 and 6, `edup.ini` and `edup-flat.ini` |
+| `vr` | the same, without `edup-flat.ini` |
+| `flat` | `d3d11.dll`, `NVIDIA-REFLEX-LICENSE.txt` if supplied, and `edup-flat.ini`. Keep the game's `openvr_api.dll` in place. |
 
-With no `edvr-flat.ini`, the flat fixes read `edvr.ini` instead, so a `both` or
+With no `edup-flat.ini`, the flat fixes read `edup.ini` instead, so a `both` or
 `vr` install without the second file still runs.
 
 ## Running alongside EDHM by hand
@@ -75,8 +75,9 @@ EDHM also installs as `d3d11.dll`. To run both:
 
 1. Rename EDHM's `d3d11.dll` (say, to `d3d11_edhm.dll`) and leave it where it
    is.
-2. Put ED-UP's `d3d11.dll` in its place.
-3. In `edvr.ini`, under `[advanced]`, set `real_dll = d3d11_edhm.dll`.
+2. Put ED-UP's `d3d11.dll` in its place. If supplied, copy
+   `NVIDIA-REFLEX-LICENSE.txt` beside it.
+3. In `edup.ini`, under `[advanced]`, set `real_dll = d3d11_edhm.dll`.
 
 ED-UP passes everything through EDHM, and anything EDHM doesn't handle falls
 through to Windows' own `d3d11.dll`. Restart the game for this to take effect.
@@ -85,5 +86,5 @@ carries on without it. This is the same procedure the launcher follows, and
 what it will tell you it did.
 
 EDHM's uninstaller runs `del d3d11.dll`, which after this is ED-UP's file. To
-undo the pair cleanly, delete `d3d11.dll` and `edvr.ini`, rename
+undo the pair cleanly, delete `d3d11.dll` and `edup.ini`, rename
 `d3d11_edhm.dll` back, then run EDHM's uninstaller if you want to.

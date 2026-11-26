@@ -53,6 +53,7 @@ MANUAL INSTALL
 
 1. Close Elite Dangerous.
 2. Copy d3d11.dll beside EliteDangerous64.exe.
+   If the archive contains NVIDIA-REFLEX-LICENSE.txt, copy it beside d3d11.dll.
    Copy edup.ini only if you do not already have one; keep existing settings.
 3. In Openvr\win64, rename the game's openvr_api.dll to
    openvr_api_orig.dll. Do not overwrite an existing original with an ED-UP DLL.
@@ -84,3 +85,4 @@ LICENSE
 -------
 
 See LICENSE.txt and openvr/OPENXR-LOADER-LICENSE.txt.
+Builds using NVIDIA Reflex statistics also include NVIDIA-REFLEX-LICENSE.txt.

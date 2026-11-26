@@ -5,6 +5,7 @@
 #include "native_reflex_pcl.h"
 #include "input_gate.h"
 #include "../common/log.h"
+#include "../common/config.h"
 
 #include <windows.h>
 #include <d3d11.h>
@@ -26,9 +27,11 @@ struct FrameRecord {
     DWORD simulationThread = 0, poseThread = 0, commandThread = 0, presentThread = 0;
     unsigned reservedMarkers = 0, completedMarkers = 0, eyes = 0, acceptedEyes = 0;
     unsigned provider = 0;
+    uint64_t presentAttempts = 0;
+    bool presentPending = false, presentAccepted = false;
     bool invalid = false, driverFailed = false, lateBegun = false;
     bool lateEnded = false, mirrorDrawComplete = false, completed = false;
-    bool softwareReported = false, driverReported = false;
+    bool reportRequested = false, softwareReported = false, driverReported = false;
 };
 }
 
@@ -36,6 +39,7 @@ struct FrameSession {
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     uint64_t generation = 0;
     DWORD producerThread = 0;
+    bool pclReady = false;
     std::atomic<DWORD> simulationOwner{0};
     std::shared_ptr<FrameDriver> driver;
     std::atomic<bool> active{true};
@@ -43,7 +47,7 @@ struct FrameSession {
     std::atomic<bool> leftButtonDown{false}, pendingFlash{false};
     std::mutex recordsMutex;
     std::array<FrameRecord, kFrameHistory> frames{};
-    uint64_t newestToken = 0, lastPresentedToken = 0;
+    uint64_t newestToken = 0, lastPresentAttemptToken = 0;
     std::atomic<uint64_t> sleepCalls{0}, sleepAccepted{0}, sleepTicks{0};
     std::atomic<uint64_t> inputCalls{0}, completedTicks{0}, completedFrames{0};
     std::atomic<uint64_t> lastCompletedMs{0};
@@ -51,7 +55,7 @@ struct FrameSession {
     std::atomic<uint64_t> duplicatePresents{0}, markerFailures{0};
     std::atomic<uint64_t> foreignSimulationTicks{0};
     std::atomic<uint64_t> unconfiguredTicks{0}, softwareDropped{0}, driverFrameGaps{0};
-    std::atomic<uint64_t> lastSoftwareReported{0};
+    std::atomic<bool> detailedReports{false};
     uint64_t lastPollMs = 0, lastSummaryMs = 0, lastDriverReported = 0;
 };
 
@@ -97,12 +101,15 @@ bool reserveMarker(FrameRecord& frame, Marker marker) noexcept {
     return true;
 }
 void completeRecord(FrameSession& session, FrameRecord& frame) noexcept {
-    if (!frame.completed && !frame.invalid && !frame.driverFailed &&
+    if (!frame.completed && !frame.invalid && !frame.driverFailed && frame.presentAccepted &&
         (frame.completedMarkers & kAllFrameMarkers) == kAllFrameMarkers &&
         frame.eyes == 3 && frame.acceptedEyes == 3 && frame.poseSequence) {
         frame.completed = true;
         session.completedFrames.fetch_add(1, std::memory_order_relaxed);
-        session.lastCompletedMs.store(GetTickCount64(), std::memory_order_release);
+        // The SDK markers bracket the first attempt. Only that attempt can
+        // prove a complete driver frame; a successful retry is CPU evidence.
+        if (frame.presentAttempts == 1)
+            session.lastCompletedMs.store(GetTickCount64(), std::memory_order_release);
     }
 }
 // Marker calls are made after releasing record locks. Independent simulation,
@@ -110,7 +117,7 @@ void completeRecord(FrameSession& session, FrameRecord& frame) noexcept {
 void emit(const std::shared_ptr<FrameSession>& session, uint64_t token, Marker marker) noexcept {
     if (!session || !session->active.load(std::memory_order_acquire)) return;
     const bool accepted = !session->driver || session->driver->mark(token, marker);
-    pcl::mark(uint32_t(marker), token);
+    if (session->pclReady) pcl::mark(uint32_t(marker), token);
     if (!accepted) session->markerFailures.fetch_add(1, std::memory_order_relaxed);
     if (!accepted) {
         faultSession(session);
@@ -149,11 +156,10 @@ void beforeTick(void*, uint64_t token) noexcept {
         if (token <= session->newestToken) { ++session->missingBoundaries; return; }
         auto& frame = session->frames[token % session->frames.size()];
         if (frame.token && !frame.completed) ++session->overwrittenFrames;
-        if (frame.completed && !frame.softwareReported) ++session->softwareDropped;
-        if (frame.completed && frame.token > session->lastSoftwareReported.load(std::memory_order_acquire))
-            ++session->softwareDropped;
+        if (frame.reportRequested && frame.completed && !frame.softwareReported) ++session->softwareDropped;
         frame = {};
         frame.token = token;
+        frame.reportRequested = session->detailedReports.load(std::memory_order_relaxed);
         frame.simulationThread = GetCurrentThreadId();
         session->newestToken = token;
     }
@@ -192,7 +198,7 @@ void inputBegin(void*, uint64_t token) noexcept {
     auto session = activeSession();
     if (!session || tick.token != token || tick.generation != session->generation) return;
     ++session->inputCalls;
-    pcl::inputFrame(token);
+    if (session->pclReady) pcl::inputFrame(token);
     if (!session->pendingFlash.load(std::memory_order_acquire)) return;
     {
         std::lock_guard<std::mutex> lock(session->recordsMutex);
@@ -250,6 +256,24 @@ void lateEnd(void*, uint64_t token) noexcept {
     }
     if (endRender) emit(session, token, Marker::RenderSubmitEnd);
 }
+void invalidateAbortedFrame(uint64_t generation, uint64_t token) noexcept {
+    auto session = activeSession();
+    if (!session || session->generation != generation) return;
+    std::lock_guard<std::mutex> lock(session->recordsMutex);
+    if (auto* frame = findFrame(*session, token); frame && !frame->completed) frame->invalid = true;
+}
+void tickAborted(void*, uint64_t token) noexcept {
+    if (tick.token != token) return;
+    invalidateAbortedFrame(tick.generation, token);
+    tick = {};
+}
+void lateWorkerAborted(void*, uint64_t token) noexcept {
+    if (late.token != token) return;
+    frameCommandObserver = nullptr;
+    invalidateAbortedFrame(late.generation, token);
+    late = {};
+}
+
 const FrameBoundaryCallbacks callbacks = [] {
     FrameBoundaryCallbacks result{};
     result.beforeTick = beforeTick;
@@ -258,6 +282,8 @@ const FrameBoundaryCallbacks callbacks = [] {
     result.normalPhaseReturned = normalReturned;
     result.lateWorkerBegin = lateBegin;
     result.lateWorkerEnd = lateEnd;
+    result.tickAborted = tickAborted;
+    result.lateWorkerAborted = lateWorkerAborted;
     return result;
 }();
 
@@ -401,6 +427,7 @@ PresentFrameReceipt beginFramePresent(ID3D11Device* device, const EdvrNativeRefl
     if (!session || !observed || device != session->device.Get() || !validSource(source) || source.generation != session->generation)
         return {};
     bool endRender = false;
+    uint64_t attempt = 0;
     {
         std::lock_guard<std::mutex> lock(session->recordsMutex);
         auto* frame = findFrame(*session, source.frameToken);
@@ -408,10 +435,14 @@ PresentFrameReceipt beginFramePresent(ID3D11Device* device, const EdvrNativeRefl
             !(frame->completedMarkers & (1u << unsigned(Marker::RenderSubmitStart)))) {
             ++session->refusedSources; return {};
         }
-        if (source.frameToken <= session->lastPresentedToken || !reserveMarker(*frame, Marker::PresentStart)) {
+        if (source.frameToken < session->lastPresentAttemptToken || frame->presentPending ||
+            frame->presentAccepted || frame->presentAttempts == UINT64_MAX) {
             ++session->duplicatePresents; return {};
         }
-        session->lastPresentedToken = source.frameToken;
+        attempt = ++frame->presentAttempts;
+        frame->presentPending = true;
+        if (attempt == 1) reserveMarker(*frame, Marker::PresentStart);
+        session->lastPresentAttemptToken = source.frameToken;
         frame->mirrorDrawComplete = true;
         frame->mirrorCompleteQpc = observed;
         frame->presentBeginQpc = observed;
@@ -419,33 +450,52 @@ PresentFrameReceipt beginFramePresent(ID3D11Device* device, const EdvrNativeRefl
         endRender = reserveRenderEnd(*frame);
     }
     if (endRender) emit(session, source.frameToken, Marker::RenderSubmitEnd);
-    emit(session, source.frameToken, Marker::PresentStart);
-    return {session, source.frameToken};
+    if (attempt == 1) emit(session, source.frameToken, Marker::PresentStart);
+    return {session, source.frameToken, attempt};
 }
-void endFramePresent(const PresentFrameReceipt& receipt) noexcept {
+bool endFramePresent(const PresentFrameReceipt& receipt, HRESULT result) noexcept {
     const uint64_t observed = qpc();
     const auto& session = receipt.owner;
-    if (!session || !receipt.frameId || !observed || !session->active.load(std::memory_order_acquire)) return;
+    if (!session || !receipt.frameId || !session->active.load(std::memory_order_acquire)) return false;
     {
         std::lock_guard<std::mutex> lock(session->recordsMutex);
         auto* frame = findFrame(*session, receipt.frameId);
-        if (!frame || frame->invalid || frame->presentThread != GetCurrentThreadId() ||
-            !(frame->completedMarkers & (1u << unsigned(Marker::PresentStart))) ||
-            !reserveMarker(*frame, Marker::PresentEnd)) return;
-        frame->presentEndQpc = observed;
+        if (!frame || !frame->presentPending || frame->presentAttempts != receipt.attempt ||
+            frame->presentThread != GetCurrentThreadId() ||
+            !(frame->completedMarkers & (1u << unsigned(Marker::PresentStart)))) return false;
+        // Even if the source was invalidated during Present, close the SDK
+        // bracket for the admitted call while the same session is still live.
+        if (receipt.attempt == 1) {
+            const unsigned end = 1u << unsigned(Marker::PresentEnd);
+            if (frame->reservedMarkers & end) return false;
+            frame->reservedMarkers |= end;
+        }
     }
-    emit(session, receipt.frameId, Marker::PresentEnd);
+    // Keep the SDK start/end bracket on the first real call, even on failure.
+    // The same source ID must not acquire a second pair of driver timestamps.
+    if (receipt.attempt == 1) emit(session, receipt.frameId, Marker::PresentEnd);
+    std::lock_guard<std::mutex> lock(session->recordsMutex);
+    auto* frame = findFrame(*session, receipt.frameId);
+    if (!frame || !session->active.load(std::memory_order_acquire)) return false;
+    frame->presentPending = false;
+    if (frame->invalid || result != S_OK) return false;
+    if (!observed) { frame->invalid = true; return false; }
+    frame->presentAccepted = true;
+    frame->presentEndQpc = observed;
+    completeRecord(*session, *frame);
+    return true;
 }
 
 FrameDriver* startFrameSession(ID3D11Device* device, uint64_t generation) {
     if (!device || !generation || std::atomic_load_explicit(&published(), std::memory_order_acquire)) return nullptr;
-    pcl::initialize();
-    inputGateInstall();
     if (!installFrameBoundaryHooks()) {
         Log::get().note("native_reflex_frames,state=unavailable,reason=%s,full_boundary=0", frameBoundaryHookStatus());
         return nullptr;
     }
     auto session = std::make_shared<FrameSession>();
+    session->pclReady = inputGateInstallMessageObserver() && pcl::initialize();
+    session->detailedReports.store(Config::get().getBool("advanced.app_gpu_timing", false), std::memory_order_relaxed);
+    inputGateInstall();
     session->device = device;
     session->generation = generation;
     session->producerThread = GetCurrentThreadId();
@@ -488,7 +538,7 @@ void reportFrameSession(uint64_t generation) noexcept {
     const uint64_t lastComplete = session->lastCompletedMs.load(std::memory_order_acquire);
     const uint64_t capabilityNow = GetTickCount64();
     const bool capable = session->providerAcquired.load(std::memory_order_acquire) &&
-        session->driver && session->driver->ready() && pcl::available() && boundary.installed &&
+        session->driver && session->driver->ready() && session->pclReady && pcl::available() && boundary.installed &&
         lastComplete && capabilityNow >= lastComplete && capabilityNow - lastComplete <= 2000 &&
         !session->foreignSimulationTicks.load(std::memory_order_relaxed) && !session->markerFailures.load(std::memory_order_relaxed);
     {
@@ -498,23 +548,34 @@ void reportFrameSession(uint64_t generation) noexcept {
             fullFrameAvailable.store(!frameSessionFaulted() && capable &&
                 session->providerAcquired.load(std::memory_order_acquire), std::memory_order_release);
     }
+    // Mode availability and SDK markers stay live independently of detailed
+    // collection. Copy the ring only for an enabled capture or a health summary.
+    const bool detail = Config::get().getBool("advanced.app_gpu_timing", false);
+    session->detailedReports.store(detail, std::memory_order_relaxed);
+    if (!detail && !summaryDue) return;
     std::array<FrameRecord, kFrameHistory> frames;
     {
         std::lock_guard<std::mutex> lock(session->recordsMutex);
         frames = session->frames;
     }
-    std::sort(frames.begin(), frames.end(), [](const FrameRecord& a, const FrameRecord& b) { return a.token < b.token; });
+    if (detail) std::sort(frames.begin(), frames.end(), [](const FrameRecord& a, const FrameRecord& b) { return a.token < b.token; });
     // Drain at most 64 complete records in source order. A later completion
     // cannot consume an earlier source's reporting ticket.
     unsigned softwareRecords = 0;
-    const uint64_t previousSoftware = session->lastSoftwareReported.load(std::memory_order_acquire);
-    for (const auto& frame : frames) {
-        if (!frame.completed || frame.invalid || frame.softwareReported) continue;
+    if (detail) for (const auto& frame : frames) {
+        if (!frame.reportRequested || !frame.completed || frame.invalid || frame.softwareReported) continue;
         if (softwareRecords == 64) break;
-        ++softwareRecords;
-        session->lastSoftwareReported.store((std::max)(previousSoftware, frame.token), std::memory_order_release);
         const bool clock = boundary.qpcFrequency && frame.poseConsumedQpc && frame.presentEndQpc >= frame.poseConsumedQpc;
         if (!clock) continue;
+        // Claim a still-resident row before logging. Rotation either counts
+        // it as missed or sees this claim, even if it races the log write.
+        {
+            std::lock_guard<std::mutex> lock(session->recordsMutex);
+            auto* current = findFrame(*session, frame.token);
+            if (!current || current->softwareReported || current->invalid) continue;
+            current->softwareReported = true;
+        }
+        ++softwareRecords;
         const double milliseconds = double(frame.presentEndQpc - frame.poseConsumedQpc) * 1000.0 / double(boundary.qpcFrequency);
         Log::get().note("native_reflex_frame,session=%llu,frame=%llu,pose=%llu,pose_qpc=%llu,command_qpc=%llu,"
             "late_end_qpc=%llu,mirror_qpc=%llu,present_begin_qpc=%llu,present_end_qpc=%llu,qpc_frequency=%llu,"
@@ -523,14 +584,10 @@ void reportFrameSession(uint64_t generation) noexcept {
             session->generation, frame.token, frame.poseSequence, frame.poseConsumedQpc, frame.firstCommandQpc,
             frame.lateEndQpc, frame.mirrorCompleteQpc, frame.presentBeginQpc, frame.presentEndQpc, boundary.qpcFrequency,
             frame.simulationThread, frame.poseThread, frame.commandThread, frame.presentThread,
-            milliseconds, unsigned(session->driver && !frame.driverFailed));
-        {
-            std::lock_guard<std::mutex> lock(session->recordsMutex);
-            if (auto* current = findFrame(*session, frame.token)) current->softwareReported = true;
-        }
+            milliseconds, unsigned(session->driver && !frame.driverFailed && frame.presentAttempts == 1));
     }
     unsigned driverRecords = 0;
-    if (session->driver) {
+    if (detail && session->driver) {
         LatencyBatch batch;
         // Driver completion can precede the final CPU callback. Revisit its
         // finite history and deduplicate per source, so an overlapping frame
@@ -539,7 +596,8 @@ void reportFrameSession(uint64_t generation) noexcept {
             for (size_t i = 0; i < batch.count; ++i) {
                 const auto& value = batch.frames[i];
                 const auto found = std::find_if(frames.begin(), frames.end(), [&](const FrameRecord& frame) {
-                    return frame.token == value.frameId && frame.completed && !frame.invalid && !frame.driverFailed;
+                    return frame.reportRequested && frame.token == value.frameId && frame.completed &&
+                        !frame.invalid && !frame.driverFailed && frame.presentAttempts == 1;
                 });
                 if (found == frames.end() || found->driverReported) continue;
                 if (session->lastDriverReported && value.frameId > session->lastDriverReported + 1)
@@ -579,7 +637,7 @@ void reportFrameSession(uint64_t generation) noexcept {
         session->unconfiguredTicks.load(), session->softwareDropped.load(), session->driverFrameGaps.load(),
         driverRecords, boundary.normalPhases, boundary.lateTickets, boundary.qualifiedLateWorkers,
         boundary.unqualifiedLateWorkers, boundary.refusedLateTickets, recentPoses, recentRenders, recentStereo,
-        unsigned(pcl::available()),
+        unsigned(session->pclReady && pcl::available()),
         unsigned(availableForUser() && session->completedFrames.load() != 0));
 }
 void shutdownFrameTelemetry() noexcept { pcl::shutdown(); }

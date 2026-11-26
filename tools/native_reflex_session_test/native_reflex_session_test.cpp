@@ -2,6 +2,7 @@
 // swap chain, hardware driver policy, SDK worker or filesystem logging.
 #include "../../src/common/system_d3d11.h"
 #include "../../src/common/log.h"
+#include "../../src/common/config.h"
 #include "../../src/d3d11/native_reflex_engine_hook.h"
 #include "../../src/d3d11/native_reflex_pcl.h"
 
@@ -23,14 +24,22 @@ std::vector<Mark> marks;
 std::vector<uint64_t> inputFrames;
 std::atomic<const edvr::native_reflex::FrameBoundaryCallbacks*> enrolled{nullptr};
 thread_local uint64_t lateToken = 0;
-unsigned initialized = 0, shutDown = 0, inputInstalls = 0;
+unsigned initialized = 0, shutDown = 0, inputInstalls = 0, detailRows = 0;
+bool collectDetail = false, messageObserverReady = true;
 }
 
 namespace edvr {
 Log& Log::get() { static Log sink; return sink; }
 Log::~Log() = default;
-void Log::note(const char*, ...) {}
+void Log::note(const char* format, ...) {
+    if (std::strncmp(format, "native_reflex_frame,session=", 28) == 0) ++rig::detailRows;
+}
+Config& Config::get() { static Config settings; return settings; }
+bool Config::getBool(const char* key, bool fallback) const {
+    return std::strcmp(key, "advanced.app_gpu_timing") == 0 ? rig::collectDetail : fallback;
+}
 void breadcrumb(const char*) {}
+bool inputGateInstallMessageObserver() { return rig::messageObserverReady; }
 void inputGateInstall() { ++rig::inputInstalls; }
 }
 namespace edvr::native_reflex {
@@ -58,7 +67,8 @@ void inputFrame(uint64_t token) noexcept {
 }
 
 // Include the production owner so the rig can read locked record snapshots.
-// All mutations use public lifecycle/provider APIs and enrolled callbacks.
+// Frame observations use the public lifecycle/provider APIs and enrolled
+// callbacks. Capture tests reset the polling timer between simulated polls.
 #include "../../src/d3d11/native_reflex_session.cpp"
 
 namespace {
@@ -229,8 +239,101 @@ void clickAttribution() {
     mouseMessageRemoved(false);
 }
 
+// Drive the public source callbacks on the qualified thread, then return
+// the same retained stamps a successful two-eye desktop draw would select.
+EdvrNativeReflexSource prepareMirrorSource(Graphics& graphics, const EdvrNativeReflexFrameTable& table,
+                                          uint64_t token) {
+    const uint64_t pose = token + 1000;
+    const auto* callbacks = beginTick(token);
+    if (!callbacks) return {};
+    Sources pair;
+    {
+        LateScope scope(callbacks, token);
+        check(table.poseConsumed(table.context, pose) == token, "the mirror fixture retains its exact pose owner");
+        issueCommand(graphics);
+        pair = submitPair(table, graphics, pose);
+    }
+    callbacks->afterTick(callbacks->context, token);
+    return selectMirrorSource(pair.eye, 3, 3, {});
+}
+
+void failedPresentAndRetry(Graphics& graphics, const EdvrNativeReflexFrameTable& table) {
+    constexpr uint64_t token = 94;
+    auto session = activeSession();
+    const auto source = prepareMirrorSource(graphics, table, token);
+    const auto first = beginFramePresent(graphics.device.Get(), source);
+    check(first.owner && !beginFramePresent(graphics.device.Get(), source).owner &&
+          !endFramePresent(first, DXGI_ERROR_WAS_STILL_DRAWING),
+          "a pending or failed nonblocking Present cannot consume the source");
+    check(!snapshot(token).completed && !snapshot(token).presentEndQpc &&
+          !session->completedFrames.load() && !session->lastCompletedMs.load(),
+          "a failed real call leaves completion, successful timestamps and capability freshness untouched");
+    const auto second = beginFramePresent(graphics.device.Get(), source);
+    check(second.owner && second.attempt != first.attempt && !endFramePresent(first, S_OK) &&
+          !endFramePresent(second, DXGI_STATUS_OCCLUDED) && !snapshot(token).completed &&
+          !session->lastCompletedMs.load(),
+          "stale receipts and positive occlusion status cannot complete a pending retry");
+    const auto third = beginFramePresent(graphics.device.Get(), source);
+    check(endFramePresent(third, S_OK) && snapshot(token).completed && snapshot(token).presentEndQpc &&
+          session->completedFrames.load() == 1 && !session->lastCompletedMs.load(),
+          "a successful retry supplies CPU evidence without promoting the first attempt's driver timestamps");
+    check(markerOrder(token) == std::vector<uint32_t>({0,1,2,3,4,5}) &&
+          !endFramePresent(third, S_OK) && !beginFramePresent(graphics.device.Get(), source).owner,
+          "exactly one SDK Present bracket survives retries and a successful source cannot be reused");
+}
+
+void abortedWorkers(Graphics& graphics, const EdvrNativeReflexFrameTable& table) {
+    constexpr uint64_t token = 95;
+    const auto* callbacks = beginTick(token, false);
+    if (!callbacks) return;
+    const auto starts = activeSession()->completedTicks.load();
+    rig::lateToken = token;
+    callbacks->lateWorkerBegin(callbacks->context, token);
+    check(frameCommandObserver && table.poseConsumed(table.context, 1095) == token,
+          "an aborted worker starts with an armed post-pose command observer");
+    callbacks->lateWorkerAborted(callbacks->context, token);
+    rig::lateToken = 0;
+    callbacks->tickAborted(callbacks->context, token);
+    check(!frameCommandObserver && !late.token && !tick.token && snapshot(token).invalid && !snapshot(token).lateEnded &&
+          markerOrder(token) == std::vector<uint32_t>({0}) && activeSession()->completedTicks.load() == starts,
+          "unwind clears worker and tick ownership without emitting successful return markers");
+    const auto nextSource = prepareMirrorSource(graphics, table, token + 1);
+    check(validSource(nextSource) && snapshot(token + 1).lateEnded && snapshot(token + 1).firstCommandQpc,
+          "the same worker accepts the following source and records its first command");
+}
+
+void detailedCapture(Graphics& graphics, const EdvrNativeReflexFrameTable& table) {
+    auto session = activeSession();
+    const auto poll = [&] { session->lastPollMs = 0; reportFrameSession(session->generation); };
+    poll();
+    check(!rig::detailRows, "default settings keep completed per-frame CPU rows out of the log");
+    rig::collectDetail = true;
+    poll();
+    check(!rig::detailRows, "capture begins at enrollment without replaying frames from the prior disabled interval");
+    auto source = prepareMirrorSource(graphics, table, 105);
+    check(endFramePresent(beginFramePresent(graphics.device.Get(), source), S_OK), "detailed capture receives a complete source");
+    poll(); poll();
+    check(rig::detailRows == 1, "an opted-in frame produces exactly one CPU record across repeated reports");
+    source = prepareMirrorSource(graphics, table, 106);
+    check(endFramePresent(beginFramePresent(graphics.device.Get(), source), S_OK), "the unreported source is eligible for rotation");
+    const auto dropped = session->softwareDropped.load();
+    const uint64_t rotated = 106 + kFrameHistory;
+    const auto* callbacks = beginTick(rotated);
+    if (callbacks) callbacks->afterTick(callbacks->context, rotated);
+    check(session->softwareDropped.load() == dropped + 1, "rotation counts each eligible unreported source once");
+    poll();
+    check(rig::detailRows == 1, "an overwritten source cannot appear in the software log as well as the drop count");
+    rig::collectDetail = false;
+    poll();
+    source = prepareMirrorSource(graphics, table, rotated + 1);
+    check(endFramePresent(beginFramePresent(graphics.device.Get(), source), S_OK), "frames still complete with detailed capture disabled");
+    poll();
+    check(rig::detailRows == 1, "disabling collection stops new rows while source completion stays active");
+}
+
 void completeAndDeduplicate(Graphics& graphics, Graphics& foreign, const EdvrNativeReflexFrameTable& table) {
     constexpr uint64_t token = 101, pose = 1001;
+    const auto completedBefore = activeSession()->completedFrames.load();
     mouseMessageRemoved(true);
     const auto* callbacks = beginTick(token);
     if (!callbacks) return;
@@ -268,15 +371,15 @@ void completeAndDeduplicate(Graphics& graphics, Graphics& foreign, const EdvrNat
     lateScope.end();
     check(!(snapshot(token).completedMarkers & (1u << unsigned(Marker::RenderSubmitEnd))),
           "LateEnd alone cannot close render submission before the actual mirror draw completes");
-    const auto selected = selectMirrorSource(sources.eye, 3, {});
+    const auto selected = selectMirrorSource(sources.eye, 3, 3, {});
     check(validSource(selected) && readSource(graphics.eye[1].Get(), stored) && sameSource(stored, selected),
           "paired source selection agrees with the second real texture's GUID readback");
     check(!beginFramePresent(foreign.device.Get(), selected).owner, "Present ownership rejects a foreign D3D device");
     auto receipt = beginFramePresent(graphics.device.Get(), selected);
     check(receipt.owner && receipt.frameId == token && !snapshot(token).completed,
           "the actual paired source opens Present but cannot finish before the original returns");
-    endFramePresent(receipt); endFramePresent(receipt);
-    check(snapshot(token).completed && activeSession()->completedFrames.load() == 1,
+    endFramePresent(receipt, S_OK); endFramePresent(receipt, S_OK);
+    check(snapshot(token).completed && activeSession()->completedFrames.load() == completedBefore + 1,
           "all six real boundaries and accepted eyes produce exactly one complete frame");
     check(!beginFramePresent(graphics.device.Get(), selected).owner &&
           markerOrder(token) == std::vector<uint32_t>({0, 7, 1, 2, 3, 4, 5}),
@@ -322,7 +425,7 @@ void refusedSources(Graphics& graphics, const EdvrNativeReflexFrameTable& table)
           "a runtime-refused eye invalidates the pair even when both source stamps exist");
     callbacks->afterTick(callbacks->context, 103);
     EdvrNativeReflexSource mixed[2]{refused[0], refused[1]}; ++mixed[1].frameToken;
-    const auto selected = selectMirrorSource(mixed, 3, {});
+    const auto selected = selectMirrorSource(mixed, 3, 3, {});
     check(!validSource(selected) && !beginFramePresent(graphics.device.Get(), selected).owner,
           "mixed tick sources cannot assign a Present to a guessed producer");
 }
@@ -354,10 +457,10 @@ void overlappingOwners(Graphics& graphics, const EdvrNativeReflexFrameTable& tab
               !(rendering.completedMarkers & (1u << unsigned(Marker::SimulationEnd))),
               "real worker rendering overlaps an unfinished simulation on a different thread");
         callbacks->normalPhaseReturned(callbacks->context, token);
-        const auto selected = selectMirrorSource(pair.eye, 3, {});
+        const auto selected = selectMirrorSource(pair.eye, 3, 3, {});
         auto receipt = beginFramePresent(graphics.device.Get(), selected);
         check(receipt.owner && !snapshot(token).lateEnded, "Present may begin before the qualified LateRender worker returns");
-        endFramePresent(receipt);
+        endFramePresent(receipt, S_OK);
         check(!snapshot(token).completed && !(snapshot(token).completedMarkers & (1u << unsigned(Marker::RenderSubmitEnd))),
               "Present return still awaits the independent late/render completion boundary");
     }
@@ -377,7 +480,7 @@ void staleOwners(Graphics& graphics, EdvrNativeReflexFrameTable oldTable) {
         oldTable.poseConsumed(oldTable.context, 1500); issueCommand(graphics);
         oldPair = submitPair(oldTable, graphics, 1500);
     }
-    auto oldReceipt = beginFramePresent(graphics.device.Get(), selectMirrorSource(oldPair.eye, 3, {}));
+    auto oldReceipt = beginFramePresent(graphics.device.Get(), selectMirrorSource(oldPair.eye, 3, 3, {}));
     check(oldReceipt.owner != nullptr, "old session retains a real in-flight Present receipt");
     callbacks->afterTick(callbacks->context, token);
     mouseMessageRemoved(false); mouseMessageRemoved(true);
@@ -404,11 +507,11 @@ void staleOwners(Graphics& graphics, EdvrNativeReflexFrameTable oldTable) {
               "only the replacement provider can claim its same-numbered frame");
         issueCommand(graphics); pair = submitPair(table, graphics, 2500);
     }
-    endFramePresent(oldReceipt);
+    endFramePresent(oldReceipt, S_OK);
     check(!snapshot(token).presentEndQpc && !snapshot(token).completed,
           "ending a retained stale receipt cannot finish the replacement's same-numbered frame");
-    auto receipt = beginFramePresent(graphics.device.Get(), selectMirrorSource(pair.eye, 3, {}));
-    endFramePresent(receipt);
+    auto receipt = beginFramePresent(graphics.device.Get(), selectMirrorSource(pair.eye, 3, 3, {}));
+    endFramePresent(receipt, S_OK);
     check(snapshot(token).completed && activeSession()->completedFrames.load() == 1,
           "the replacement completes only through its own current source and Present receipt");
     callbacks->afterTick(callbacks->context, token);
@@ -423,6 +526,15 @@ void staleOwners(Graphics& graphics, EdvrNativeReflexFrameTable oldTable) {
         callbacks->afterTick(callbacks->context, token + 1);
     }
     stopFrameSession(42);
+    rig::messageObserverReady = false;
+    const auto initializations = rig::initialized;
+    startFrameSession(graphics.device.Get(), 43);
+    check(activeSession() && !activeSession()->pclReady && rig::initialized == initializations,
+          "without passive ping and shutdown observation, a new session starts no SDK worker and keeps PCL unavailable");
+    callbacks = beginTick(token + 2);
+    if (callbacks) callbacks->afterTick(callbacks->context, token + 2);
+    check(markerOrder(token + 2).empty(), "a refused observer cannot reuse a prior process-wide PCL marker sink");
+    stopFrameSession(43);
     shutdownFrameTelemetry();
     check(rig::shutDown == 1, "normal process telemetry shutdown reaches the PCL owner");
 }
@@ -440,9 +552,12 @@ int main(int argc, char** argv) {
         acquisition(graphics, foreign, table);
         if (table.context && rig::enrolled.load()) {
             clickAttribution();
+            failedPresentAndRetry(graphics, table);
+            abortedWorkers(graphics, table);
             completeAndDeduplicate(graphics, foreign, table);
             refusedSources(graphics, table);
             overlappingOwners(graphics, table);
+            detailedCapture(graphics, table);
             staleOwners(graphics, table);
         }
     }

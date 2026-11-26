@@ -12,7 +12,10 @@ namespace edvr::input_latency_probe {
 // The receiver owns results until Complete/Rejected. PID and creation time name the map,
 // so a stale test process cannot attach to a recycled game PID.
 constexpr uint64_t kMagic = 0x45445550494c5031ull;
-constexpr uint64_t kVersion = 3;
+// v4 keeps the word layout. A retired receiver permanently publishes ready=2
+// independently of state so even acknowledging its last result cannot revive it.
+constexpr uint64_t kVersion = 4;
+constexpr uint64_t kReceiverStopped = 2;
 constexpr wchar_t kMappingPrefix[] = L"Local\\EDUP.InputLatency.";
 
 enum class Phase : uint64_t {
@@ -41,7 +44,8 @@ struct alignas(8) Shared {
     // v3 Preparing.sentQpc is the run's untimed priming-begin fence. The
     // receiver proves fresh real key cycles and a later opposite-state stereo
     // baseline, then clears sentQpc before publishing Prepared. Armed.sentQpc
-    // retains its ordinary measured-injection timestamp meaning.
+    // timestamps publication and bounds the receiver's timeout. The sender
+    // retains injectionQpc separately at the actual OS input call.
     uint64_t baselineLeftPpm = 0, baselineRightPpm = 0, responseLeftPpm = 0, responseRightPpm = 0;
     uint64_t consumedTickToken = 0;
 };
@@ -49,6 +53,6 @@ static_assert(sizeof(Shared) == 256 && alignof(Shared) == 8 &&
               offsetof(Shared, state) == 48 && offsetof(Shared, sentQpc) == 88 &&
               offsetof(Shared, gpuCompleteQpc) == 128 && offsetof(Shared, responseKind) == 160 &&
               offsetof(Shared, consumedTickToken) == 248,
-              "input latency diagnostic IPC v3 preserves the 256-byte word layout");
+              "input latency diagnostic IPC v4 preserves the 256-byte word layout");
 
 } // namespace edvr::input_latency_probe

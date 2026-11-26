@@ -2401,7 +2401,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
           // A successful treatment may replace the source (for example DLSS).
           // The diagnostic response must be in the actual transfer source.
           !timing.producerSegmentEnd(timingSequence,unsigned(eye),
-              treated ? treated.Get() : submittedSource.Get()))
+              treated ? treated.Get() : submittedSource.Get(),
+              r == vr::VRCompositorError_None && treatedBounds.uMin == 0.f && treatedBounds.vMin == 0.f &&
+              treatedBounds.uMax == 1.f && treatedBounds.vMax == 1.f))
         timingInvalidate();
       workClock=workClock&&counterNow(&workEnded);
     };

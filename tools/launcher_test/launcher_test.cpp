@@ -485,9 +485,9 @@ void testShapes() {
     check(reflexLicense && graphics && reflexLicense->asset == graphics->asset &&
               reflexLicense->path == "NVIDIA-REFLEX-LICENSE.txt" &&
               reflexLicense->target.root == TargetRoot::Game && reflexLicense->target.path == reflexLicense->path &&
-              reflexLicense->existing == ExistingMode::Owned &&
+              reflexLicense->existing == ExistingMode::Replace &&
               whenHolds(reflexLicense->when, kProfileVr, false) && whenHolds(reflexLicense->when, kProfileFlat, false),
-          "the Reflex license travels in the graphics asset and is owned beside d3d11.dll in both profiles");
+          "the Reflex license travels in the graphics asset and replaces a conflicting notice in both profiles");
     for (const char* id : {"xess_fg", "xess_ll"}) {
         const ManifestFile* f = byId(id);
         check(f && f->when.profiles == kProfileFlat && !f->when.adapterNvidia && f->existing == ExistingMode::Owned && f->target.root == TargetRoot::Game,

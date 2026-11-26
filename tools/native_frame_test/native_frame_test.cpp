@@ -151,6 +151,7 @@ struct LatencyDriverCall {
     ID3D11Device* device;
     edvr::native_reflex::Mode mode;
     bool alreadyOwned;
+    bool probeLive;
 };
 std::vector<LatencyDriverCall> g_latencyCalls;
 std::vector<unsigned> g_latencySamples;
@@ -158,6 +159,7 @@ unsigned g_latencyObservations = 0;
 std::vector<uint64_t> g_frameReports;
 bool g_reportFrameAvailable = true;
 bool g_frameTransportAvailable = true;
+bool g_refuseOff = false;
 std::shared_ptr<edvr::native_reflex::FrameDriver> g_frameTransport;
 }
 
@@ -166,8 +168,11 @@ Result applyFrameMode(FrameDriver&, ID3D11Device* device, Mode mode, bool alread
     return apply(device, mode, alreadyOwned);
 }
 Result apply(ID3D11Device* device, Mode mode, bool alreadyOwned) {
-    g_latencyCalls.push_back({device, mode, alreadyOwned});
-    return {"fixture", true, 0, 0};
+    g_latencyCalls.push_back({device, mode, alreadyOwned, input_latency_probe::enabled()});
+    if (g_refuseOff && mode == Mode::Off) return {"fixture_refused", true, -1};
+    Result result{"fixture", true, 0, 0};
+    result.readback.lowLatencyMode = mode != Mode::Off;
+    return result;
 }
 Result observe(ID3D11Device*, Mode mode) {
     ++g_latencyObservations;
@@ -183,6 +188,7 @@ void logMode(Mode, const char*, uint64_t, const Result&, unsigned count) {
 namespace edvr::native_reflex {
 // Engine/SDK lifecycle belongs to the separate integration module. This rig
 // keeps driver calls under its existing controlled mode-policy substitutes.
+bool isNonNvidiaAdapter(ID3D11Device*) { return false; }
 FrameDriver::FrameDriver(ID3D11Device* device, bool ownGameSleep)
     : device_(device), firstSleep_(ownGameSleep) { device_->AddRef(); }
 FrameDriver::~FrameDriver() { device_->Release(); }
@@ -191,7 +197,7 @@ std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device) {
 }
 FrameDriver* startFrameSession(ID3D11Device* device, uint64_t) {
     g_frameTransport = g_frameTransportAvailable ? openFrameDriver(device) : nullptr;
-    fullFrameAvailable.store(g_frameTransportAvailable);
+    fullFrameAvailable.store(g_frameTransportAvailable && g_reportFrameAvailable);
     return g_frameTransport.get();
 }
 void stopFrameSession(uint64_t) noexcept {
@@ -6631,6 +6637,65 @@ int wmain(int argc, wchar_t** argv) {
         check(faultTable.close(faultTable.context) == S_OK,
               "faulted mode session still closes normally");
         edvr::native_reflex::fullFrameFaulted.store(false);
+    }
+    {
+        using edvr::native_reflex::ModeStatus;
+        using edvr::native_reflex::modeStatusForUser;
+        using edvr::native_reflex::updateOnGamePresent;
+        auto& config = edvr::Config::get();
+        config.set("advanced.input_latency_probe", "on");
+        g_reportFrameAvailable = false;
+        auto pendingRequest = request;
+        pendingRequest.generation = 44;
+        EdvrNativeFrameTable pendingTable{sizeof(pendingTable), EDVR_NATIVE_FRAME_VERSION_1};
+        check(edvrAcquireNativeFrame(&pendingRequest, &pendingTable) == S_OK && modeStatusForUser() == ModeStatus::ConfirmedOff,
+              "an enrolled device stays Off while waiting for a qualified source");
+        updateOnGamePresent(device.Get());
+        check(!edvr::input_latency_probe::enabled(), "saved On cannot admit the probe under fallback Off");
+
+        g_reportFrameAvailable = true;
+        updateOnGamePresent(device.Get());
+        updateOnGamePresent(device.Get());
+        check(modeStatusForUser() == ModeStatus::ConfirmedOn && edvr::input_latency_probe::enabled(),
+              "the qualified source allows the saved On mode and the corresponding probe");
+        const size_t beforeClose = g_latencyCalls.size();
+        check(pendingTable.close(pendingTable.context) == S_OK && g_latencyCalls.size() == beforeClose + 1 &&
+              g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off && !g_latencyCalls.back().probeLive,
+              "close retires the probe before withdrawing the owned mode");
+    }
+    {
+        using edvr::native_reflex::ModeStatus;
+        using edvr::native_reflex::modeStatusForUser;
+        using edvr::native_reflex::updateOnGamePresent;
+        auto& config = edvr::Config::get();
+        auto retryRequest = request;
+        retryRequest.generation = 45;
+        EdvrNativeFrameTable retryTable{sizeof(retryTable), EDVR_NATIVE_FRAME_VERSION_1};
+        check(edvrAcquireNativeFrame(&retryRequest, &retryTable) == S_OK && modeStatusForUser() == ModeStatus::ConfirmedOn,
+              "the acquired On mode has a matching immediate driver readback");
+        updateOnGamePresent(device.Get());
+        check(edvr::input_latency_probe::enabled(), "confirmed On admits the receiver");
+
+        g_refuseOff = true;
+        config.set("fix.nvidia_reflex", "off");
+        updateOnGamePresent(device.Get());
+        const size_t refused = g_latencyCalls.size();
+        check(!edvr::input_latency_probe::enabled() && modeStatusForUser() == ModeStatus::WithdrawalRefused,
+              "a refused Off withdraws the receiver and publishes failure for F8");
+        g_refuseOff = false;
+        std::thread foreign([&] { for (unsigned i = 0; i < 5; ++i) updateOnGamePresent(device.Get()); });
+        foreign.join();
+        for (unsigned i = 0; i < 4; ++i) updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == refused && !edvr::input_latency_probe::enabled(),
+              "only owned successful Presents advance the withdrawal backoff");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == refused + 1 && g_latencyCalls.back().alreadyOwned &&
+              g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off &&
+              modeStatusForUser() == ModeStatus::ConfirmedOff && edvr::input_latency_probe::enabled(),
+              "a verified live withdrawal resumes measurements tagged Off");
+        check(retryTable.close(retryTable.context) == S_OK && modeStatusForUser() == ModeStatus::Unavailable,
+              "closing clears the driver readback published to F8");
+        config.set("advanced.input_latency_probe", "off");
     }
     check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
           "closed context rejects callbacks");

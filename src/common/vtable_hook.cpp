@@ -39,16 +39,16 @@ struct SlotOwner {
 //   d3d11 half   device 19 + swap chain 3 + factory 2 + exposure 5 + vScreen 44 = 73
 //                (VR: 15 + 1 + 2 + 5 + 43 = 66)
 //   graphics bridge                                                              1
-//   DirectInput gate, every door array full: keyboard W/A 2x2, game devices 16x2,
-//                joysticks 8x2, mouse 1, factories 8x2                           69
-//                                                                    total      143
+//   DirectInput gate, every door array full: keyboard W/A 2x4, game devices 16x4,
+//                joysticks 8x4, mice 4x5, factories 8x2                         140
+//                                                                    total      214
 //
 // It was 64, sized in the days of "about two dozen", and vScreen alone has since
 // grown past it: a contributor's Windows logs, InPlace on an RX 6800, printed the
 // registry-full line six times and ran with re-claiming off. LiveCopy never
 // showed it, because the two context hooks (49 of those slots) register nothing
-// there. 256 is 1.8x the worst case, 8 KB of static storage, and a linear scan
-// that runs only for a slot already found displaced.
+// there. 256 still covers the current worst case, 8 KB of static storage, with a
+// linear scan that runs only for a slot already found displaced.
 //
 // If it still fills, commit() turns re-claiming off for EVERY hook, loudly: a
 // reclaim that cannot see an owner is a reclaim that can build the loop above.

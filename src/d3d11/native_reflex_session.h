@@ -27,13 +27,15 @@ inline bool availableForUser() noexcept {
 struct PresentFrameReceipt {
     std::shared_ptr<FrameSession> owner;
     uint64_t frameId = 0;
+    uint64_t attempt = 0;
 };
 
-// Armed only in a qualified LateRender worker. The first owned immediate-
-// context command begins that frame's render-submission interval.
+// Armed only in a qualified LateRender worker. Entry to the first tracked
+// immediate-context command after pose consumption begins its CPU interval.
 void noteFrameCommand(ID3D11DeviceContext*) noexcept;
 PresentFrameReceipt beginFramePresent(ID3D11Device*, const EdvrNativeReflexSource&) noexcept;
-void endFramePresent(const PresentFrameReceipt&) noexcept;
+// Return true only when this exact attempt submitted the image (S_OK).
+bool endFramePresent(const PresentFrameReceipt&, HRESULT result) noexcept;
 
 // The input owner validates an actual removed game-window left-button message.
 // Queue its press edge for the next qualified InputManager frame, independently

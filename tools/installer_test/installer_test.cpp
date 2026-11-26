@@ -207,7 +207,7 @@ static const TestTableRow kTestTable[] = {
     {"settings_flat", TargetRoot::Game, "edvr-flat.ini", kProfileFlat, false, nullptr, ExistingMode::Settings},
     {"dittosr_license", TargetRoot::Game, "DITTOSR-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Owned},
     {"dittosr_gsr_license", TargetRoot::Game, "DITTOSR-GSR-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Owned},
-    {"reflex_license", TargetRoot::Game, "NVIDIA-REFLEX-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Owned},
+    {"reflex_license", TargetRoot::Game, "NVIDIA-REFLEX-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Replace},
     {"dlss", TargetRoot::Game, "nvngx_dlss.dll", 0, true, nullptr, ExistingMode::Owned},
     {"xess", TargetRoot::Game, "libxess.dll", 0, false, nullptr, ExistingMode::Owned},
     {"xess_license", TargetRoot::Game, "INTEL-XESS-LICENSE.txt", 0, false, nullptr, ExistingMode::Owned},
@@ -7745,6 +7745,27 @@ static void testManifestFiles(const std::wstring& root) {
 
     const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
     const Options options = testOptions();
+
+    {   // The exact Reflex notice is required in any scope containing PCL graphics.
+        PayloadInfo p = testPayload(kNextIni);
+        tset(p, "reflex_license", "reflex-required");
+        const auto notice = joinPath(dir, L"NVIDIA-REFLEX-LICENSE.txt");
+        Survey s = baseSurvey(dir);
+        s.targets.push_back(fakeDll(DllKind::Foreign, notice, "foreign-notice"));
+        for (const char* scope : {"both", "vr", "flat"}) {
+            Options scoped = options;
+            scoped.scope = scope;
+            const Plan plan = planInstall(s, scoped, p);
+            const auto backup = std::find_if(plan.steps.begin(), plan.steps.end(), [&](const Step& step) {
+                return step.action == Action::Backup && step.from == notice && step.required && step.expectSha == "foreign-notice";
+            });
+            const auto write = std::find_if(plan.steps.begin(), plan.steps.end(), [&](const Step& step) {
+                return step.action == Action::WritePayload && step.to == notice && step.item == "reflex_license";
+            });
+            check(!plan.blocked && backup < write && write != plan.steps.end(),
+                  (std::string("backs up a conflicting Reflex notice before installing the required copy for ") + scope).c_str());
+        }
+    }
 
     {   // A file this planner was never written for: id extra_dll, game root, replace, flat profile only. It is placed and backed up by
         // the manifest's word alone.

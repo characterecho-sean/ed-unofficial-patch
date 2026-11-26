@@ -30,11 +30,20 @@ public:
         for (const auto& entry : entries_) if (entry.device == device && device) return entry.released;
         return false;
     }
+    void invalidate(uintptr_t device) noexcept {
+        for (auto& entry : entries_) if (device && entry.device == device) entry = {};
+    }
+    bool anyReleased() const noexcept {
+        for (const auto& entry : entries_) if (entry.released) return true;
+        return false;
+    }
     void reset() noexcept { entries_ = {}; }
 private:
     struct Entry { uintptr_t device = 0; bool released = false; };
     std::array<Entry, 16> entries_{};
 };
+
+enum class KeyboardPress { None, UnverifiedDown, FromRelease };
 
 // Only qualified, actually returned game reads enter this cache. Unknown or
 // repeated released state cannot invent a press/release cycle. An acknowledged
@@ -42,12 +51,13 @@ private:
 // generation change, allowing the sender's alternating requests to share it.
 class KeyboardReleaseCache final {
 public:
-    bool observe(uintptr_t device, unsigned dik, bool pressed, uint64_t now, uint64_t token) noexcept {
+    KeyboardPress observe(uintptr_t device, unsigned dik, bool pressed, uint64_t now, uint64_t token) noexcept {
         const int key = index(dik);
-        if (!device || key < 0 || !now || !token) return false;
+        if (!device || key < 0 || !now || !token) return KeyboardPress::None;
         Entry* entry = find(device, true);
-        if (!entry) return false;
-        if (entry->ordinal == (std::numeric_limits<uint64_t>::max)()) { *entry = {}; return false; }
+        const auto unverified = pressed ? KeyboardPress::UnverifiedDown : KeyboardPress::None;
+        if (!entry) return unverified;
+        if (entry->ordinal == (std::numeric_limits<uint64_t>::max)()) { *entry = {}; return unverified; }
         const uint64_t ordinal = ++entry->ordinal;
         const unsigned bit = 1u << key;
         const bool known = (entry->known & bit) != 0, down = (entry->down & bit) != 0;
@@ -59,7 +69,8 @@ public:
         if (!pressed && known && down) { state.release = now; state.releaseTick = token; state.releaseOrdinal = ordinal; }
         entry->known |= bit;
         if (pressed) entry->down |= bit; else entry->down &= ~bit;
-        return pressed && known && !down;
+        if (!pressed || down) return KeyboardPress::None;
+        return known ? KeyboardPress::FromRelease : KeyboardPress::UnverifiedDown;
     }
     uintptr_t acknowledge(uint64_t fence, unsigned firstDik) noexcept {
         const int first = index(firstDik);

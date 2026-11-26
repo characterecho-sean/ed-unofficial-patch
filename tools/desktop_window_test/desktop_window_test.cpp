@@ -903,6 +903,36 @@ static void wiring(const std::string& root) {
     check(presentOrder(hook), "hookedPresent calls the feature, and ticks it, before the census span and the real Present");
     check(!presentOrder(replaced(hook, "desktopWindowPresent(self, dev, flags, runtimeFlatProfile())", "false")), "control: no call in the hook trips the pin");
 
+    // Reflex mode readback and retry cadence count the real image Presents
+    // that the dispatch owner accepted, including while no mirror is active.
+    auto countsReflexPresents = [](const std::string& t) {
+        const size_t call = at(t, "native_reflex::updateOnGamePresent(dev);");
+        const char guard[] = "if (hr == S_OK && !(flags & DXGI_PRESENT_TEST))";
+        const size_t gate = t.rfind(guard, call);
+        return call != std::string::npos && gate != std::string::npos &&
+               t.find_first_not_of(" \t\r\n", gate + sizeof(guard) - 1) == call;
+    };
+    check(countsReflexPresents(hook), "only a non-test S_OK from the owned Present advances the Reflex mode cadence");
+    check(!countsReflexPresents(replaced(hook, "if (hr == S_OK && !(flags & DXGI_PRESENT_TEST))",
+                                         "if (SUCCEEDED(hr) && !(flags & DXGI_PRESENT_TEST))")),
+          "control: counting positive DXGI statuses trips the Reflex Present dispatch pin");
+
+    // A failed eye Map after the clear leaves only the earlier successful
+    // draws. The portable source-selection rig tests each resulting mask.
+    auto drawnEyesWired = [](const std::string& t) {
+        const size_t start = at(t, "unsigned drawEyes(");
+        const size_t map = at(t, "if (FAILED(ctx->Map(cb,", start);
+        const size_t skip = at(t, "!mapped.pData) continue;", map);
+        const size_t draw = at(t, "ctx->Draw(3, 0);", skip);
+        const size_t bit = at(t, "drawnEyes |= 1u << e.eye;", draw);
+        const size_t result = at(t, "return drawnEyes;", bit);
+        const size_t use = at(t, "const unsigned drawnEyes = drawEyes(", result);
+        return use != std::string::npos && at(t, "selectMirrorSource(sources, need, drawnEyes,", use) != std::string::npos;
+    };
+    check(drawnEyesWired(cpp), "mirror proof uses the eye indices of actual draws after successful Map");
+    check(!drawnEyesWired(replaced(cpp, "selectMirrorSource(sources, need, drawnEyes,", "selectMirrorSource(sources, need, need,")),
+          "control: using the requested mask for failed draws trips the pin");
+
     // The draw skip: the verdict (four thunks) and the three that do not ask it; each skip is after the foreign-context decline in the verdict.
     auto skips = [](const std::string& t) {
         const size_t verdict = at(t, "DrawVerdict beginPanelOverride(");
