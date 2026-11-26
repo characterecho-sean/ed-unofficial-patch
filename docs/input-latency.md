@@ -107,10 +107,40 @@ non-NVIDIA adapters can use saved Off without an NVIDIA driver write. A
 retained old mapping cannot be reused as a new receiver while a sender still
 holds it.
 
-This is a fallback for a controlled UI response. VR head motion is supplied by
-the existing testing framework's pose controls. Framework command receipt, game
-pose receipt, software rendering and physical display remain distinct
-endpoints.
+This measures a controlled UI response. Game pose receipt, software rendering
+and physical display remain distinct endpoints; this probe does not measure
+physical head-motion latency.
+
+## Independent validation
+
+Mod Linker and its MCP are not dependencies of the build, regression tests or
+input-response collector. The native Windows build runs the repository's own
+Reflex, input and response fixtures, using system D3D11/WARP devices where
+needed. These fixtures do not require Elite, a headset or an external
+simulator. Use the normal prerequisites and validation build in
+[Building](building.md); the window and input fixtures need an interactive
+Windows desktop.
+
+The sender's 40 self-tests use Python's standard library and fake backends on
+Windows or Linux, without a game, GPU, headset or atomic-helper DLL:
+
+```text
+python -B tools/input_latency_probe.py --self-test
+```
+
+Live Off / On / On + Boost measurements require the instrumented game, the
+repository-built `build/tools/input_latency_atomic.dll` and a supported NVIDIA
+VR session. A compatible physical headset with a normal SteamVR/OpenXR setup
+can supply that session. Enter the stationary training scene and select each
+mode manually, then run the collector in the game's interactive desktop as
+described below. The collector sends its own measured keyboard or mouse input;
+it does not call an MCP or control head movement.
+
+The historical comparisons below used Mod Linker's virtual headset. The
+head-pose comparison also used its pose automation. This records how those
+results were collected, rather than adding a dependency to these tests. The PR
+does not provide independent automated head movement or physical
+motion-to-photon measurements.
 
 ## Synthetic response route
 
