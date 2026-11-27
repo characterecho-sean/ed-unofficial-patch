@@ -48,7 +48,7 @@ EXCLUDED_PARTS = {"__pycache__", ".pytest_cache"}
 # Git-ignored folders that are compiled inputs and so stay in the fingerprint
 # (see THE INPUT RULE above).  Relative to the repository root, forward slashes.
 DEPENDENCY_ROOTS = ("third_party/ngx", "third_party/ffx-dx11", "third_party/openxr/loader", "third_party/xess",
-                    "third_party/fsr4", "third_party/edhm_2dmigoto")
+                    "third_party/fsr4", "third_party/edhm_2dmigoto", "third_party/reflex")
 
 
 def _excluded(relative):
@@ -339,7 +339,7 @@ def _self_test_in_git_tree(root):
 
     git("init", "-q")
     _write(root / ".gitignore", "build/\ndist/\n__pycache__/\n*.pyc\nreviews/\nscratch.log\n"
-           "third_party/ngx/\nthird_party/ffx-dx11/\nthird_party/openxr/loader/\nthird_party/xess/\n"
+           "third_party/ngx/\nthird_party/reflex/\nthird_party/ffx-dx11/\nthird_party/openxr/loader/\nthird_party/xess/\n"
            "third_party/fsr4/\nthird_party/edhm_2dmigoto/\n")
     _write(root / "source.txt", "one")
     _write(root / "tools" / "tool.py", "one")
@@ -355,6 +355,7 @@ def _self_test_in_git_tree(root):
     _write(root / "scratch.log", "one")
     # Ignored by git and still compiled inputs.
     _write(root / "third_party" / "ngx" / "lib" / "sdk.lib", "one")
+    _write(root / "third_party" / "reflex" / "Reflex_Stats" / "pclstats.h", "one")
     _write(root / "third_party" / "ffx-dx11" / "ffx.h", "one")
     _write(root / "third_party" / "xess" / "include" / "xess" / "xess.h", "one")
     _write(root / "third_party" / "fsr4" / "include" / "FidelityFX" / "upscalers" / "include" / "ffx_upscale.h", "one")
@@ -374,6 +375,7 @@ def _self_test_in_git_tree(root):
     # Changes that must matter, each undone before the next.
     for relative, why in (
             ("third_party/ngx/lib/sdk.lib", "a change under third_party/ngx does not affect the input fingerprint"),
+            ("third_party/reflex/Reflex_Stats/pclstats.h", "a change under third_party/reflex does not affect the input fingerprint"),
             ("third_party/ffx-dx11/ffx.h", "a change under third_party/ffx-dx11 does not affect the input fingerprint"),
             ("third_party/xess/include/xess/xess.h", "a change under third_party/xess does not affect the input fingerprint"),
             ("third_party/fsr4/include/FidelityFX/upscalers/include/ffx_upscale.h",

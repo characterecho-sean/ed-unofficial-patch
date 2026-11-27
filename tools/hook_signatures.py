@@ -1879,6 +1879,28 @@ def self_test():
         for name in ("native_on_foot_future.h", "native_on_foot_f999.h", "avatar_hooks_future.h", "explorer_cam_future.h"):
             check(any(": routed: " in p for p in audited(name, "uintptr_t f(uintptr_t b){ return b + 0x4314C60u; }")),
                   "audit: a new similarly named file %s is not exact-only" % name)
+        reflex_gate = ('constexpr uint32_t kSupportedStamp=0x6ADA8048,kSupportedImageSize=0x640C000;'
+                       'bool installOnce() noexcept { uint32_t stamp=0;'
+                       'if(!gameBuildKnown() || !gameBuildIdentity(&stamp,&imageSpan) ||'
+                       '!engine_detail::supportedBuildIdentity(true,stamp,imageSpan,kSupportedStamp,kSupportedImageSize)) {'
+                       'status.store("unsupported_build_requires_334925",std::memory_order_release);return false;}'
+                       'return gameRvasFound(required,1,nullptr); }')
+        check(audited("native_reflex_engine_hook.cpp", reflex_gate) == [],
+              "audit: the exact Reflex file admits its supported PE before resolving addresses")
+        for remove in ("!gameBuildKnown() ||", "!gameBuildIdentity(&stamp,&imageSpan) ||",
+                       "!engine_detail::supportedBuildIdentity(true,stamp,imageSpan,kSupportedStamp,kSupportedImageSize)",
+                       "return false;"):
+            check(any(": exact-build: " in p for p in audited("native_reflex_engine_hook.cpp", reflex_gate.replace(remove, ""))),
+                  "audit: removing a Reflex admission check or refusal revokes the exception")
+        for old, new in (("0x6ADA8048", "0x6ADA8049"), ("0x640C000", "0x640C001"),
+                         ("uint32_t stamp=0;", "gameRva(0x4315000);uint32_t stamp=0;")):
+            check(any(": exact-build: " in p for p in audited("native_reflex_engine_hook.cpp", reflex_gate.replace(old, new))),
+                  "audit: a changed supported identity or early address lookup revokes the Reflex exception")
+        check(any(": routed: " in p for p in audited("native_reflex_engine_hook.cpp",
+              reflex_gate + "uintptr_t f(uintptr_t b){return b+0x4315000;}")),
+              "audit: exact Reflex admission still requires canonical address routing")
+        check(any(": identity: " in p for p in audited("native_reflex_engine_future.cpp", reflex_gate)),
+              "audit: the Reflex exception never covers a second similarly named file")
         check(audited("draw_record_tag.h", "constexpr uint32_t kSalt = 0x00A5C35Au;\n"
                                              "uint32_t f(uint32_t s){ return s ^ kSalt; }") == [],
               "audit: the draw-record sentinel salt is not an address")
@@ -1996,9 +2018,12 @@ AUDIT_EXACT_ONLY = (
     ("d3d11/srv_radar_anchor.cpp", "the SRV radar anchor's exact-build hooks: the placement setter, the slot camera"),
     ("d3d11/terrain_cull_cover*", "terrain cull cover, which finds its site by its own scan on an unknown build"),
     ("d3d11/stream_boost.cpp", "system-adaptive asset streaming boost (build 334925): StreamLoad cap, fResService::SetMaxConcurrentStreams, and fRes completion pump pinned to build 334925 bytes and installed only when gameBuildKnown(); an unknown build stands down"),
+    ("d3d11/native_reflex_engine_hook.cpp", "Reflex scheduler, pose and app layouts verified only on build 334925: exact canonical PE admission precedes all canonical address resolution, with entry/callsite/protocol byte pins; unknown and future known builds stand down"),
 )
 # Literals in the image's range that are not game addresses: (path glob, values or None for all, why).
 AUDIT_NOT_ADDRESSES = (
+    ("d3d11/native_reflex.cpp", (0x0150E828,),
+     "public NvAPI_Initialize function ID from NVIDIA nvapi_interface.h"),
     ("*", (0x100000, 0x1FFFFF, 0x7FFFFE, 0x7FFFFF, 0x800000, 0xFFFFFF, 0x1000193),
      "bit masks, a 1 MiB bound and the FNV-1a-32 prime"),
     ("d3d11/dxbc_*.h", None, "DXBC shader tokens"),
@@ -2747,6 +2772,22 @@ def where_text(table, rva, n=1):
     return "0x%X: %s%s" % (rva, how, cover)
 
 
+def _reflex_exact_build_guard(toks):
+    """Narrow exact-only admission must precede every installer operation.
+
+    Match lexical tokens, so a comment cannot satisfy the wiring check. This
+    exception does not remove the normal base/routing/zero checks below.
+    """
+    code = "".join(text for _, text, _ in toks)
+    signature = "boolinstallOnce()noexcept{"
+    gate = ('uint32_tstamp=0;if(!gameBuildKnown()||!gameBuildIdentity(&stamp,&imageSpan)||'
+            '!engine_detail::supportedBuildIdentity(true,stamp,imageSpan,kSupportedStamp,kSupportedImageSize)){'
+            'status.store("unsupported_build_requires_334925",std::memory_order_release);returnfalse;}')
+    constants = "constexpruint32_tkSupportedStamp=0x6ADA8048,kSupportedImageSize=0x640C000;"
+    return code.count(signature) == 1 and constants in code.split(signature)[0] and \
+        code.split(signature, 1)[1].startswith(gate)
+
+
 def audit(src_dir, table):
     """Check every C/C++ file under src_dir; returns (problems, counts).
 
@@ -2914,7 +2955,10 @@ def audit(src_dir, table):
         if rel in AUDIT_RESOLVER:
             continue
         counts["resolver calls"] += sum(1 for k, t, _ in toks if k == "id" and t in RESOLVER_CALLS)
-        if exact(rel):
+        reflex_exact = rel == "d3d11/native_reflex_engine_hook.cpp" and exact(rel)
+        if reflex_exact and not _reflex_exact_build_guard(toks):
+            problems.append("src/%s:1: exact-build: Reflex requires its supported 334925 PE admission before address resolution" % rel)
+        if exact(rel) and not reflex_exact:
             continue
         match, parent = brackets[rel]
         base_problems, base_counts = _base_problems(rel, toks, match, parent)
@@ -2929,6 +2973,8 @@ def audit(src_dir, table):
                                 "and pass it to gameRva" % (where, text, _num_value(text)))
                 continue
             if kind in ("id", "idcarrier"):
+                if reflex_exact:
+                    continue
                 problems.append("%s: identity: %s is the known build's PE %s; a hook does not key on the "
                                 "build (gameRva and gamePinMatches do)" % (
                                     where, text, "stamp or image size" if kind == "idcarrier" else
@@ -2941,7 +2987,7 @@ def audit(src_dir, table):
                     problems.append("%s: known: %s is a VA at the preferred image base; write the RVA and "
                                     "pass it to gameRva" % (where, text))
                     continue
-                if not known(v):
+                if not known(v) and not reflex_exact:
                     problems.append("%s: known: %s is in the game image's range but is neither a table "
                                     "address nor inside the unit of one (add it to the table, or to "
                                     "AUDIT_NOT_ADDRESSES if it is not an address)" % (where, text))

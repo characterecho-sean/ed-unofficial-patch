@@ -98,6 +98,10 @@ vr::EVRCompositorError OpenVRCompositor::WaitGetPoses(
       !validOrigin(published.origin)) return trace.finish(kInvalid);
   copyPose(render, renderCount, published.renderPose, published.connected, true);
   copyPose(game, gameCount, published.gamePose, published.connected, true);
+  // Aliased gameplay output can replace the render slot with a different
+  // prediction. It cannot certify receipt of this frame's render pose.
+  if (render && renderCount && render[0].bPoseIsValid && (render!=game || !gameCount))
+    source_->reflexPoseConsumed(published.sequence);
   return trace.finish(vr::VRCompositorError_None);
 }
 
@@ -142,7 +146,10 @@ vr::EVRCompositorError OpenVRCompositor::Submit(vr::EVREye eye, const vr::Textur
   if (!source_) return trace.finish(kInvalid);
   const CompositorRead read = source_->compositorRead();
   if (!read.connected || read.generation == 0) return trace.finish(kInvalid);
-  return trace.finish(source_->submitEye(read.generation, eye, texture, bounds, flags));
+  source_->reflexEyeSource(eye, texture, read.sequence);
+  const auto result=source_->submitEye(read.generation, eye, texture, bounds, flags);
+  source_->reflexEyeSubmitted(eye,read.sequence,result==vr::VRCompositorError_None);
+  return trace.finish(result);
 }
 
 void OpenVRCompositor::ClearLastSubmittedFrame() {

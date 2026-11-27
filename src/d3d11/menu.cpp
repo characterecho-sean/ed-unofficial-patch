@@ -63,6 +63,8 @@
 #include "menu_pages.h"
 #include "menu_restart.h"
 #include "native_menu.h"
+#include "native_reflex.h"
+#include "native_reflex_session.h"
 #include "native_render_labels.h"
 #include "vr_runtime.h"
 #include "menu_schema.h"
@@ -437,7 +439,10 @@ std::string rowValue(const MenuRowDef& d) {
     if (runtimeFlatProfile() && strcmp(d.section, "fix") == 0 &&
         strcmp(d.key, "temporal_aa") == 0)
         return Config::get().requestedTemporalMode();
-    return Config::get().getString(dottedOf(d).c_str(), d.shipped);
+    const std::string key = dottedOf(d);
+    const std::string value = Config::get().getString(key.c_str(), d.shipped);
+    if (key == "fix.nvidia_reflex") return native_reflex::modeWord(native_reflex::parseMode(value));
+    return value;
 }
 
 bool flatDlssSelected() {
@@ -488,6 +493,10 @@ bool dlssPresetDisabled() {
     if (runtimeFlatProfile()) return !flatDlssSelected();
     return temporalEngineFor(Config::get().getString("fix.temporal_aa", "off")) !=
            TemporalEngine::Nvidia;
+}
+
+bool isNvidiaLowLatencyRow(const MenuRowDef& d) {
+    return strcmp(d.section, "fix") == 0 && strcmp(d.key, "nvidia_reflex") == 0;
 }
 
 // fix.render_sharpness (the Sharpening row). VR sharpens whatever it submits,
@@ -1253,6 +1262,7 @@ bool temporalAaRow(const MenuRowDef& d) {
 
 std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
     std::vector<ChoiceItem> out;
+    const bool unavailableNvidiaLowLatency = isNvidiaLowLatencyRow(d) && !native_reflex::availableForUser();
     std::string packed(d.choices);
     size_t pos = 0;
     while (pos <= packed.size()) {
@@ -1284,6 +1294,7 @@ std::vector<ChoiceItem> choicesOf(const MenuRowDef& d) {
             // DLSS/DLAA on an NVIDIA adapter, FSR 4.1 on an AMD adapter. A disabled choice is skipped by stepping and left
             // out of the choice list. The stored value still displays, so an ini that already names one keeps its label.
             if (temporalAaRow(d) && !edvr::temporalAaChoiceOffered(c.value.c_str(), g_menuGpu)) c.disabled = true;
+            if (unavailableNvidiaLowLatency && c.value != "off") c.disabled = true;
             out.push_back(c);
         }
         pos = bar + 1;
@@ -2958,6 +2969,10 @@ void buildContent(MenuContent& c) {
             const bool hotkeyRow = d.kind == MenuKind::Hotkey;
             const bool noteOnThis = hotkeyRow && s.noteDef == e.def && s.noteUntilMs > s.tickMs;
             const bool dlssRow = isDlssPresetRow(d);
+            const bool nvidiaLowLatencyRow = isNvidiaLowLatencyRow(d);
+            const bool unavailableNvidiaLowLatency = nvidiaLowLatencyRow && !native_reflex::availableForUser();
+            const char* nvidiaHint = hi && nvidiaLowLatencyRow
+                ? native_reflex::modeStatusHint(native_reflex::modeStatusForUser(), !unavailableNvidiaLowLatency) : nullptr;
             const bool sharpenRow = isSharpenRow(d);
             const bool hudAaRow = isHudAntiAliasingRow(d);
             const bool glassDirtRow = isCockpitGlassDirtRow(d);
@@ -2966,7 +2981,8 @@ void buildContent(MenuContent& c) {
             const bool xessFramesRow = isXessFgFramesRow(d);
             const bool xessToggleRow = isXessFgToggleRow(d);
             const bool dittoRow = isDittoRow(d);
-            const bool dim = (dlssRow && dlssPresetDisabled()) ||
+            const bool dim = unavailableNvidiaLowLatency ||
+                             (dlssRow && dlssPresetDisabled()) ||
                              (dittoRow && dittoRowDisabled()) ||
                              (xessFramesRow && xessFgFramesRowDisabled()) ||
                              (xessToggleRow && xessFgToggleRowDisabled()) ||
@@ -3053,7 +3069,9 @@ void buildContent(MenuContent& c) {
                       : hi        ? kMenuRowHi
                       : dim       ? kMenuDim
                                   : kMenuRow;
-            if (hi && dim && hudAaRow)
+            if (nvidiaHint)
+                snprintf(c.hint, sizeof(c.hint), "%s", nvidiaHint);
+            else if (hi && dim && hudAaRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", hudAntiAliasingHint());
             else if (hi && dim && glassDirtRow)
                 snprintf(c.hint, sizeof(c.hint), "%s", cockpitGlassDirtHint());
@@ -3133,11 +3151,13 @@ void buildContent(MenuContent& c) {
                 }
                 if (!openxrScaleRow) {
                     body += std::string("Shipped ") + displayValue(d, d.shipped) + ".  " +
-                            (d.applies == 1   ? "Applies at once."
+                            (nvidiaLowLatencyRow ? "Requests a live driver change."
+                             : d.applies == 1   ? "Applies at once."
                              : d.applies == 2 ? "Takes effect at the next launch."
                                               : "When it applies is not documented.");
                 }
                 if (openxrScaleRow) body += "\n" + openxrResolutionTooltip(res);
+                if (nvidiaHint) body += std::string("\n") + nvidiaHint;
                 if (editingThis) {
                     body += s.editBad ? "\nThat is not a value this key accepts."
                                       : "\nEnter writes it, Escape leaves it alone.";
@@ -3166,7 +3186,7 @@ void buildContent(MenuContent& c) {
                     }
                 } else if (dim && dittoRow) {
                     body += std::string("\n") + dittoRowHint();
-                } else if (dim) {
+                } else if (dim && !nvidiaLowLatencyRow) {
                     body += "\nInactive: only DLSS and DLAA read this preset.";
                 } else if (s.resetArmedEntry == i) {
                     body += "\nPress R again to reset it to the shipped value.";
@@ -3457,9 +3477,15 @@ void enqueueChange(WriteJob& job, bool held = false) {
 }
 
 void applyChange(int defIndex, const std::string& fileValue, bool held = false) {
+    const MenuRowDef& d = kMenuRows[defIndex];
+    if (isNvidiaLowLatencyRow(d) && fileValue != "off" && !native_reflex::availableForUser()) {
+        g_s.lastWrite = native_reflex::kModeUnavailableHint;
+        g_s.contentDirty = true;
+        return;
+    }
     WriteJob job;
     job.def = defIndex;
-    job.dotted = dottedOf(kMenuRows[defIndex]);
+    job.dotted = dottedOf(d);
     job.value = fileValue;
     enqueueChange(job, held);
 }
@@ -5615,6 +5641,15 @@ void menuTick(ID3D11Device* dev) {
     const bool hotkeysPage = menuProfileHasPage(MenuPageSource::Hotkeys, runtimeFlatProfile());   // one answer, the page table's (menu_pages.h)
     guardedBudget(g_budget, [&] {
         if (world) {
+            static bool lastNvidiaLowLatencyAvailable = false;
+            static native_reflex::ModeStatus lastNvidiaModeStatus = native_reflex::ModeStatus::Unavailable;
+            const bool nvidiaLowLatencyAvailable = native_reflex::availableForUser();
+            const auto nvidiaModeStatus = native_reflex::modeStatusForUser();
+            if (nvidiaLowLatencyAvailable != lastNvidiaLowLatencyAvailable || nvidiaModeStatus != lastNvidiaModeStatus) {
+                lastNvidiaLowLatencyAvailable = nvidiaLowLatencyAvailable;
+                lastNvidiaModeStatus = nvidiaModeStatus;
+                s.contentDirty = true;
+            }
             static uint64_t lastNativeRevision = 0;
             const uint64_t nativeRevision = nativeMenuRevision();
             if (nativeRevision != lastNativeRevision) {

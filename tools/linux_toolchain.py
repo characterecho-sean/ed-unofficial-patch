@@ -27,8 +27,10 @@ stops before downloading anything.  --dry-run writes nothing at all.
 
 The SDKs come from the repository's own fetch tools, pinned there, into
 .toolchains/windows/deps/, and build-dlls points build.bat at them; the FSR 3
-DX11 port is built there under Wine with pinned CMake and Ninja.  build-dlls
-fetches the pinned OpenXR loader into the tree being built when it lacks one.
+DX11 port is built there under Wine with pinned CMake and Ninja. build-dlls
+prepares the pinned OpenXR loader and, by default, the Reflex SDK in the tree
+before fingerprinting it. EDUP_REFLEX_SDK may instead name a staged SDK as Wine
+sees it, or be set to none to omit Reflex SDK statistics.
 
 What differs from CI's Windows build:
   - nothing in the compiler or SDK: MSVC 14.44.35207 (VS 2022 17.14) and
@@ -440,6 +442,13 @@ def build_dlls(layout, root, clean=False):
         if name not in deps:
             print("linux_toolchain: WARNING: no %s SDK in %s; this build goes without it" % (name, layout.deps))
     with _tree_lock(root):
+        # The fetcher owns the checkout-local default. A fetch during the
+        # compile would change the inputs the receipt is about to record.
+        reflex_fetcher = root / "tools" / "fetch_reflex.py"
+        if reflex_fetcher.is_file() and not os.environ.get("EDUP_REFLEX_SDK"):
+            rc = _run([sys.executable, reflex_fetcher], cwd=root)
+            if rc:
+                return rc
         fingerprint = compile_only.source_fingerprint(root)
         compile_only.remove_receipt(root)
         describe = compile_only.describe(root)
@@ -526,7 +535,7 @@ def self_test():
         (root / "src").mkdir(parents=True)
         (root / "build.bat").write_bytes(b"@echo off\r\nREM --compile-only\r\n")
         (root / "src" / "a.cpp").write_bytes(b"int a;\n")
-        (root / ".gitignore").write_bytes(b"build/\nthird_party/openxr/loader/\n")
+        (root / ".gitignore").write_bytes(b"build/\nthird_party/openxr/loader/\nthird_party/reflex/\n")
         loader = root / "third_party" / "openxr" / "loader" / "openxr_loader.dll"
         loader.parent.mkdir(parents=True)
         loader.write_bytes(b"LOADER")
@@ -569,6 +578,43 @@ def self_test():
             (root / "build.bat").write_bytes(b"@echo off\r\n")
             expect(build_dlls(layout, root) == 1, "a build.bat without --compile-only was run")
         expect(not calls, "build-dlls ran a step it should not have: %r" % calls)
+
+        # A dependency fetched while the compiler runs changes the receipt input
+        # fingerprint. The wrapper must stage the default Reflex SDK first.
+        from unittest import mock
+        (root / "build.bat").write_bytes(b"@echo off\r\nREM --compile-only\r\n")
+        fetcher = root / "tools" / "fetch_reflex.py"
+        fetcher.parent.mkdir()
+        fetcher.write_bytes(b"# fixture fetcher\n")
+        reflex_header = root / "third_party" / "reflex" / "Reflex_Stats" / "pclstats.h"
+
+        def fetch_reflex_sdk():
+            reflex_header.parent.mkdir(parents=True, exist_ok=True)
+            reflex_header.write_bytes(b"PINNED REFLEX HEADER")
+
+        def run_fetch(argv, cwd=None, env=None):
+            expect(argv == [sys.executable, fetcher] and cwd == root, "wrong Reflex fetch entry point")
+            calls.append(argv)
+            fetch_reflex_sdk()
+            return 0
+
+        def compile_with_reflex(layout, root_, env, clean):
+            # Emulate the old build.bat fallback, which triggered the regression.
+            if not env.get("EDUP_REFLEX_SDK") and not reflex_header.exists():
+                fetch_reflex_sdk()
+            return compiler()(layout, root_, env, clean)
+
+        globals()["_run"] = run_fetch
+        globals()["_run_build"] = compile_with_reflex
+        with mock.patch.dict(os.environ), contextlib.redirect_stdout(io.StringIO()):
+            os.environ.pop("EDUP_REFLEX_SDK", None)
+            expect(build_dlls(layout, root) == 0 and receipt.is_file(), "first Reflex build wrote no receipt")
+            expect(len(calls) == 1, "the wrapper did not stage the Reflex SDK before compiling")
+            shutil.rmtree(reflex_header.parents[1])
+            for override in ("none", r"Z:\shared\reflex"):
+                os.environ["EDUP_REFLEX_SDK"] = override
+                expect(build_dlls(layout, root) == 0 and receipt.is_file(), "Reflex override wrote no receipt")
+                expect(not reflex_header.exists() and len(calls) == 1, "a Reflex override fetched the default SDK")
 
         # --dry-run belongs to setup: build-dlls refuses it before it removes or builds anything.
         ran = []

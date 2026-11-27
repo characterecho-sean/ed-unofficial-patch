@@ -120,6 +120,10 @@ try:
         from tools import epic_library
     except ImportError:
         import epic_library
+    try:
+        from tools import fetch_reflex
+    except ImportError:
+        import fetch_reflex
 finally:
     sys.dont_write_bytecode = _epic_bytecode_policy
 try:
@@ -211,6 +215,8 @@ def native_paths(root, target):
         "graphics_source": os.path.join(build_dir(root), "edvr_openxr_graphics.dll"),
         "native_target": os.path.join(target, "Openvr", "win64", "openvr_api.dll"),
         "graphics_target": os.path.join(target, "d3d11.dll"),
+        "reflex_license_source": os.path.join(build_dir(root), fetch_reflex.LICENSE_NAME),
+        "reflex_license_target": os.path.join(target, fetch_reflex.LICENSE_NAME),
         "original": os.path.join(target, "Openvr", "win64", "openvr_api_orig.dll"),
         "ini": os.path.join(target, "edup.ini"),
     }
@@ -497,7 +503,7 @@ def _native_preflight(root, target, receipt_path):
     game = os.path.join(target, GAME_EXE)
     if not os.path.isfile(game):
         errors.append("       missing target executable %s" % game)
-    for key in ("native_target", "graphics_target", "original", "ini"):
+    for key in ("native_target", "graphics_target", "reflex_license_target", "original", "ini"):
         if not _under(p[key], target):
             errors.append("       target path escapes game directory: %s" % p[key])
     if receipt_path is not None:
@@ -511,6 +517,7 @@ def _native_preflight(root, target, receipt_path):
     if errors:
         raise SystemExit("[edup] native preflight failed:\n" + "\n".join(errors))
     try:
+        fetch_reflex.build_license(p["graphics_source"], build_dir(root))
         import openxr_pe
         openxr_pe.validate_native_pair(game, p["native_source"],
                                        p["graphics_source"])
@@ -569,18 +576,11 @@ def _native_receipt(root, target, paths, backups, before_hashes,
         "target": os.path.abspath(target),
         "root": os.path.abspath(root),
         "state": state,
-        "files": [
-            {"key": "native", "source": os.path.abspath(paths["native_source"]),
-             "target": os.path.abspath(paths["native_target"]),
-             "backup": os.path.abspath(backups["native"]),
-             "before_sha256": before_hashes["native"],
-             "installed_sha256": installed_hashes["native"]},
-            {"key": "graphics", "source": os.path.abspath(paths["graphics_source"]),
-             "target": os.path.abspath(paths["graphics_target"]),
-             "backup": os.path.abspath(backups["graphics"]),
-             "before_sha256": before_hashes["graphics"],
-             "installed_sha256": installed_hashes["graphics"]},
-        ],
+        "files": [{"key": key, "source": os.path.abspath(paths[key + "_source"]),
+                   "target": os.path.abspath(paths[key + "_target"]),
+                   "backup": os.path.abspath(backups[key]) if backups[key] else None,
+                   "before_sha256": before_hashes[key], "installed_sha256": installed_hashes[key]}
+                  for key in installed_hashes],
         "original": {"path": os.path.abspath(paths["original"]),
                       "sha256": sha256(paths["original"])},
         "ini": {"path": os.path.abspath(paths["ini"]),
@@ -695,6 +695,10 @@ def native_install(root, target, receipt_path, tag, dry_run=False, keep_backups=
                      "graphics": sha256(paths["graphics_target"])}
     installed_hashes = {"native": sha256(paths["native_source"]),
                         "graphics": sha256(paths["graphics_source"])}
+    if fetch_reflex.pcl_compiled(paths["graphics_source"]):
+        before_hashes["reflex_license"] = _hash_or_missing(paths["reflex_license_target"])
+        installed_hashes["reflex_license"] = sha256(paths["reflex_license_source"])
+    components = tuple(installed_hashes)
     known, running = strict_game_running(target)
     if not dry_run and (not known or running):
         if not known:
@@ -712,16 +716,19 @@ def native_install(root, target, receipt_path, tag, dry_run=False, keep_backups=
     }
     if backups["graphics"] == backups["native"]:
         backups["graphics"] += ".graphics"
+    if "reflex_license" in components:
+        backups["reflex_license"] = (_native_backup_name(paths["reflex_license_target"], tag, stamp)
+                                     if before_hashes["reflex_license"] is not None else None)
     print("[edup] native target: %s" % target)
     print("[edup] native plan%s:" %
           (" (DRY RUN -- nothing will be written)" if dry_run else ""))
-    for key in ("native", "graphics"):
+    for key in components:
         print("       %-8s %s" % (key, paths[key + "_target"]))
-        print("               replace -> %s" % os.path.basename(backups[key]))
+        print("               replace -> %s" % (os.path.basename(backups[key]) if backups[key] else "new file"))
     print("       receipt  %s" % (receipt_path or "(not requested in dry run)"))
     if dry_run:
         _prune_quietly(target, keep_backups, dry_run=True,
-                       plan={"receipt": receipt_path, "backups": list(backups.values())})
+                       plan={"receipt": receipt_path, "backups": [path for path in backups.values() if path]})
         print("[edup] dry run: wrote nothing.")
         return 0
 
@@ -735,7 +742,9 @@ def native_install(root, target, receipt_path, tag, dry_run=False, keep_backups=
         # Journal the complete transaction before changing either live DLL.
         _write_new_receipt(receipt_path, receipt)
         receipt_owned = True
-        for key in ("native", "graphics"):
+        for key in components:
+            if backups[key] is None:
+                continue
             dst = paths[key + "_target"]
             _reserve_backup(backups[key])
             created_backups.append((key, backups[key]))
@@ -743,13 +752,20 @@ def native_install(root, target, receipt_path, tag, dry_run=False, keep_backups=
             if sha256(backups[key]) != before_hashes[key]:
                 raise ValueError("backup verification failed: %s" % key)
             verified_backups.append((key, backups[key]))
-        for key in ("native", "graphics"):
+        for key in components:
             dst = paths[key + "_target"]
             src = paths[key + "_source"]
-            # Record the mutation before calling copy2: a failed copy may
-            # have partially overwritten its destination.
-            active_mutations.append((key, dst))
-            shutil.copy2(src, dst)
+            if backups[key] is None:
+                # Record ownership only after exclusive creation succeeds.
+                # A failed copy rolls back our partial file, not a file
+                # another publisher placed after the plan.
+                with open(src, "rb") as source, open(dst, "xb") as output:
+                    active_mutations.append((key, dst))
+                    shutil.copyfileobj(source, output)
+            else:
+                # A failed replacement can partially overwrite a live file.
+                active_mutations.append((key, dst))
+                shutil.copy2(src, dst)
             if sha256(dst) != installed_hashes[key]:
                 raise ValueError("installed hash verification failed: %s" % key)
         if sha256(paths["original"]) != original_hash:
@@ -767,7 +783,13 @@ def native_install(root, target, receipt_path, tag, dry_run=False, keep_backups=
         for key, dst in reversed(active_mutations):
             backup = verified.get(key)
             if backup is None:
-                rollback_ok = False
+                if before_hashes[key] is None:
+                    try:
+                        if os.path.exists(dst): os.remove(dst)
+                    except OSError:
+                        rollback_ok = False
+                else:
+                    rollback_ok = False
                 continue
             try:
                 shutil.copy2(backup, dst)
@@ -827,7 +849,7 @@ def _load_native_receipt(path):
     files = r.get("files")
     original = r.get("original")
     ini = r.get("ini")
-    if not isinstance(files, list) or len(files) != 2 or \
+    if not isinstance(files, list) or len(files) not in (2, 3) or \
        not all(isinstance(x, dict) for x in files) or \
        not all(isinstance(x, dict) for x in (original, ini)):
         raise ValueError("malformed native receipt")
@@ -841,19 +863,23 @@ def _load_native_receipt(path):
     target_real = os.path.realpath(target)
     if not os.path.isdir(target) or not target_real:
         raise ValueError("receipt target is not a directory")
-    for key in ("native_target", "graphics_target", "original", "ini"):
+    for key in ("native_target", "graphics_target", "reflex_license_target", "original", "ini"):
         if not _under(expected[key], target):
             raise ValueError("expected path escapes receipt target: %s" % key)
     for entry in files:
-        for field in ("key", "source", "target", "backup",
-                      "before_sha256", "installed_sha256"):
+        for field in ("key", "source", "target", "installed_sha256"):
             if not isinstance(entry.get(field), str):
                 raise ValueError("native file field is not a string")
     by_key = {entry["key"]: entry for entry in files}
-    if set(by_key) != {"native", "graphics"}:
+    if (len(by_key) != len(files) or not {"native", "graphics"} <= set(by_key)
+            or set(by_key) - {"native", "graphics", "reflex_license"}):
         raise ValueError("receipt must contain native and graphics files")
-    for key in ("native", "graphics"):
-        entry = by_key[key]
+    for key, entry in by_key.items():
+        absent_before = (key == "reflex_license" and entry.get("backup") is None
+                         and entry.get("before_sha256") is None)
+        if not absent_before and (not isinstance(entry.get("backup"), str)
+                                  or not _valid_hash(entry.get("before_sha256"))):
+            raise ValueError("bad %s backup/hash" % key)
         allowed_sources = {os.path.abspath(expected[key + "_source"])}
         # Receipts written before the native graphics split recorded the
         # qualification d3d11.dll.  Keep those receipts usable for deliberate
@@ -865,12 +891,13 @@ def _load_native_receipt(path):
            entry["target"] != os.path.abspath(expected[key + "_target"]) or \
            os.path.realpath(entry["target"]) != \
            os.path.realpath(expected[key + "_target"]) or \
-           not _under(entry["backup"], target):
+           (entry.get("backup") is not None and not _under(entry["backup"], target)):
             raise ValueError("unsafe %s file entry" % key)
-        for hkey in ("before_sha256", "installed_sha256"):
-            if not _valid_hash(entry.get(hkey)):
-                raise ValueError("bad %s hash" % key)
-        if not os.path.isabs(entry["backup"]):
+        if not _valid_hash(entry["installed_sha256"]):
+            raise ValueError("bad %s hash" % key)
+        if absent_before:
+            continue
+        if not isinstance(entry.get("backup"), str) or not os.path.isabs(entry["backup"]):
             raise ValueError("backup path must be absolute")
         backup_name_only = os.path.basename(entry["backup"])
         live_name = os.path.basename(entry["target"])
@@ -895,12 +922,14 @@ def _load_native_receipt(path):
     if r.get("state") != "installed":
         raise ValueError("receipt is not in installed state")
     protected = {os.path.normcase(os.path.realpath(expected[key]))
-                 for key in ("native_target", "graphics_target", "original",
-                              "ini", "native_source", "graphics_source")}
+                 for key in ("native_target", "graphics_target", "reflex_license_target", "original",
+                              "ini", "native_source", "graphics_source", "reflex_license_source")}
     protected.add(os.path.normcase(os.path.realpath(
         os.path.join(root, LEGACY_GRAPHICS_SOURCE))))
     backup_reals = set()
-    for key in ("native", "graphics"):
+    for key, entry in by_key.items():
+        if entry.get("backup") is None:
+            continue
         backup_real = os.path.normcase(os.path.realpath(by_key[key]["backup"]))
         if backup_real in protected or backup_real in backup_reals:
             raise ValueError("backup aliases a protected path")
@@ -908,9 +937,8 @@ def _load_native_receipt(path):
     # Check all recorded evidence without consulting or changing the INI.
     if sha256(original["path"]) != original["sha256"]:
         raise ValueError("preserved original changed")
-    for key in ("native", "graphics"):
-        entry = by_key[key]
-        if sha256(entry["backup"]) != entry["before_sha256"]:
+    for key, entry in by_key.items():
+        if entry["backup"] is not None and sha256(entry["backup"]) != entry["before_sha256"]:
             raise ValueError("backup changed: %s" % key)
         if sha256(entry["target"]) != entry["installed_sha256"]:
             raise ValueError("active native file changed: %s" % key)
@@ -960,7 +988,7 @@ def restore_native(receipt_path, dry_run=False):
         active_mutations = []
         rollback_ok = True
         try:
-            for key in ("native", "graphics"):
+            for key in entries:
                 fd, temp = tempfile.mkstemp(prefix="edvr-native-restore-",
                                              suffix=".tmp",
                                              dir=os.path.dirname(entries[key]["target"]))
@@ -969,11 +997,13 @@ def restore_native(receipt_path, dry_run=False):
                 shutil.copy2(entries[key]["target"], temp)
                 if sha256(temp) != entries[key]["installed_sha256"]:
                     raise ValueError("staged restore copy changed: %s" % key)
-            for key in ("native", "graphics"):
+            for key in entries:
                 active_mutations.append(key)
-                shutil.copy2(entries[key]["backup"], entries[key]["target"])
-            if sha256(entries["native"]["target"]) != entries["native"]["before_sha256"] or \
-               sha256(entries["graphics"]["target"]) != entries["graphics"]["before_sha256"]:
+                if entries[key]["backup"] is None:
+                    os.remove(entries[key]["target"])
+                else:
+                    shutil.copy2(entries[key]["backup"], entries[key]["target"])
+            if any(_hash_or_missing(entry["target"]) != entry["before_sha256"] for entry in entries.values()):
                 raise ValueError("restored hash verification failed")
         except (OSError, IOError, ValueError) as exc:
             print("[edup] ERROR: native restore failed: %s" % exc)
@@ -1090,6 +1120,7 @@ def _validate_v2_receipt_in(r):
                    xess_license=os.path.join(target, "INTEL-XESS-LICENSE.txt"),
                    xess_third_party=os.path.join(target, "INTEL-XESS-THIRD-PARTY.txt"))
     targets.update({key: os.path.join(target, name) for key, name in FSR4_FILES})
+    targets["reflex_license"] = os.path.join(target, fetch_reflex.LICENSE_NAME)
     # A both install records the flat half's settings file as its own entry.
     if r["kind"] == NATIVE_KIND: targets["ini_flat"] = _ini_target(target, "flat")
     keys = [e["key"] for e in files]
@@ -1105,6 +1136,7 @@ def _validate_v2_receipt_in(r):
                    "xess_third_party": os.path.join(build_dir(root), "INTEL-XESS-THIRD-PARTY.txt"),
                    "ini": _ini_source(root, "flat"), "profile": "generated"}
         sources.update({key: os.path.join(build_dir(root), name) for key, name in FSR4_FILES})
+        sources["reflex_license"] = os.path.join(build_dir(root), fetch_reflex.LICENSE_NAME)
         for e in files:
             expected = sources[e["key"]]
             if e["key"] == "ini" and e.get("source") == INI_GENERATED and r.get("build") == COMPILE_ONLY_MARK:
@@ -1607,6 +1639,9 @@ def _native_direct_plan(root, target, loader, runtime):
     paths = native_paths(root, target)
     for key in ("native_source", "graphics_source", "original", "native_target", "graphics_target"):
         if not os.path.isfile(paths[key]): raise ValueError("missing native path: %s" % paths[key])
+    paths["reflex_license_required"] = fetch_reflex.build_license(paths["graphics_source"], build_dir(root)) is not None
+    if paths["reflex_license_required"] and not _under(paths["reflex_license_target"], target):
+        raise ValueError("Reflex notice target escapes game directory")
     game = os.path.join(target, GAME_EXE)
     if not os.path.isfile(game): raise ValueError("missing game executable: %s" % game)
     lib = None
@@ -1628,6 +1663,8 @@ def _native_direct_plan(root, target, loader, runtime):
 
 def native_direct(root, target, loader, runtime, dry_run=False):
     paths, config, lib = _native_direct_plan(root, target, loader, runtime)
+    reflex_target = paths["reflex_license_target"]
+    reflex_before = _hash_or_missing(reflex_target) if paths["reflex_license_required"] else None
     known, running = strict_game_running(target)
     if not known or running:
         if not dry_run: print("[edup] ERROR: direct native route requires a proven stopped game%s" % probe_reason())
@@ -1637,14 +1674,26 @@ def native_direct(root, target, loader, runtime, dry_run=False):
     config_path = os.path.join(target, "Openvr", "win64", "edup_openxr.ini")
     print("       %s -> %s" % (paths["native_source"], paths["native_target"]))
     print("       %s -> %s" % (paths["graphics_source"], paths["graphics_target"]))
+    if paths["reflex_license_required"]:
+        print("       %s -> %s" % (paths["reflex_license_source"], paths["reflex_license_target"]))
     print("       local startup config -> %s" % config_path)
     print("       runtime selection: %s" % (lib if lib else "system discovery"))
     if dry_run: return 0
+    if paths["reflex_license_required"]:
+        reflex_source = paths["reflex_license_source"]
+        if reflex_before is None:
+            _copy_exclusive(reflex_source, reflex_target)
+        elif _hash_or_missing(reflex_target) != reflex_before:
+            raise ValueError("Reflex notice changed during the install plan: %s" % reflex_target)
+        else:
+            shutil.copy2(reflex_source, reflex_target)
     shutil.copy2(paths["native_source"], paths["native_target"])
     shutil.copy2(paths["graphics_source"], paths["graphics_target"])
     with open(config_path, "wb") as f: f.write(config)
     expected = {paths["native_target"]: paths["native_source"], paths["graphics_target"]: paths["graphics_source"]}
-    for p in (paths["native_target"], paths["graphics_target"]):
+    if paths["reflex_license_required"]:
+        expected[paths["reflex_license_target"]] = paths["reflex_license_source"]
+    for p in expected:
         if sha256(p) != sha256(expected[p]): print("[edup] ERROR: post-copy hash mismatch: %s" % p); return 1
         print("       %s %s" % (p, sha256(p)))
     with open(config_path, "rb") as stream:
@@ -1661,6 +1710,9 @@ def native_direct_verify(root, target, loader, runtime):
     with open(config_path, "rb") as f: current_config = f.read()
     if current_config != config: print("[edup] direct native config mismatch"); return 1
     if sha256(paths["native_target"]) != sha256(paths["native_source"]) or sha256(paths["graphics_target"]) != sha256(paths["graphics_source"]): return 1
+    if paths["reflex_license_required"] and (not os.path.isfile(paths["reflex_license_target"]) or
+            sha256(paths["reflex_license_target"]) != sha256(paths["reflex_license_source"])):
+        print("[edup] direct native Reflex license mismatch"); return 1
     print("[edup] direct native pair and config verified"); return 0
 
 def _standard_native_paths(root, target):
@@ -2178,6 +2230,7 @@ def retire_stale_native_receipt(target, tag, dry_run=False):
                        xess_license=os.path.join(target, "INTEL-XESS-LICENSE.txt"),
                        xess_third_party=os.path.join(target, "INTEL-XESS-THIRD-PARTY.txt"))
         allowed.update({key: os.path.join(target, name) for key, name in FSR4_FILES})
+        allowed["reflex_license"] = os.path.join(target, fetch_reflex.LICENSE_NAME)
         files = old.get("files")
         if not isinstance(files, list) or not all(isinstance(e, dict) and isinstance(e.get("key"), str) for e in files):
             raise ValueError("malformed native receipt files")
@@ -2253,6 +2306,15 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
     payload = ("runtime", "graphics", "loader", "notice") if native else ("graphics",)
     errors = ["missing %s source %s" % ("native" if native else "flat", p[k]) for k in payload
               if not os.path.isfile(p[k])]
+    try:
+        reflex_notice = fetch_reflex.build_license(p["graphics"], build_dir(root))
+        if reflex_notice is not None:
+            p.update(reflex_license=str(reflex_notice), reflex_license_target=os.path.join(target, fetch_reflex.LICENSE_NAME))
+            payload += ("reflex_license",)
+            if not _under(p["reflex_license_target"], target):
+                errors.append("Reflex notice target escapes game directory")
+    except (OSError, ValueError) as error:
+        errors.append(str(error))
     if include_dlss and not os.path.isfile(os.path.join(build_dir(root), "nvngx_dlss.dll")):
         errors.append("missing optional DLSS source %s" % os.path.join(build_dir(root), "nvngx_dlss.dll"))
     xess_names = (("xess", "libxess.dll"), ("xess_fg", "libxess_fg.dll"), ("xess_ll", "libxell.dll"),
@@ -2616,14 +2678,21 @@ def standard_native_install(root, target, tag, dry_run=False, verify_only=False,
                 if sha256(e["backup"]) != e["before_sha256"]: raise ValueError("backup verification failed: %s" % e["key"])
                 made.append(e)
         for e in entries:
-            changed.append(e)
-            if e["key"] == "config":
-                with open(e["target"], "wb") as stream: stream.write(config_bytes)
-            elif e["key"] == "profile":
-                with open(e["target"], "wb") as stream: stream.write(descriptor_bytes)
-            elif e["key"] in generated_ini:
-                with open(e["target"], "wb") as stream: stream.write(generated_ini[e["key"]])
-            else: shutil.copy2(e["source"], e["target"])
+            if e["key"] == "reflex_license" and e["backup"] is None:
+                # A competing creator owns its file. Journal this path only
+                # after our exclusive open succeeds, even if the copy fails.
+                with open(e["source"], "rb") as source, open(e["target"], "xb") as output:
+                    changed.append(e)
+                    shutil.copyfileobj(source, output)
+            else:
+                changed.append(e)
+                if e["key"] == "config":
+                    with open(e["target"], "wb") as stream: stream.write(config_bytes)
+                elif e["key"] == "profile":
+                    with open(e["target"], "wb") as stream: stream.write(descriptor_bytes)
+                elif e["key"] in generated_ini:
+                    with open(e["target"], "wb") as stream: stream.write(generated_ini[e["key"]])
+                else: shutil.copy2(e["source"], e["target"])
             if sha256(e["target"]) != e["installed_sha256"]: raise ValueError("installed hash verification failed: %s" % e["key"])
         journal["state"] = "installed"; _replace_receipt(receipt, journal)
         verify_native_receipt(receipt, target)
@@ -4012,6 +4081,194 @@ def _prune_self_test():
     return not problems
 
 
+def _reflex_license_self_test():
+    """PCL notices follow compiled binaries through every graphics install route."""
+    import contextlib
+    import io
+    from unittest import mock
+    import openxr_pe
+    import fetch_openxr_loader
+
+    license_data = b"NVIDIA Reflex SDK license fixture"
+    fixture_pin = (len(license_data), hashlib.sha256(license_data).hexdigest())
+    try:
+        with tempfile.TemporaryDirectory(prefix="edup_reflex_install_") as temporary, \
+                mock.patch.dict(fetch_reflex.FILES, {fetch_reflex.LICENSE: fixture_pin}), \
+                mock.patch.dict(globals(), {"validate_elite_game": lambda path: None,
+                                           "strict_game_running": lambda *a: (True, False),
+                                           "archive_installed_exe": lambda *a: None}), \
+                mock.patch.object(openxr_pe, "validate_native_pair", return_value=None), \
+                mock.patch.object(openxr_pe, "Image", side_effect=lambda data: data), \
+                mock.patch.object(openxr_pe, "_exports", return_value=({1: "edvrFixture"}, {})), \
+                mock.patch.object(fetch_openxr_loader, "verify", return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary) / "repo"
+            build = root / "build"
+            build.mkdir(parents=True)
+            pcl_graphics = b"GRAPHICS " + fetch_reflex.PCL_BINARY_MARKER
+            for name, data in (("d3d11.dll", pcl_graphics), ("edvr_openxr_graphics.dll", pcl_graphics),
+                               ("edvr_openxr_runtime.dll", b"NATIVE"), ("openxr_loader.dll", b"LOADER"),
+                               ("OPENXR-LOADER-LICENSE.txt", b"OPENXR NOTICE"),
+                               (fetch_reflex.LICENSE_NAME, license_data)):
+                (build / name).write_bytes(data)
+
+            def snapshot(path):
+                return sorted((str(item.relative_to(path)), item.read_bytes() if item.is_file() else None)
+                              for item in path.rglob("*"))
+
+            def game(name, legacy=False):
+                result = Path(temporary) / name
+                result.mkdir()
+                (result / GAME_EXE).write_bytes(b"GAME")
+                if legacy:
+                    xr = result / "Openvr" / "win64"
+                    xr.mkdir(parents=True)
+                    (xr / "openvr_api.dll").write_bytes(b"OLD NATIVE")
+                    (xr / "openvr_api_orig.dll").write_bytes(b"ORIGINAL")
+                    (result / "d3d11.dll").write_bytes(b"OLD GRAPHICS")
+                return result
+
+            other_notice = b"concurrent publisher's notice"
+
+            def publish_notice(path):
+                with path.open("xb") as stream:
+                    stream.write(other_notice)
+
+            copyfileobj = shutil.copyfileobj
+
+            def failed_notice(source, destination, *args, **kwargs):
+                if str(source.name) == str(build / fetch_reflex.LICENSE_NAME):
+                    destination.write(b"PARTIAL")
+                    raise OSError("injected PCL notice copy failure")
+                return copyfileobj(source, destination, *args, **kwargs)
+
+            for scope in SCOPES:
+                target = game(scope)
+                notice = target / fetch_reflex.LICENSE_NAME
+                old_notice = b"existing notice" if scope == "both" else None
+                if old_notice is not None: notice.write_bytes(old_notice)
+                arguments = ["--root", str(root), "--target", str(target), "--scope", scope]
+                before = snapshot(target)
+                assert main(arguments + ["--dry-run"]) == 0
+                assert snapshot(target) == before, "PCL %s dry run wrote files" % scope
+                assert main(arguments) == 0
+                assert notice.read_bytes() == license_data
+                assert main(arguments + ["--verify-only"]) == 0
+                notice.unlink()
+                assert main(arguments + ["--verify-only"]) == 1, "verify accepted a missing PCL notice"
+                notice.write_bytes(license_data)
+                receipt = target / RECEIPT_NAMES[0 if scope != "flat" else 1]
+                assert "reflex_license" in {entry["key"] for entry in verify_native_receipt(str(receipt))["files"]}
+                assert restore_native(str(receipt)) == 0
+                assert (notice.read_bytes() if notice.exists() else None) == old_notice
+
+                target = game("race-" + scope)
+                if scope != "flat":
+                    (target / "Openvr" / "win64").mkdir(parents=True)
+                notice = target / fetch_reflex.LICENSE_NAME
+                before = snapshot(target)
+                write_receipt = _write_new_receipt
+
+                def publish_notice_after_receipt(path, value):
+                    write_receipt(path, value)
+                    publish_notice(notice)
+
+                arguments = ["--root", str(root), "--target", str(target), "--scope", scope]
+                with mock.patch.dict(globals(), {"_write_new_receipt": publish_notice_after_receipt}):
+                    assert main(arguments) == 1, "standard %s copy overwrote a concurrent PCL notice" % scope
+                assert notice.read_bytes() == other_notice
+                notice.unlink()
+                assert snapshot(target) == before, "standard %s collision did not roll back" % scope
+                with mock.patch.object(shutil, "copyfileobj", side_effect=failed_notice):
+                    assert main(arguments) == 1
+                assert snapshot(target) == before, "standard %s partial notice did not roll back" % scope
+
+            target = game("legacy", legacy=True)
+            receipt = Path(temporary) / "legacy-receipt.json"
+            arguments = ["--root", str(root), "--target", str(target), "--native-openxr", "--dll",
+                         "--native-receipt", str(receipt), "--tag", "reflex-test"]
+            before = snapshot(target)
+            assert main(arguments + ["--dry-run"]) == 0 and snapshot(target) == before
+            assert main(arguments) == 0
+            assert (target / fetch_reflex.LICENSE_NAME).read_bytes() == license_data
+            assert verify_native_receipt(str(receipt))["version"] == 1
+            assert restore_native(str(receipt)) == 0
+            assert not (target / fetch_reflex.LICENSE_NAME).exists()
+            assert (target / "d3d11.dll").read_bytes() == b"OLD GRAPHICS"
+
+            # A notice that appears after planning belongs to another publisher.
+            receipt.unlink()
+            before = snapshot(target)
+            notice = target / fetch_reflex.LICENSE_NAME
+            reserve_backup = _reserve_backup
+
+            def publish_notice_during_backup(path):
+                if not notice.exists():
+                    publish_notice(notice)
+                reserve_backup(path)
+
+            with mock.patch.dict(globals(), {"_reserve_backup": publish_notice_during_backup}):
+                assert main(arguments) == 1, "a concurrently created PCL notice was overwritten"
+            assert notice.read_bytes() == other_notice and not receipt.exists(), "rollback touched the other notice"
+            notice.unlink()
+            assert snapshot(target) == before, "PCL notice collision did not restore the DLLs"
+
+            # If our exclusive copy fails mid-write, restore both DLLs and
+            # remove the partial notice we created.
+            with mock.patch.object(shutil, "copyfileobj", side_effect=failed_notice):
+                assert main(arguments) == 1
+            assert snapshot(target) == before and not receipt.exists(), "PCL notice failure did not roll back"
+
+            target = game("direct", legacy=True)
+            arguments = ["--root", str(root), "--target", str(target), "--native-openxr", "--dll",
+                         "--no-backup", "--native-loader", str(build / "openxr_loader.dll")]
+            before = snapshot(target)
+            assert main(arguments + ["--dry-run"]) == 0 and snapshot(target) == before
+            notice = target / fetch_reflex.LICENSE_NAME
+
+            def game_stopped_after_notice(*args):
+                publish_notice(notice)
+                return True, False
+
+            with mock.patch.dict(globals(), {"strict_game_running": game_stopped_after_notice}):
+                assert main(arguments) == 1, "direct copy overwrote a concurrent PCL notice"
+            assert notice.read_bytes() == other_notice
+            notice.unlink()
+            assert snapshot(target) == before, "direct collision changed the native pair"
+            with mock.patch.object(shutil, "copyfileobj", side_effect=failed_notice):
+                assert main(arguments) == 1
+            assert snapshot(target) == before, "direct copy left a partial notice or changed the native pair"
+            assert main(arguments) == 0 and main(arguments + ["--verify-only"]) == 0
+            (target / fetch_reflex.LICENSE_NAME).unlink()
+            assert main(arguments + ["--verify-only"]) == 1
+
+            # Neither a bad source notice nor a stale sidecar can qualify a DLL.
+            target = game("missing-source")
+            arguments = ["--root", str(root), "--target", str(target), "--scope", "flat"]
+            for invalid in (b"invalid license", None):
+                source = build / fetch_reflex.LICENSE_NAME
+                if invalid is None:
+                    source.unlink()
+                else:
+                    source.write_bytes(invalid)
+                for route in ([], ["--dry-run"], ["--verify-only"]):
+                    before = snapshot(target)
+                    try:
+                        main(arguments + route)
+                        raise AssertionError("PCL source notice was not required")
+                    except SystemExit as error:
+                        assert "PCL-enabled graphics requires" in str(error)
+                    assert snapshot(target) == before
+            (build / "d3d11.dll").write_bytes(b"GRAPHICS WITHOUT PCL")
+            (build / fetch_reflex.LICENSE_NAME).write_bytes(b"stale license")
+            assert main(arguments) == 0
+            assert not (target / fetch_reflex.LICENSE_NAME).exists(), "stale notice enabled a non-PCL install"
+        return True
+    except (AssertionError, OSError, ValueError, SystemExit) as error:
+        print("Reflex license self-test failed: %s" % error)
+        return False
+
+
 def _xess_opt_in_self_test():
     """A plain flat install leaves a foreign XeSS DLL alone; explicit opt-in
     backs it up, and verification checks XeSS only when requested."""
@@ -4878,14 +5135,15 @@ def _epic_import_self_test():
         tools = root / "tools"
         tools.mkdir()
         for name in ("install_edup", "epic_library", "steam_library", "gen_installer_rc",
-                     "compile_only", "archive_game_exe", "build_receipt"):
+                     "compile_only", "archive_game_exe", "build_receipt", "fetch_reflex"):
             shutil.copyfile(Path(__file__).resolve().parent / (name + ".py"), tools / (name + ".py"))
         script = ("import runpy, sys; sys.path.insert(0, sys.argv[2]); sys.dont_write_bytecode = False; "
                   "runpy.run_path(sys.argv[1], run_name='edvr_import_fixture'); "
                   "assert sys.dont_write_bytecode is False")
         result = subprocess.run([sys.executable, "-I", "-c", script, str(tools / "install_edup.py"), str(tools)],
                                 cwd=str(root), capture_output=True, text=True)
-        if result.returncode != 0 or list(tools.glob("__pycache__/epic_library*.pyc")):
+        if result.returncode != 0 or any(list(tools.glob("__pycache__/%s*.pyc" % name))
+                                       for name in ("epic_library", "fetch_reflex")):
             print("Epic import self-test: new discovery import wrote bytecode or failed")
             return False
         return True
@@ -5276,6 +5534,7 @@ def self_test():
     if not _epic_discovery_self_test(): ok = False
     if not _archive_route_self_test(): ok = False
     if not _game_probe_self_test(): ok = False
+    if not _reflex_license_self_test(): ok = False
     if not _xess_opt_in_self_test(): ok = False
     if not _fsr4_opt_in_self_test(): ok = False
     if not _compile_only_self_test(): ok = False

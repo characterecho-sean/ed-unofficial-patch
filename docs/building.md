@@ -41,15 +41,27 @@ python tools\fetch_ffx_dx11.py
 python tools\fetch_xess.py
 python tools\fetch_fsr4.py
 python tools\fetch_openxr_loader.py
+python tools\fetch_reflex.py
 ```
 
-Each tool except the OpenXR loader's writes to its own folder under
-`%LOCALAPPDATA%\EDUP`, one copy per machine that every checkout uses. The build
-takes the first copy it finds, in this order: the SDK's environment variable,
-the checkout's `third_party\`, `%LOCALAPPDATA%\EDUP`, `%LOCALAPPDATA%\EDVR`. The
-last one is where the tools wrote before the rename to ED-UP. The build still
-reads it, and nothing writes, moves or deletes it. `python tools\sdk_paths.py`
-lists the copies on a machine.
+The OpenXR loader and Reflex fetchers use checkout-local folders by default.
+The other fetchers default to separate folders under `%LOCALAPPDATA%\EDUP`,
+shared by checkouts under the same user profile. For those SDKs, the build uses the
+SDK's environment variable when set. Otherwise it checks the checkout's
+`third_party\`, `%LOCALAPPDATA%\EDUP`, and `%LOCALAPPDATA%\EDVR` in that order.
+The last folder is the cache from before the rename to ED-UP. The build reads
+it as a fallback and leaves it in place. `python tools\sdk_paths.py` lists the
+shared cache locations.
+
+`fetch_reflex.py` stages and verifies NVIDIA's pinned Reflex statistics header
+and license in `third_party\reflex` by default. The native build fetches and
+verifies this dependency automatically. Set `EDUP_REFLEX_SDK` to use another
+verified SDK directory, or set it to `none` to build without the statistics
+integration and without the On / On + Boost modes. The Linux wrapper stages the
+default SDK before fingerprinting compile inputs; an explicit Wine SDK path
+must already contain the verified files. Binaries containing the statistics
+integration require `NVIDIA-REFLEX-LICENSE.txt`. Packaging and installation
+preserve that license beside the game.
 
 `fetch_fsr4.py` stages AMD's FidelityFX (FSR 4.1) headers and its two signed
 D3D12 DLLs (about 29 MB) into `%LOCALAPPDATA%\EDUP\fsr4-sdk`; `third_party\fsr4`

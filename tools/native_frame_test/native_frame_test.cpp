@@ -8,6 +8,8 @@
 #include "../../src/d3d11/native_on_foot.h"   // F36: weapon stability steps aside while native on foot is active
 #include "../../src/d3d11/native_on_foot_optic_capture.h"  // F76: bounded exact-image optic capture ledger
 #include "../../src/d3d11/native_on_foot_ads_incident.h"
+#include "../../src/d3d11/native_reflex.h"
+#include "../../src/d3d11/native_reflex_session.h"
 
 #include <d3d11.h>
 #include <immintrin.h>
@@ -139,6 +141,69 @@ bool journalOnFoot() { return g_onFoot; }
 
 using Microsoft::WRL::ComPtr;
 
+// Observe provider wiring without loading the system NVIDIA driver in the rig.
+namespace {
+struct LatencyDriverCall {
+    ID3D11Device* device;
+    edvr::native_reflex::Mode mode;
+    bool alreadyOwned;
+};
+std::vector<LatencyDriverCall> g_latencyCalls;
+std::vector<unsigned> g_latencySamples;
+unsigned g_latencyObservations = 0;
+std::vector<uint64_t> g_frameReports;
+bool g_reportFrameAvailable = true;
+bool g_frameTransportAvailable = true;
+bool g_refuseOff = false;
+std::shared_ptr<edvr::native_reflex::FrameDriver> g_frameTransport;
+}
+
+namespace edvr::native_reflex::detail {
+Result applyFrameMode(FrameDriver&, ID3D11Device* device, Mode mode, bool alreadyOwned) {
+    return apply(device, mode, alreadyOwned);
+}
+Result apply(ID3D11Device* device, Mode mode, bool alreadyOwned) {
+    g_latencyCalls.push_back({device, mode, alreadyOwned});
+    if (g_refuseOff && mode == Mode::Off) return {"fixture_refused", true, -1};
+    Result result{"fixture", true, 0, 0};
+    result.readback.lowLatencyMode = mode != Mode::Off;
+    return result;
+}
+Result observe(ID3D11Device*, Mode mode) {
+    ++g_latencyObservations;
+    Result result{"fixture", true, kUnavailable, 0};
+    result.readback.lowLatencyMode = mode != Mode::Off;
+    return result;
+}
+void logMode(Mode, const char*, uint64_t, const Result&, unsigned count) {
+    if (count) g_latencySamples.push_back(count);
+}
+}
+
+namespace edvr::native_reflex {
+// Engine/SDK lifecycle belongs to the separate integration module. This rig
+// keeps driver calls under its existing controlled mode-policy substitutes.
+FrameDriver::FrameDriver(ID3D11Device* device, bool ownGameSleep)
+    : device_(device), firstSleep_(ownGameSleep) { device_->AddRef(); }
+FrameDriver::~FrameDriver() { device_->Release(); }
+std::shared_ptr<FrameDriver> openFrameDriver(ID3D11Device* device) {
+    return std::shared_ptr<FrameDriver>(new FrameDriver(device, false));
+}
+FrameDriver* startFrameSession(ID3D11Device* device, uint64_t) {
+    g_frameTransport = g_frameTransportAvailable ? openFrameDriver(device) : nullptr;
+    fullFrameAvailable.store(g_frameTransportAvailable && g_reportFrameAvailable);
+    return g_frameTransport.get();
+}
+void stopFrameSession(uint64_t) noexcept {
+    fullFrameAvailable.store(false);
+    g_frameTransport.reset();
+}
+void reportFrameSession(uint64_t generation) noexcept {
+    g_frameReports.push_back(generation);
+    fullFrameAvailable.store(g_reportFrameAvailable);
+}
+}
+
 extern "C" uintptr_t g_weaponUiGetterTarget = 0;
 extern "C" uint64_t g_weaponUiProbeCalls = 0;
 extern "C" uint64_t g_weaponUiProbeArgs[2] = {};
@@ -262,6 +327,70 @@ int wmain(int argc, wchar_t** argv) {
                                       EDVR_NATIVE_FRAME_VERSION_1};
     check(edvrAcquireNativeFrame(&request, &blockedTable) == E_PENDING,
           "only one active provider session");
+    {
+        using edvr::native_reflex::Mode;
+        using edvr::native_reflex::updateOnGamePresent;
+        auto& cfg = edvr::Config::get();
+        const auto profile = edvr::runtimeProfileValue();
+        check(g_latencyCalls.size() == 1 && g_latencyCalls.back().mode == Mode::Off &&
+              !g_latencyCalls.back().alreadyOwned, "missing NVIDIA low latency setting defaults to Off in VR");
+
+        cfg.set("fix.nvidia_reflex", "BoOsT");
+        std::thread otherThread([&] { updateOnGamePresent(device.Get()); });
+        otherThread.join();
+        ComPtr<ID3D11Device> otherDevice;
+        check(SUCCEEDED(createDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                                     nullptr, 0, D3D11_SDK_VERSION, &otherDevice, nullptr, nullptr)),
+              "second WARP device for low latency ownership fence");
+        updateOnGamePresent(otherDevice.Get());
+        updateOnGamePresent(nullptr);
+        check(g_latencyCalls.size() == 1, "live change requires the acquired producer and device");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 2 && g_latencyCalls.back().device == device.Get() &&
+              g_latencyCalls.back().mode == Mode::Boost && !g_latencyCalls.back().alreadyOwned,
+              "the enrolled producer applies the first enabled choice without prior mode ownership");
+
+        for (unsigned i = 0; i < 3; ++i) updateOnGamePresent(device.Get());
+        check(g_latencySamples.empty(), "the Present applying the mode is outside the new observation window");
+        for (unsigned i = 3; i < 64; ++i) updateOnGamePresent(device.Get());
+        check(g_latencySamples == std::vector<unsigned>{4, 16, 64},
+              "accepted mode readback runs on the scheduled producer Presents");
+
+        // The source can change after the mode's observation window closes.
+        // Both stable Presents and a settings refresh must still report it.
+        const size_t stableDriverCalls = g_latencyCalls.size();
+        const unsigned stableReadbacks = g_latencyObservations;
+        size_t reports = g_frameReports.size();
+        for (unsigned i = 0; i < 3; ++i) updateOnGamePresent(device.Get());
+        check(g_frameReports.size() == reports + 3,
+              "stable Presents keep polling frame-source availability after the last readback");
+        g_reportFrameAvailable = false;
+        reports = g_frameReports.size();
+        updateOnGamePresent(device.Get());
+        check(g_frameReports.size() == reports + 1 && !edvr::native_reflex::availableForUser(),
+              "stable reporting still publishes the session's updated capability");
+        // Restore the controlled callback result before the next Present so
+        // this reporting check does not request a separate mode transition.
+        g_reportFrameAvailable = true;
+        edvr::native_reflex::fullFrameAvailable.store(true);
+        reports = g_frameReports.size();
+        cfg.set("fix.nvidia_reflex", "boost");
+        updateOnGamePresent(device.Get());
+        check(g_frameReports.size() == reports + 1 && g_frameReports.back() == request.generation,
+              "a refreshed INI with the same mode reports the enrolled session once");
+        check(g_latencyCalls.size() == stableDriverCalls && g_latencyObservations == stableReadbacks &&
+              g_latencySamples == std::vector<unsigned>{4, 16, 64},
+              "continued session reporting does not duplicate driver mode requests or completed readbacks");
+
+        edvr::runtimeProfileSet(edvr::RuntimeProfile::Flat);
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 3 && g_latencyCalls.back().mode == Mode::Off &&
+              g_latencyCalls.back().alreadyOwned, "switching to flat withdraws the VR mode");
+        edvr::runtimeProfileSet(profile);
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == 4 && g_latencyCalls.back().mode == Mode::Boost,
+              "switching back to VR restores the saved request");
+    }
     edvr::publishGameDevice(device.Get());
     edvr::announceSceneArrived();
 
@@ -6458,6 +6587,100 @@ int wmain(int argc, wchar_t** argv) {
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),
           "close retires announced consumer");
     check(table.close(table.context) == S_FALSE, "close is idempotent");
+    check(g_latencyCalls.size() == 5 && g_latencyCalls.back().device == device.Get() &&
+          g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off && g_latencyCalls.back().alreadyOwned,
+          "closing the XR session withdraws its driver request once");
+    edvr::Config::get().set("fix.nvidia_reflex", "on");
+    {
+        // A refused complete transport must not silently enable a partial
+        // driver-only mode through the old fallback.
+        g_frameTransportAvailable = false;
+        const auto calls = g_latencyCalls.size();
+        auto unavailableRequest = request;
+        unavailableRequest.generation = 42;
+        EdvrNativeFrameTable unavailable{sizeof(unavailable), EDVR_NATIVE_FRAME_VERSION_1};
+        check(edvrAcquireNativeFrame(&unavailableRequest, &unavailable) == S_OK &&
+                  g_latencyCalls.size() == calls,
+              "unavailable frame transport never enables a driver-only fallback");
+        check(unavailable.close(unavailable.context) == S_OK && g_latencyCalls.size() == calls,
+              "unavailable frame transport owns no mode cleanup");
+        g_frameTransportAvailable = true;
+    }
+    {
+        const auto calls = g_latencyCalls.size();
+        auto faultRequest = request;
+        faultRequest.generation = 43;
+        EdvrNativeFrameTable faultTable{sizeof(faultTable), EDVR_NATIVE_FRAME_VERSION_1};
+        check(edvrAcquireNativeFrame(&faultRequest, &faultTable) == S_OK &&
+                  g_latencyCalls.size() == calls + 1 &&
+                  g_latencyCalls.back().mode == edvr::native_reflex::Mode::On,
+              "a supported frame session accepts its requested mode");
+        edvr::native_reflex::fullFrameFaulted.store(true);
+        edvr::native_reflex::updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == calls + 2 &&
+                  g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off &&
+                  g_latencyCalls.back().alreadyOwned,
+              "a transport fault withdraws owned On on Present without an INI edit");
+        check(faultTable.close(faultTable.context) == S_OK,
+              "faulted mode session still closes normally");
+        edvr::native_reflex::fullFrameFaulted.store(false);
+    }
+    {
+        using edvr::native_reflex::ModeStatus;
+        using edvr::native_reflex::modeStatusForUser;
+        using edvr::native_reflex::updateOnGamePresent;
+        g_reportFrameAvailable = false;
+        auto pendingRequest = request;
+        pendingRequest.generation = 44;
+        EdvrNativeFrameTable pendingTable{sizeof(pendingTable), EDVR_NATIVE_FRAME_VERSION_1};
+        check(edvrAcquireNativeFrame(&pendingRequest, &pendingTable) == S_OK && modeStatusForUser() == ModeStatus::ConfirmedOff,
+              "an enrolled device stays Off while waiting for a qualified source");
+        const size_t whileUnavailable = g_latencyCalls.size();
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == whileUnavailable && modeStatusForUser() == ModeStatus::ConfirmedOff,
+              "a saved On setting cannot enable Reflex before frame-source qualification");
+
+        g_reportFrameAvailable = true;
+        updateOnGamePresent(device.Get());
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == whileUnavailable + 1 &&
+              g_latencyCalls.back().mode == edvr::native_reflex::Mode::On && modeStatusForUser() == ModeStatus::ConfirmedOn,
+              "the qualified source enables the saved On mode once");
+        const size_t beforeClose = g_latencyCalls.size();
+        check(pendingTable.close(pendingTable.context) == S_OK && g_latencyCalls.size() == beforeClose + 1 &&
+              g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off && g_latencyCalls.back().alreadyOwned,
+              "closing after qualification withdraws the owned On mode");
+    }
+    {
+        using edvr::native_reflex::ModeStatus;
+        using edvr::native_reflex::modeStatusForUser;
+        using edvr::native_reflex::updateOnGamePresent;
+        auto& config = edvr::Config::get();
+        auto retryRequest = request;
+        retryRequest.generation = 45;
+        EdvrNativeFrameTable retryTable{sizeof(retryTable), EDVR_NATIVE_FRAME_VERSION_1};
+        check(edvrAcquireNativeFrame(&retryRequest, &retryTable) == S_OK && modeStatusForUser() == ModeStatus::ConfirmedOn,
+              "the acquired On mode has a matching immediate driver readback");
+        g_refuseOff = true;
+        config.set("fix.nvidia_reflex", "off");
+        updateOnGamePresent(device.Get());
+        const size_t refused = g_latencyCalls.size();
+        check(modeStatusForUser() == ModeStatus::WithdrawalRefused,
+              "a refused Off publishes the withdrawal failure for F8");
+        g_refuseOff = false;
+        std::thread foreign([&] { for (unsigned i = 0; i < 5; ++i) updateOnGamePresent(device.Get()); });
+        foreign.join();
+        for (unsigned i = 0; i < 4; ++i) updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == refused && modeStatusForUser() == ModeStatus::WithdrawalRefused,
+              "only owned successful Presents advance the withdrawal backoff");
+        updateOnGamePresent(device.Get());
+        check(g_latencyCalls.size() == refused + 1 && g_latencyCalls.back().alreadyOwned &&
+              g_latencyCalls.back().mode == edvr::native_reflex::Mode::Off &&
+              modeStatusForUser() == ModeStatus::ConfirmedOff,
+              "a verified live withdrawal publishes confirmed Off for F8");
+        check(retryTable.close(retryTable.context) == S_OK && modeStatusForUser() == ModeStatus::Unavailable,
+              "closing clears the driver readback published to F8");
+    }
     check(table.beginFrame(table.context, &next, &lostOutput) == E_INVALIDARG,
           "closed context rejects callbacks");
 

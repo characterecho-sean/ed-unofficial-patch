@@ -23,6 +23,8 @@
 #include "desktop_window_cursor.h"   // desktopWindowNoteMouseCooperative: the game mouse's cooperative level, observed
 #include "joy_watch.h"
 #include "menu_pad.h"
+#include "native_reflex_pcl.h"
+#include "native_reflex_session.h"
 
 namespace edvr {
 namespace {
@@ -294,7 +296,7 @@ struct UserDoor {
     PFN_GetAsyncKeyState origAsync = nullptr;
     PFN_GetKeyState origKeyState = nullptr;
     PFN_GetKeyboardState origKeyboardState = nullptr;
-    PFN_PeekMessageA origPeek = nullptr;
+    std::atomic<bool> filterMessages{false}; // enabled by the keyboard gate
     bool retired2 = false;   // door 2 (the trio)
     bool retired3 = false;   // door 3 (the pump)
     std::atomic<uint32_t> asyncCalls{0};
@@ -1040,13 +1042,29 @@ bool isKeyboardMessage(UINT m) {
     }
 }
 
+// Reflex consumes only messages actually removed by the game's import. Flash
+// markers require a left-button edge on a window owned by this process.
+void noteRemovedReflexMessage(const MSG& msg) {
+    native_reflex::pcl::messageRemoved(msg.message);
+    if (msg.message == WM_QUIT) native_reflex::shutdownFrameTelemetry();
+    if (!msg.hwnd || (msg.message != WM_LBUTTONDOWN && msg.message != WM_LBUTTONUP &&
+                      msg.message != WM_LBUTTONDBLCLK)) return;
+    DWORD owner = 0;
+    if (GetWindowThreadProcessId(msg.hwnd, &owner) && owner == GetCurrentProcessId())
+        native_reflex::mouseMessageRemoved(msg.message != WM_LBUTTONUP);
+}
+
 BOOL WINAPI hookPeekMessageA(LPMSG msg, HWND hwnd, UINT lo, UINT hi, UINT remove) {
     BOOL r = FALSE;
+    // iatHookInstall publishes the original before publishing the thunk.
+    const auto original = reinterpret_cast<PFN_PeekMessageA>(g_user.peek.original);
     if (!guarded("inputGate/origPeekMessageA",
-                 [&] { r = g_user.origPeek(msg, hwnd, lo, hi, remove); })) {
+                 [&] { r = original(msg, hwnd, lo, hi, remove); })) {
         return FALSE;
     }
-    if (!r || !msg || g_user.retired3) return r;
+    if (!r || !msg) return r;
+    if (remove & PM_REMOVE) noteRemovedReflexMessage(*msg);
+    if (!g_user.filterMessages.load(std::memory_order_acquire) || g_user.retired3) return r;
     guardedBudget(g_budgetPump, [&] {
         const UINT m = msg->message;
         if (m == WM_INPUT) {
@@ -1583,10 +1601,7 @@ void installUserDoors() {
         g_user.origKeyboardState =
             reinterpret_cast<PFN_GetKeyboardState>(g_user.keyboardState.original);
     }
-    if (iatHookInstall("user32.dll", "PeekMessageA",
-                       reinterpret_cast<void*>(&hookPeekMessageA), &g_user.peek)) {
-        g_user.origPeek = reinterpret_cast<PFN_PeekMessageA>(g_user.peek.original);
-    }
+    if (inputGateInstallMessageObserver()) g_user.filterMessages.store(true, std::memory_order_release);
     iatHookEntryModule(g_user.asyncKey.original, mod, sizeof(mod));
     Log::get().note(
         "keyboard gate: the executable's import table -- GetAsyncKeyState %s, GetKeyState "
@@ -1729,6 +1744,12 @@ void inputGateConfigure(Config& cfg) {
         g_private.store(0);
         cancelReleaseTail();
     }
+}
+
+bool inputGateInstallMessageObserver() {
+    CaptureLock lock;
+    if (g_user.peek.applied) return g_user.peek.slot && *g_user.peek.slot == g_user.peek.replacement;
+    return iatHookInstall("user32.dll", "PeekMessageA", reinterpret_cast<void*>(&hookPeekMessageA), &g_user.peek);
 }
 
 static void installKeyboardDoors() {
@@ -1987,7 +2008,7 @@ void inputGateStatusLine(char* buf, size_t bufLen) {
     bool di = false, reached = false;
     doorEvidence(&di, &reached);
     const bool trio = g_user.asyncKey.applied && !g_user.retired2;
-    const bool pump = g_user.peek.applied && !g_user.retired3;
+    const bool pump = g_user.filterMessages.load(std::memory_order_acquire) && !g_user.retired3;
     snprintf(buf, bufLen, "keys %s -- doors: dinput %s%s, key-state %s, pump %s",
              g_private.load() ? "PRIVATE" : (g_privateWanted ? "private when open" : "shared"),
              di ? "on" : "off", di ? (reached ? " (game reaches it)" : " (not reached yet)") : "",
@@ -2009,7 +2030,11 @@ void inputGateShutdown() {
     g_summon.store(0);
     cancelReleaseTail();
     iatHookUninstall(&g_createImport);
-    iatHookUninstall(&g_user.peek);
+    {
+        CaptureLock lock;
+        g_user.filterMessages.store(false, std::memory_order_release);
+        iatHookUninstall(&g_user.peek);
+    }
     iatHookUninstall(&g_user.keyboardState);
     iatHookUninstall(&g_user.keyState);
     iatHookUninstall(&g_user.asyncKey);

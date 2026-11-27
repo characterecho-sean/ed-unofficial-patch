@@ -3,8 +3,18 @@
 #include <windows.h>
 static HWND testPadForeground = nullptr;
 static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
+static HWND testForeignMessageWindow = reinterpret_cast<HWND>(static_cast<ULONG_PTR>(0x1234));
+static DWORD WINAPI testGetWindowThreadProcessId(HWND hwnd, LPDWORD process) {
+    if (hwnd == testForeignMessageWindow) {
+        if (process) *process = GetCurrentProcessId() + 1;
+        return 1;
+    }
+    return GetWindowThreadProcessId(hwnd, process);
+}
 #define GetForegroundWindow testGetForegroundWindow
+#define GetWindowThreadProcessId testGetWindowThreadProcessId
 #include "../../src/d3d11/input_gate.cpp"
+#undef GetWindowThreadProcessId
 #undef GetForegroundWindow
 
 #include <array>
@@ -17,6 +27,17 @@ static HWND WINAPI testGetForegroundWindow() { return testPadForeground; }
 #include <thread>
 
 #include "../../src/d3d11/loaded_module_match.h"
+
+namespace edvr::native_reflex {
+unsigned testNormalQuits = 0;
+std::vector<bool> testRemovedMouseButtons;
+void mouseMessageRemoved(bool down) noexcept { testRemovedMouseButtons.push_back(down); }
+void shutdownFrameTelemetry() noexcept { ++testNormalQuits; }
+namespace pcl {
+unsigned testRemovedMessages = 0;
+bool messageRemoved(uint32_t) noexcept { ++testRemovedMessages; return true; }
+}
+}
 
 using namespace edvr;
 
@@ -1071,6 +1092,108 @@ static void releaseTailInterleavingCases() {
 
 static void releaseLogCases();
 
+namespace {
+MSG mouseQueuedMessage{};
+BOOL mousePeekResult = TRUE;
+unsigned mousePeekCalls = 0;
+HWND mousePeekFilter = nullptr;
+UINT mousePeekLo = 0, mousePeekHi = 0, mousePeekRemove = 0;
+BOOL WINAPI mousePeekOriginal(LPMSG out, HWND hwnd, UINT lo, UINT hi, UINT remove) {
+    ++mousePeekCalls;
+    mousePeekFilter = hwnd; mousePeekLo = lo; mousePeekHi = hi; mousePeekRemove = remove;
+    if (out && mousePeekResult) *out = mouseQueuedMessage;
+    return mousePeekResult;
+}
+}
+
+static void passiveMessageCases() {
+    inputGateShutdown();
+    Config::get().set("advanced.input_gate", "0");
+    inputGateInstall();
+    check(inputGateInstallMessageObserver() && g_user.peek.applied && !g_user.asyncKey.applied && !g_gateEnabled,
+          "disabled input gate retains only a passive game message observer");
+    if (g_user.peek.applied) {
+        MSG observed{};
+        PeekMessageA(&observed, nullptr, WM_APP, WM_APP, PM_NOREMOVE);  // create the rig thread's queue
+        g_private.store(1);
+        const auto pings = native_reflex::pcl::testRemovedMessages;
+        const UINT ping = WM_APP + 27;
+        check(PostThreadMessageA(GetCurrentThreadId(), ping, 0, 0) &&
+              PeekMessageA(&observed, nullptr, ping, ping, PM_NOREMOVE) &&
+              native_reflex::pcl::testRemovedMessages == pings &&
+              PeekMessageA(&observed, nullptr, ping, ping, PM_REMOVE) && observed.message == ping &&
+              native_reflex::pcl::testRemovedMessages == pings + 1,
+              "the executable import routes only a removed ping to PCL with the keyboard gate off");
+        check(PostThreadMessageA(GetCurrentThreadId(), WM_KEYDOWN, VK_RETURN, 0) &&
+              PeekMessageA(&observed, nullptr, WM_KEYDOWN, WM_KEYDOWN, PM_REMOVE) && observed.message == WM_KEYDOWN,
+              "passive observer leaves key messages untouched even when privacy was requested");
+        PostQuitMessage(37);
+        const auto quits = native_reflex::testNormalQuits;
+        check(PeekMessageA(&observed, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE) && observed.wParam == 37 &&
+              native_reflex::testNormalQuits == quits + 1 && observed.message == WM_QUIT,
+              "passive observer forwards normal shutdown with input gating disabled");
+    }
+    inputGateShutdown(); g_installTried = false;
+    Config::get().set("advanced.input_gate", "1");
+}
+
+// Exercise the forward contract directly, including empty and unsuccessful
+// dequeues whose output still contains old input or quit messages.
+static void reflexMessageCases() {
+    HWND window = CreateWindowExW(0, L"STATIC", L"ED-UP Reflex message test", 0,
+                                 0, 0, 1, 1, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(window != nullptr, "the Reflex message test owns a same-process window");
+    if (!window) return;
+    const auto original = g_user.peek.original;
+    const bool retired = g_user.retired3;
+    g_user.peek.original = reinterpret_cast<void*>(&mousePeekOriginal);
+    g_user.retired3 = true;
+    mousePeekCalls = 0;
+    mousePeekResult = 7;
+    mouseQueuedMessage = {};
+    mouseQueuedMessage.hwnd = window;
+    mouseQueuedMessage.message = WM_LBUTTONDOWN;
+    mouseQueuedMessage.wParam = MK_LBUTTON;
+    mouseQueuedMessage.lParam = MAKELPARAM(37, 51);
+    MSG observed{};
+    auto& clicks = native_reflex::testRemovedMouseButtons;
+    clicks.clear();
+    check(hookPeekMessageA(&observed, window, WM_MOUSEFIRST, WM_MOUSELAST, PM_NOREMOVE) == 7 &&
+          clicks.empty() && mousePeekCalls == 1 && mousePeekFilter == window && mousePeekLo == WM_MOUSEFIRST &&
+          mousePeekHi == WM_MOUSELAST && mousePeekRemove == PM_NOREMOVE && memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+          "an unconsumed mouse message preserves the original call and result without reporting a click");
+    for (UINT msg : {WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK}) {
+        mouseQueuedMessage.message = msg;
+        check(hookPeekMessageA(&observed, window, 0, 0, PM_REMOVE | PM_NOYIELD) == 7 &&
+              memcmp(&observed, &mouseQueuedMessage, sizeof(MSG)) == 0,
+              "a removed click edge preserves the message and original return value");
+    }
+    check(clicks == std::vector<bool>({true, false, true}),
+          "owned left-button down, up and double-click report the three SDK edges in order");
+    mouseQueuedMessage.message = WM_RBUTTONDOWN;
+    hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE);
+    mouseQueuedMessage.message = WM_LBUTTONDOWN;
+    for (HWND other : {static_cast<HWND>(nullptr), testForeignMessageWindow}) {
+        mouseQueuedMessage.hwnd = other;
+        hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE);
+    }
+    check(clicks.size() == 3, "unrelated buttons and thread or foreign-window messages cannot report Reflex clicks");
+    mouseQueuedMessage.message = WM_QUIT;
+    const unsigned quits = native_reflex::testNormalQuits;
+    hookPeekMessageA(&observed, nullptr, 0, 0, PM_NOREMOVE);
+    mousePeekResult = FALSE;
+    check(!hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) && native_reflex::testNormalQuits == quits,
+          "peeked or stale quit messages cannot stop telemetry");
+    mousePeekResult = TRUE;
+    check(hookPeekMessageA(nullptr, nullptr, 0, 0, PM_REMOVE) && native_reflex::testNormalQuits == quits &&
+          hookPeekMessageA(&observed, nullptr, 0, 0, PM_REMOVE) && observed.message == WM_QUIT &&
+          native_reflex::testNormalQuits == quits + 1,
+          "only a removed quit stops telemetry even after keyboard filtering has retired");
+    g_user.peek.original = original;
+    g_user.retired3 = retired;
+    DestroyWindow(window);
+}
+
 int main(int argc, char** argv) {
     (void)keepPadImport;
     if (argc > 1 && strcmp(argv[1], "--interleave-only") == 0) {
@@ -1080,6 +1203,8 @@ int main(int argc, char** argv) {
         printf("\nINPUT GATE TEST %s\n", failures ? "FAILED" : "PASSED");
         return failures ? 1 : 0;
     }
+    passiveMessageCases();
+    reflexMessageCases();
     padHookCases();
     loadedModuleMatchCases();
     auto dummyTable = deviceTable(), table1 = deviceTable(), table2 = deviceTable();
@@ -1161,7 +1286,8 @@ int main(int argc, char** argv) {
     g_user.origAsync = &physicalKey;
     g_user.origKeyState = &physicalKey;
     g_user.origKeyboardState = &physicalState;
-    g_user.origPeek = &nextMessage;
+    g_user.peek.original = reinterpret_cast<void*>(&nextMessage);
+    g_user.filterMessages.store(true);
     physical[VK_ESCAPE] = physical[VK_TAB] = true;
     check(hookGetAsyncKeyState(VK_ESCAPE) == 0 && hookGetKeyState(VK_TAB) == 0,
           "user32 polling is private while the menu is open");

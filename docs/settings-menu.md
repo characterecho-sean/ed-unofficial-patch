@@ -12,12 +12,12 @@
   - Hotkeys page (2026-10-08): key, pad or HOTAS rebinding of the menu, AA
     comparison, exposure and history keys (Explorer Cam's key until F98). FLOWN
     OK ("worked great"). Section "Hotkeys page" below.
-  - Performance page: one `UI quality` row (`fix.ui_quality`, off / 100% /
-    125%; default 100) drives the cockpit panels' size and the UI layer;
-    BUILT, NOT FLOWN as of its 2026-09-23 entry. Gone: the `HUD quality` row,
-    `advanced.ui_replay` (retired 48ad7689), the Foveation centre row
-    (`experimental.foveation_centre`) and the three `Trim view` rows (ini-only
-    since 2026-09-29). Its `Settlement detail` row: removed 2026-10-08 (claude/remove-settlement-detail).
+  - **NVIDIA low latency:** native Windows validation and simulated-HMD measurements; physical headset flight remains separate evidence.
+    The `UI quality` row (`fix.ui_quality`, off / 100% / 125%, default 100) drives the cockpit
+    panels' size and the UI layer. BUILT, NOT FLOWN as of its 2026-09-23 entry. Removed controls
+    include the `HUD quality` row, `advanced.ui_replay` (retired 48ad7689), the Foveation centre row
+    (`experimental.foveation_centre`) and the three `Trim view` rows (ini-only since 2026-09-29).
+    The `Settlement detail` row was removed 2026-10-08 (claude/remove-settlement-detail).
   - Monitor page: no rows the compositor's frame timing filled (frame_flag v34).
   - Single-line overlay: fits its text, keeps its font size across OpenXR
     resolutions, shows application GPU/CPU timings. Full desktop gates
@@ -286,6 +286,36 @@ dim rule reads the running profile's own anti-aliasing: the flat mode in flat, `
 that is not in `[fix]` and on a key `kFlatPageRows` does not list (the row would be on no menu at all); the
 rigs `flat_sharpen_test` and `sharp_weapons_test` hold the placement, the dimming and VR's page. The installer's
 window, VR view, still lists the row.
+
+### NVIDIA low latency
+
+The VR Performance page offers **NVIDIA low latency** (`fix.nvidia_reflex`).
+**Off** is the default and withdraws a request ED-UP owns while keeping frame
+instrumentation active. Older profiles saved with Auto use Off. **On** enables
+the per-frame low latency mode for an eligible native VR session. **On +
+Boost** also requests higher GPU clocks. The row dims when unavailable and Off
+remains selectable for recovery. A saved On choice waits until the paired
+runtime, SDK and actual rendered-frame source are available. The original game
+mirror (`Mirror window` > `Image` > `Game`) cannot supply that source; select
+an ED-UP eye image to make it eligible. [NVIDIA Reflex programming
+guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideReflex.md#80-nvidia-reflex-qa-checklist)
+
+ED-UP checks the device's existing low latency and sleep state before it
+changes the mode. A reported existing policy or an unreadable baseline prevents
+ED-UP from taking ownership. The graphics log records the request and immediate
+result (`native_reflex`). After an accepted request it samples driver status
+after 4, 16 and 64 successful game Presents (`native_reflex_readback`). A
+failed owned withdrawal, or an enabled/unknown final Off readback, schedules
+bounded retries after 4, 16 and 64 subsequent successful Presents. Normal VR
+shutdown retains one final Off attempt. F8 shows driver proof or failure
+separately from the saved choice.
+
+The driver reports the effective low latency bit. Boost is recorded as a
+request, and its effect would need a GPU clock measurement. The feature uses
+NVAPI mode controls, per-frame Sleep, latency markers and latency reports.
+OpenXR continues to pace the headset. See the [frame timing and measurement
+limits](input-latency.md#reflex-frame-timing). [NVIDIA's NVAPI
+reference](https://docs.nvidia.com/nvapi/group__dx.html)
 
 ### XeSS Frame Generation rows (2026-11-12)
 

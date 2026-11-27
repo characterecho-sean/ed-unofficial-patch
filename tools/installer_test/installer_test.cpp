@@ -207,6 +207,7 @@ static const TestTableRow kTestTable[] = {
     {"settings_flat", TargetRoot::Game, "edvr-flat.ini", kProfileFlat, false, nullptr, ExistingMode::Settings},
     {"dittosr_license", TargetRoot::Game, "DITTOSR-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Owned},
     {"dittosr_gsr_license", TargetRoot::Game, "DITTOSR-GSR-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Owned},
+    {"reflex_license", TargetRoot::Game, "NVIDIA-REFLEX-LICENSE.txt", kProfileAll, false, nullptr, ExistingMode::Replace},
     {"dlss", TargetRoot::Game, "nvngx_dlss.dll", 0, true, nullptr, ExistingMode::Owned},
     {"xess", TargetRoot::Game, "libxess.dll", 0, false, nullptr, ExistingMode::Owned},
     {"xess_license", TargetRoot::Game, "INTEL-XESS-LICENSE.txt", 0, false, nullptr, ExistingMode::Owned},
@@ -5811,6 +5812,25 @@ static void testFlatSettingsWindow(const std::wstring& root, const std::wstring&
         check(rowFor(vr, "fix.ui_quality") != static_cast<size_t>(-1), "and VR shows the rows flat shows");
     }
 
+    {
+        const std::wstring dir = joinPath(scratch, L"settings-legacy-reflex");
+        makeTree(dir);
+        const std::wstring path = joinPath(dir, L"edup.ini");
+        const std::string old = "[fix]\r\nnvidia_reflex = AuTo\r\n";
+        writeAll(path, old);
+        SettingsModel model;
+        model.load(dir, "vr");
+        const size_t index = rowFor(model, "fix.nvidia_reflex");
+        check(index != SIZE_MAX, "the VR settings window exposes NVIDIA low latency");
+        if (index != SIZE_MAX) {
+            const auto& row = model.rows()[index];
+            expectEq(row.def->choices, "off=Off|on=On|boost=On + Boost", "the Reflex selector offers three driver modes");
+            expectEq(row.value, "off", "an old Auto preference shows Off on first open");
+            check(row.isRecommended, "the migrated preference matches the recommended mode");
+            expectEq(readAll(path), old, "opening the selector preserves the original file");
+        }
+    }
+
     {   // A file from before the movie setting moved to [visual]: the window reads it the way the runtime does, through the moved-from map
         // (settings.cpp kMovedSettings, generated from edup.ini), in both views.
         const std::wstring dir = joinPath(scratch, L"flatset-window-moved");
@@ -7696,6 +7716,7 @@ static void testManifestFiles(const std::wstring& root) {
 
     {   // The test table is the packager's table: same ids, targets, conditions and behaviours, so a test payload is a real one's shape.
         const std::string text = readTextFile(joinPath(root, L"tools\\package_native.py"));
+        const std::string reflexFetcher = readTextFile(joinPath(root, L"tools\\fetch_reflex.py"));
         check(!text.empty(), "tools\\package_native.py is readable from the root");
         size_t count = 0;
         for (size_t at = text.find("PackagedFile(\""); at != std::string::npos; at = text.find("PackagedFile(\"", at + 1)) ++count;
@@ -7707,7 +7728,12 @@ static void testManifestFiles(const std::wstring& root) {
             std::string decl = text.substr(at, text.find("),", at) - at + 2);
             const char* when = row.option ? "_EDHM_OPT" : row.nvidia ? "_NVIDIA" : row.profiles == kProfileAll ? "_EITHER" : row.profiles == kProfileVr ? "_VR"
                               : row.profiles == kProfileFlat ? "_FLAT" : "None";
-            const std::string tail = std::string("\"") + (row.root == TargetRoot::Game ? "game" : "openvr") + "\", \"" + row.path + "\"";
+            const std::string literalPath = std::string("\"") + row.path + "\"";
+            // The packager uses the SDK fetcher's filename constant as the Reflex target.
+            const bool matchesReflexConstant = std::string(row.id) == "reflex_license" &&
+                reflexFetcher.find("LICENSE_NAME = " + literalPath) != std::string::npos;
+            const std::string tail = std::string("\"") + (row.root == TargetRoot::Game ? "game" : "openvr") + "\", " +
+                (matchesReflexConstant ? "fetch_reflex.LICENSE_NAME" : literalPath);
             std::string flattened;
             for (char c : decl) if (c != '\n' && c != '\r') flattened += c;
             std::string squeezed;
@@ -7719,6 +7745,27 @@ static void testManifestFiles(const std::wstring& root) {
 
     const std::wstring dir = L"C:\\Games\\ED\\Products\\elite-dangerous-odyssey-64";
     const Options options = testOptions();
+
+    {   // The exact Reflex notice is required in any scope containing PCL graphics.
+        PayloadInfo p = testPayload(kNextIni);
+        tset(p, "reflex_license", "reflex-required");
+        const auto notice = joinPath(dir, L"NVIDIA-REFLEX-LICENSE.txt");
+        Survey s = baseSurvey(dir);
+        s.targets.push_back(fakeDll(DllKind::Foreign, notice, "foreign-notice"));
+        for (const char* scope : {"both", "vr", "flat"}) {
+            Options scoped = options;
+            scoped.scope = scope;
+            const Plan plan = planInstall(s, scoped, p);
+            const auto backup = std::find_if(plan.steps.begin(), plan.steps.end(), [&](const Step& step) {
+                return step.action == Action::Backup && step.from == notice && step.required && step.expectSha == "foreign-notice";
+            });
+            const auto write = std::find_if(plan.steps.begin(), plan.steps.end(), [&](const Step& step) {
+                return step.action == Action::WritePayload && step.to == notice && step.item == "reflex_license";
+            });
+            check(!plan.blocked && backup < write && write != plan.steps.end(),
+                  (std::string("backs up a conflicting Reflex notice before installing the required copy for ") + scope).c_str());
+        }
+    }
 
     {   // A file this planner was never written for: id extra_dll, game root, replace, flat profile only. It is placed and backed up by
         // the manifest's word alone.

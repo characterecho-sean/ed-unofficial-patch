@@ -5,6 +5,8 @@
 #include "gpu_frame_timing.h"
 #include "flat_cpu_trace.h"   // the flat profile's CPU markers: event 5 per owned Present, spans 0x200-0x207
 #include "gpu_census.h"   // gpuCensusFrameWorkOpen/End: the frame's GPU work span's door end (2026-10-14)
+#include "native_reflex.h"
+#include "native_reflex_session.h"
 #include "native_timing.h"
 #include "../common/native_present_trace.h"
 
@@ -1955,11 +1957,19 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         Log::get().note("%s", line);
     }
     if (flatProfileNow && !(flags & DXGI_PRESENT_TEST)) concoursePaneBakePresent(self);   // TEMPORARY (the concourse bake): keeps the back buffer, or puts the kept image back. One load otherwise
+    // The mirror supplies its retained eye's exact logical source. A stale,
+    // mixed or ordinary game mirror has no qualified source and emits none.
+    const auto mirrorSource = desktopWindowPresentSource();
+    const auto reflexPresent = !(flags & DXGI_PRESENT_TEST) && !xessFgOwns(self)
+        ? native_reflex::beginFramePresent(dev, mirrorSource)
+        : native_reflex::PresentFrameReceipt{};
     const int64_t presentT0 = qpcNow();
     // A bridged swap chain (xess_fg.h) lives on a hidden window and is never presented: its frame goes to the XeSS-FG proxy.
     const HRESULT hr = xessFgOwns(self) ? xessFgPresent(self, presentSync, flags)
                                         : g_state->realPresent(self, presentSync, flags);
     const int64_t presentT1 = qpcNow();
+    if (native_reflex::endFramePresent(reflexPresent, hr))
+        desktopWindowCommitPresentSource(mirrorSource);
     // The stall sampler's heartbeat (stall_watch.h): the render thread has just presented. A relaxed store and a
     // compare; the first call starts the watchdog thread, or says that advanced.freeze_location turned it off.
     // frameCounter is the frame this Present ended, the number the long-frame lines call "frame".
@@ -2033,6 +2043,10 @@ HRESULT STDMETHODCALLTYPE hookedPresent(IDXGISwapChain* self, UINT syncInterval,
         presentFrameBoundary();
         span.finishVoid(0);
     }
+    // The boundary has committed any settings reload or profile transition.
+    // Only an accepted image advances the Reflex readback and retry cadence.
+    if (hr == S_OK && !(flags & DXGI_PRESENT_TEST))
+        native_reflex::updateOnGamePresent(dev);
     const int64_t boundaryT1 = qpcNow();
     // Whatever the boundary did after its last tick (all of it, when
     // graphicsRuntimeDisabled cut it short), and the end of the boundary's ticks.

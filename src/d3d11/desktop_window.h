@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include "../common/native_reflex_frame.h"
 
 struct IDXGISwapChain;
 struct ID3D11Device;
@@ -34,5 +35,11 @@ void desktopWindowNoteSkippedDraw(ID3D11DeviceContext* ctx, char kind, uint64_t 
 // Elite's Present, before the real call, on the render thread. flatProfile: the flat profile is active (the feature never runs there). Returns true when the feature
 // was doing anything this Present (the caller marks the frame tick). Never throws; a fault stands the feature down for the session.
 bool desktopWindowPresent(IDXGISwapChain* swapChain, ID3D11Device* device, unsigned presentFlags, bool flatProfile);
+// Current Present thread's exact successfully drawn eye source. Reset on
+// every desktopWindowPresent call; absent, mixed, reused and repeated sources
+// return zero. Read immediately after drawing, before the actual DXGI call.
+EdvrNativeReflexSource desktopWindowPresentSource() noexcept;
+// Consume this exact retained source after its real DXGI Present returns S_OK.
+void desktopWindowCommitPresentSource(const EdvrNativeReflexSource&) noexcept;
 
 }  // namespace edvr

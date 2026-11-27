@@ -60,7 +60,10 @@ struct Held {
     float bounds[4] = {0, 0, 1, 1};
     bool meshServed = false;    // the runtime has served the game a hidden-area mesh (version 3 of the export; version 1 never says: false)
     uint64_t serial = 0;
+    EdvrNativeReflexSource source{};
 };
+thread_local EdvrNativeReflexSource g_presentSource{};
+EdvrNativeReflexSource g_lastPresentedSource{}; // owned Present thread only
 std::mutex g_mutex;
 Held g_held[2];
 constexpr unsigned kRetireMax = 8;
@@ -83,6 +86,8 @@ HRESULT noteEyeWith(void* context, uint32_t eye, ID3D11Texture2D* texture, const
         if (!std::isfinite(bounds[i])) return E_INVALIDARG;
     }
     if (!(g_wantMask.load(std::memory_order_relaxed) & (1u << eye))) return S_FALSE;
+    EdvrNativeReflexSource source{};
+    native_reflex::readSource(texture, source);
     texture->AddRef();
     ID3D11Texture2D* spill = nullptr;
     {
@@ -96,6 +101,7 @@ HRESULT noteEyeWith(void* context, uint32_t eye, ID3D11Texture2D* texture, const
         std::memcpy(h.bounds, bounds, sizeof h.bounds);
         h.meshServed = meshServed;
         h.serial = ++g_serial;
+        h.source = source;
         g_retirePending.store(g_retiredCount, std::memory_order_relaxed);
     }
     g_holding.store(true, std::memory_order_relaxed);
@@ -319,6 +325,7 @@ struct Snap {
     float bounds[2][4] = {};
     bool meshServed[2] = {};
     uint64_t serial[2] = {};
+    EdvrNativeReflexSource source[2]{};
 };
 void snapshot(Snap& s, unsigned need) {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -328,6 +335,7 @@ void snapshot(Snap& s, unsigned need) {
         std::memcpy(s.bounds[eye], g_held[eye].bounds, sizeof s.bounds[eye]);
         s.meshServed[eye] = g_held[eye].meshServed;
         s.serial[eye] = g_held[eye].serial;
+        s.source[eye] = g_held[eye].source;
     }
 }
 
@@ -881,13 +889,14 @@ struct SavedState {
 };
 
 struct EyeDraw {
+    unsigned eye;
     ID3D11ShaderResourceView* view;
     const float* bounds;
     DwPixelRect rect;
 };
 
 // Clears the buffer to black and draws the eyes, on Elite's immediate context, under the world route's internal scope so EDVR's own hooks and census step aside.
-void drawEyes(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target, const EyeDraw* eyes, unsigned count) {
+unsigned drawEyes(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target, const EyeDraw* eyes, unsigned count) {
     VrWorldInternalScope internal;
     SavedState saved;
     saved.capture(ctx);
@@ -909,6 +918,7 @@ void drawEyes(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target, const Ey
     ID3D11Buffer* cb = p.cb.Get();
     ctx->PSSetSamplers(0, 1, &sampler);
     ctx->PSSetConstantBuffers(0, 1, &cb);
+    unsigned drawnEyes = 0;
     for (unsigned i = 0; i < count; ++i) {
         const EyeDraw& e = eyes[i];
         D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -923,10 +933,12 @@ void drawEyes(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* target, const Ey
         ctx->RSSetViewports(1, &vp);
         ctx->PSSetShaderResources(0, 1, &e.view);
         ctx->Draw(3, 0);
+        drawnEyes |= 1u << e.eye;
     }
     ID3D11ShaderResourceView* none = nullptr;
     ctx->PSSetShaderResources(0, 1, &none);   // the eye textures are not left bound
     saved.restore(ctx);
+    return drawnEyes;
 }
 
 enum class Outcome { Drew, Declined };
@@ -1128,12 +1140,27 @@ Outcome presentActive(IDXGISwapChain* swap, ID3D11Device* device, uint64_t now, 
     if (stale) ++S.stale;
 
     EyeDraw draws[2];
+    EdvrNativeReflexSource sources[2]{};
+    for (unsigned eye = 0; eye < 2; ++eye) if (need & (1u << eye)) {
+        EdvrNativeReflexSource live{};
+        if (native_reflex::readSource(snap.texture[eye].Get(),live) && native_reflex::sameSource(live,snap.source[eye]))
+            sources[eye]=snap.source[eye];
+    }
     for (unsigned i = 0; i < count; ++i) {
+        draws[i].eye = eyeIndex[i];
         draws[i].view = use[eyeIndex[i]].view.Get();
         draws[i].bounds = cropBounds[eyeIndex[i]];
         draws[i].rect = rects[i];
     }
-    drawEyes(ctx.Get(), rtv.Get(), draws, count);
+    const unsigned drawnEyes = drawEyes(ctx.Get(), rtv.Get(), draws, count);
+    auto source = native_reflex::selectMirrorSource(sources, need, drawnEyes, g_lastPresentedSource);
+    // The held COM reference preserves the object, not its contents. A
+    // changed source stamp during selection/draw makes ownership unknown.
+    for (unsigned eye = 0; eye < 2; ++eye) if (need & (1u << eye)) {
+        EdvrNativeReflexSource live{};
+        if (!native_reflex::readSource(snap.texture[eye].Get(),live) || !native_reflex::sameSource(live,source)) source={};
+    }
+    if (native_reflex::validSource(source)) g_presentSource=source;
     ++S.drawn;
     return Outcome::Drew;
 }
@@ -1167,6 +1194,7 @@ void desktopWindowNoteSkippedDraw(ID3D11DeviceContext* ctx, char kind, uint64_t 
 }
 
 bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned presentFlags, bool flatProfile) {
+    g_presentSource={};
     if (presentFlags & DXGI_PRESENT_TEST) return false;
     if (S.dead) return false;
     drainRetired();
@@ -1233,6 +1261,13 @@ bool desktopWindowPresent(IDXGISwapChain* swap, ID3D11Device* device, unsigned p
     }
     if (g_holding.load(std::memory_order_relaxed) && (!need || !fresh)) releaseHeld();
     return wasActive || need != 0;
+}
+
+EdvrNativeReflexSource desktopWindowPresentSource() noexcept { return g_presentSource; }
+void desktopWindowCommitPresentSource(const EdvrNativeReflexSource& source) noexcept {
+    // A draw can precede the second eye's acceptance. Only the frame owner
+    // can consume this source after validating the complete stereo pair.
+    if (native_reflex::sameSource(source, g_presentSource)) g_lastPresentedSource = source;
 }
 
 }  // namespace edvr

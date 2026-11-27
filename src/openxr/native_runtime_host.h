@@ -43,6 +43,7 @@
 #include "native_frame_client.h"
 #include "native_fov_trim.h"
 #include "native_timing_client.h"
+#include "native_reflex_frame_client.h"
 #include "device_gpu_timing.h"
 #include "producer_gpu_timing.h"
 #include "submission_stats.h"
@@ -312,6 +313,13 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
   OnFootRecorderClient onFootRec;            // F213: the on-foot flight recorder's records (rt_eye, rt_recentre), handed to the graphics half's export (optional)
   double recEyePrevWanted[3]={},recEyePrevApplied[3]={};   // F213: eyePoll's wanted and applied offsets at its last record, to tell a change
   NativeTimingClient timing;
+  NativeReflexFrameClient reflexFrames;
+  struct ReflexFinalEye {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    EdvrNativeReflexSource source{};
+  };
+  std::mutex reflexFinalMutex;
+  ReflexFinalEye reflexFinalEyes[2];
   DeviceGpuTiming deviceTiming;
   bool deviceTimingReady=false;
   // Producer-side (Elite's own device) copy timing; separate from deviceTiming
@@ -1579,6 +1587,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         case SeatIntro::Sampling: case SeatIntro::Retry: break;     // the ask stays; the next frame samples or applies again
       }
     }
+    // No prior eye remains source-labelled when the next pose/frame can
+    // start overwriting the producer's reusable output textures.
+    clearReflexFinalEyes(0);
     timingRetire(); // Provider waitBegin rejects an unfinished previous pair.
     timingSequence=timing.waitBegin(); timingFrameActive=timingSequence!=0;
     timingApplicationSequence.store(timingSequence,std::memory_order_release);
@@ -1827,6 +1838,32 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     auto operation=gate.tryEnter(runtimeGeneration);
     // Standing/raw need their own supported runtime spaces and remain absent.
     return operation&&generation==compositorGeneration&&seated.space()&&origin==vr::TrackingUniverseSeated;
+  }
+  void reflexPoseConsumed(uint64_t sequence) override {
+    // Called only after the OpenVR ABI has copied the render pose into the
+    // game's buffer. The graphics provider resolves this caller's Late job.
+    reflexFrames.poseConsumed(sequence);
+  }
+  void reflexEyeSource(vr::EVREye eye,const vr::Texture_t* texture,uint64_t sequence) override {
+    if ((eye!=vr::Eye_Left&&eye!=vr::Eye_Right)||!texture||texture->eType!=vr::API_DirectX||!texture->handle) return;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
+    if (SUCCEEDED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&source))))
+      reflexFrames.eyeSource(source.Get(),unsigned(eye),sequence);
+  }
+  void clearReflexFinalEyes(uint64_t sequence) {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> clear[2];
+    {
+      std::lock_guard<std::mutex> lock(reflexFinalMutex);
+      for (unsigned eye=0;eye<2;++eye) if (!sequence || reflexFinalEyes[eye].source.poseSequence==sequence) {
+        clear[eye]=reflexFinalEyes[eye].texture;
+        reflexFinalEyes[eye]={};
+      }
+    }
+    for (auto& texture:clear) native_reflex::clearSource(texture.Get());
+  }
+  void reflexEyeSubmitted(vr::EVREye eye,uint64_t sequence,bool accepted) override {
+    reflexFrames.eyeSubmitted(unsigned(eye),sequence,accepted);
+    if (!accepted) clearReflexFinalEyes(sequence);
   }
   vr::EVRCompositorError submitEye(uint64_t generation,vr::EVREye eye,const vr::Texture_t* texture,
       const vr::VRTextureBounds_t* bounds,vr::EVRSubmitFlags flags) override {
@@ -2305,6 +2342,12 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     Microsoft::WRL::ComPtr<ID3D11Texture2D> submittedSource;
     if(FAILED(static_cast<IUnknown*>(texture->handle)->QueryInterface(IID_PPV_ARGS(&submittedSource))))
       return vr::VRCompositorError_InvalidTexture;
+    // The game caller stamped this original texture before parking in the
+    // route. Copy the value now; the producer's TLS does not exist on XR owner.
+    EdvrNativeReflexSource reflexSource{};
+    if (!native_reflex::readSource(submittedSource.Get(),reflexSource) ||
+        reflexSource.generation!=runtimeGeneration || reflexSource.poseSequence!=poses.read().sequence)
+      reflexSource={};
     D3D11_TEXTURE2D_DESC submittedDesc{};submittedSource->GetDesc(&submittedDesc);
     const auto submittedWidth=uint32_t(std::lround(submittedDesc.Width*(bounds?std::fabs(bounds->uMax-bounds->uMin):1.f)));
     const auto submittedHeight=uint32_t(std::lround(submittedDesc.Height*(bounds?std::fabs(bounds->vMax-bounds->vMin):1.f)));
@@ -2341,6 +2384,18 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
       if(r!=vr::VRCompositorError_None)break;
       r=finishCapturedEye(eye,submittedSource.Get(),bounds,temporalOutput,temporalBounds,treated,treatedBounds,menuTreated);
       } while(false);
+      // Propagate the exact receipt to the actual final transfer/mirror
+      // texture. Failed/unsupported routes erase metadata from reused output.
+      auto* reflexOutput=treated?treated.Get():submittedSource.Get();
+      const bool reflexStamped=r==vr::VRCompositorError_None && native_reflex::validSource(reflexSource) &&
+        native_reflex::writeSource(reflexOutput,reflexSource);
+      if (!reflexStamped) native_reflex::clearSource(reflexOutput);
+      {
+        std::lock_guard<std::mutex> lock(reflexFinalMutex);
+        auto& finalEye=reflexFinalEyes[unsigned(eye)];
+        finalEye={};
+        if (reflexStamped) { finalEye.texture=reflexOutput;finalEye.source=reflexSource; }
+      }
       if(appOpened && !timing.applicationSegment(timingSequence,false)) timingInvalidate();
       if(timingGpuBegun[unsigned(eye)] &&
           !timing.producerSegmentEnd(timingSequence,unsigned(eye),submittedSource.Get()))
@@ -4202,6 +4257,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
     producerTiming.shutdown(); // Same contract: release only, safe off the render thread.
     const auto timingClosed=timing.close();
     if(FAILED(timingClosed)) nativeTracePrintf("native_timing,close_failure=%08lx\n",(unsigned long)timingClosed);
+    const auto reflexClosed=reflexFrames.close();
+    if(FAILED(reflexClosed)) nativeTracePrintf("native_reflex_frame,close_failure=%08lx\n",(unsigned long)reflexClosed);
+    clearReflexFinalEyes(0);
     desktopWindow.close(); // CPU only: the graphics half lets the held eye images go at its next Present
     if(FAILED(temporal.close()))return clean=false;
     if(FAILED(sharpen.close()))return clean=false;
@@ -4578,6 +4636,9 @@ class NativeRuntimeHost : public SystemSource, public FrameSink, public Composit
         }
       }
       // Optional, like the timing above: a graphics half without the export leaves Elite's window as it was.
+      acquired=reflexFrames.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);
+      if(acquired!=S_OK) nativeTracePrintf("native_reflex_frame,unavailable=%08lx\n",(unsigned long)acquired);
+      else nativeTracePuts("native_reflex_frame,provider_acquired=1");
       acquired=desktopWindow.acquire(options.graphicsProvider,externalDevice,runtimeGeneration);
       if(acquired!=S_OK) nativeTracePrintf("native_desktop_window,unavailable=%08lx\n",(unsigned long)acquired);
       else nativeTracePuts("native_desktop_window,provider_acquired=1");
