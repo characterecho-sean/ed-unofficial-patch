@@ -302,6 +302,7 @@ python tools\run_jobs.py ^
     --gate "tools\gen_fsr_hlsl.py --self-test" ^
     --gate "tools\gen_smaa_hlsl.py --self-test" ^
     --gate "tools\gen_settings_schema.py --self-test" ^
+    --gate "tools\gen_launcher_l10n.py --self-test" ^
     --gate "tools\gen_exports.py --self-test" ^
     --gate "tools\fetch_ngx.py --self-test" ^
     --gate "tools\sdk_paths.py --self-test" ^
@@ -461,6 +462,12 @@ REM typed 20 as 2000% (issue 35). That rule fails here now, not in the window.
 python "tools\gen_settings_schema.py" --root "%ROOT%" --out "%GEN%"
 if errorlevel 1 (
     echo [edup] ERROR: the settings schema is incomplete ^(see above^)
+    exit /b 1
+)
+
+python "tools\gen_launcher_l10n.py" --root "%ROOT%" --out "%GEN%"
+if errorlevel 1 (
+    echo [edup] ERROR: the launcher localization catalog is invalid ^(see above^)
     exit /b 1
 )
 

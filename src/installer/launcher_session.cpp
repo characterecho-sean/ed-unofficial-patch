@@ -623,7 +623,7 @@ void LauncherSession::beginDirectPlay(const std::wstring& source, const std::wst
         request.productDir = gameDir;
         request.vr = vr;
         request.frontier = frontierStore;
-        request.languageCode = language_.empty() ? systemGameLanguageCode() : canonicalGameLanguage(language_);
+        request.languageCode = resolvedGameLanguageCode(language_);
         const std::wstring edlaunch = findEdLaunch(gameDir);
         const size_t slash = edlaunch.find_last_of(L"\\/");
         request.languageArg = gameLanguageArgument(slash == std::wstring::npos ? std::wstring() : edlaunch.substr(0, slash), request.languageCode);

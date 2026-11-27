@@ -387,7 +387,7 @@ DirectPlan planDirectLaunch(const DirectEnv& env, const DirectRequest& request) 
     // 3. Frontier's clock, then 4. a ticket from Steam: the order App.fs takes them in.
     if (stopped()) return fallback(plan, "The sign-in was stopped");
     FrontierApi api(*env.http, env.apiBase, env.cancel, env.clock);
-    if (!request.languageCode.empty()) api.setLang(request.languageCode);
+    if (!request.languageCode.empty()) api.setLang(resolvedGameLanguageCode(request.languageCode));
     say("Asking Frontier for the time...");
     api.syncTime();
 
@@ -642,7 +642,7 @@ bool startGameFromEpicCommand(const std::wstring& installDir, const std::wstring
     FrontierApi api(http, kFrontierApiBase);
     LauncherState languageState;
     languageState.load(joinPath(launcherRoots(L"").launcherDir(), L"launcher.ini"), nullptr);
-    const std::string languageCode = languageState.language().empty() ? systemGameLanguageCode() : canonicalGameLanguage(languageState.language());
+    const std::string languageCode = resolvedGameLanguageCode(languageState.language());
     api.setLang(languageCode);
     const std::string languageArg = gameLanguageArgument(installDir, languageCode);
     api.syncTime();

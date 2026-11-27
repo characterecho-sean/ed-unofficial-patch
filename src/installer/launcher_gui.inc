@@ -952,7 +952,7 @@ void syncThemeToggleLabel() {
 
 // The words on the window, in the language `code` names. Does not write launcher.ini.
 void applyLauncherLanguage(const std::string& code) {
-    l10nSet(code.empty() ? systemGameLanguageCode() : canonicalGameLanguage(code));
+    l10nSet(code.empty() ? l10nSystemCode() : l10nCanonicalCode(code));
     invalidateLauncherCache();
     setControlText(kIdTabPlay, L"Play");
     setControlText(kIdTabInstall, L"Setup");
@@ -999,13 +999,15 @@ void applyLauncherLanguage(const std::string& code) {
     applyLayout();
 }
 
-// CB_SETITEMDATA keeps the code. The pointer is a string literal, so it outlives the control.
+// CB_SETITEMDATA keeps the code. The pointer has static storage duration, so it outlives the control.
 void fillLanguageCombo() {
     if (!g.languageCombo) return;
     SendMessageW(g.languageCombo, CB_RESETCONTENT, 0, 0);
-    for (const char* code : kLanguageCodes) {
-        const LRESULT index = SendMessageW(g.languageCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(gameLanguageName(code)));
-        if (index >= 0) SendMessageW(g.languageCombo, CB_SETITEMDATA, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(code));
+    size_t count = 0;
+    const L10nLanguage* langs = l10nLanguages(&count);
+    for (size_t i = 0; i < count; ++i) {
+        const LRESULT index = SendMessageW(g.languageCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(langs[i].name));
+        if (index >= 0) SendMessageW(g.languageCombo, CB_SETITEMDATA, static_cast<WPARAM>(index), reinterpret_cast<LPARAM>(langs[i].code));
     }
 }
 

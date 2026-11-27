@@ -59,6 +59,7 @@ jobs:
             build_receipt.py
             archive_game_exe.py
             package_native.py
+            gen_launcher_l10n.py
         run: |
           set -uo pipefail
           python --version

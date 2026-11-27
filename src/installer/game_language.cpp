@@ -72,6 +72,11 @@ std::string systemGameLanguageCode() {
     return "en";
 }
 
+std::string resolvedGameLanguageCode(const std::string& code) {
+    const Known* row = knownOf(code);
+    return row ? row->code : systemGameLanguageCode();
+}
+
 const wchar_t* gameLanguageName(const std::string& code) {
     const Known* row = knownOf(code);
     return row ? row->name : L"English";
@@ -95,8 +100,7 @@ std::string gameLanguageInBytes(const void* data, size_t size) {
 }
 
 std::string gameLanguageArgument(const std::wstring& edLaunchDir, const std::string& code) {
-    std::string chosen = canonicalGameLanguage(code);
-    if (!knownOf(chosen)) chosen = systemGameLanguageCode();
+    std::string chosen = resolvedGameLanguageCode(code);
     // min-ed uses a non-English code only when its satellite folder is beside EDLaunch.
     // English is always installed, so it is the last resort when the system's language has no folder either.
     auto missing = [&](const std::string& c) {

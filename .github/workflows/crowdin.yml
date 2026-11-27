@@ -1,0 +1,173 @@
+# Synchronizes src/installer/l10n/ with Crowdin via crowdin.yml.
+#
+# Ownership: the repository writes src/installer/l10n/launcher.pot; Crowdin is
+# the sole writer of src/installer/l10n/*.po.
+#
+# Repository secrets required to enable sync (both jobs no-op cleanly when unset
+# so forks and unconfigured repositories never see failing runs):
+#   CROWDIN_PROJECT_ID       numeric ID from Crowdin -> Tools -> API
+#   CROWDIN_PERSONAL_TOKEN   Crowdin Personal Access Token with:
+#                              Projects (Read), Translation Status (Read),
+#                              Source files & strings (Read & Write),
+#                              Translations (Read & Write)
+#
+# Optional secret:
+#   CROWDIN_GH_TOKEN         Fine-grained PAT scoped strictly to this repository
+#                            with Contents (Read & write) and Pull requests
+#                            (Read & write). When set, the download job opens
+#                            or updates the l10n_main PR and triggers
+#                            pull_request CI automatically without enabling the
+#                            repo-wide "Allow GitHub Actions to create and
+#                            approve pull requests" setting. When unset, the
+#                            download job pushes approved translations to the
+#                            l10n_main branch using GITHUB_TOKEN (contents:
+#                            write) without opening a PR (since GITHUB_TOKEN
+#                            cannot create PRs while that repo-wide setting is
+#                            off); open the PR from l10n_main manually when
+#                            ready.
+name: Crowdin
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/installer/l10n/launcher.pot'
+      - 'crowdin.yml'
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      upload_sources:
+        description: 'Upload src/installer/l10n/launcher.pot to Crowdin'
+        type: boolean
+        default: true
+      upload_existing_translations:
+        description: 'One-time seed: upload existing src/installer/l10n/*.po translations to Crowdin'
+        type: boolean
+        default: false
+      download_translations:
+        description: 'Download approved translations from Crowdin to l10n_main (and open/update PR if CROWDIN_GH_TOKEN is set)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edup-crowdin
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.upload_sources || inputs.upload_existing_translations))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check Crowdin secrets
+        id: creds
+        shell: bash
+        env:
+          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
+        run: |
+          if [ -z "${CROWDIN_PROJECT_ID:-}" ] || [ -z "${CROWDIN_PERSONAL_TOKEN:-}" ]; then
+            echo "::notice::Crowdin secrets (CROWDIN_PROJECT_ID / CROWDIN_PERSONAL_TOKEN) are not set; skipping upload."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.creds.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Upload sources to Crowdin
+        if: >-
+          steps.creds.outputs.configured == 'true' &&
+          (github.event_name == 'push' || inputs.upload_sources)
+        uses: crowdin/github-action@d651c77756acbe11a31d77a6fb79d8a239e1e05a # v3.6.0
+        with:
+          upload_sources: true
+          upload_translations: false
+          download_translations: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
+
+      - name: Upload existing translations to Crowdin (one-time seed)
+        if: >-
+          steps.creds.outputs.configured == 'true' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.upload_existing_translations
+        uses: crowdin/github-action@d651c77756acbe11a31d77a6fb79d8a239e1e05a # v3.6.0
+        with:
+          upload_sources: false
+          upload_translations: true
+          auto_approve_imported: true
+          import_eq_suggestions: true
+          download_translations: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
+
+  download:
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.download_translations)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check Crowdin secrets
+        id: creds
+        shell: bash
+        env:
+          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
+          CROWDIN_GH_TOKEN: ${{ secrets.CROWDIN_GH_TOKEN }}
+        run: |
+          if [ -z "${CROWDIN_PROJECT_ID:-}" ] || [ -z "${CROWDIN_PERSONAL_TOKEN:-}" ]; then
+            echo "::notice::Crowdin secrets (CROWDIN_PROJECT_ID / CROWDIN_PERSONAL_TOKEN) are not set; skipping download."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "has_gh_token=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            if [ -n "${CROWDIN_GH_TOKEN:-}" ]; then
+              echo "has_gh_token=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::CROWDIN_GH_TOKEN is not set; pushing to l10n_main with GITHUB_TOKEN without opening a PR."
+              echo "has_gh_token=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Checkout
+        if: steps.creds.outputs.configured == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Download approved translations from Crowdin
+        if: steps.creds.outputs.configured == 'true'
+        uses: crowdin/github-action@d651c77756acbe11a31d77a6fb79d8a239e1e05a # v3.6.0
+        with:
+          upload_sources: false
+          upload_translations: false
+          download_translations: true
+          export_only_approved: true
+          skip_untranslated_strings: true
+          localization_branch_name: l10n_main
+          create_pull_request: ${{ steps.creds.outputs.has_gh_token }}
+          pull_request_title: 'l10n: update launcher translations from Crowdin'
+          pull_request_body: 'Updated approved launcher translations exported from Crowdin via `.github/workflows/crowdin.yml`.'
+          pull_request_base_branch_name: main
+        env:
+          GITHUB_TOKEN: ${{ secrets.CROWDIN_GH_TOKEN || secrets.GITHUB_TOKEN }}
+          CROWDIN_PROJECT_ID: ${{ secrets.CROWDIN_PROJECT_ID }}
+          CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}

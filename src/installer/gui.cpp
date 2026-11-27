@@ -37,7 +37,6 @@
 #include "launcher_l10n.h"
 #include "ui.h"
 #ifdef EDUP_LAUNCHER
-#include "game_language.h"
 #include "launch_route.h"
 #include "launcher_login_dialog.h"
 #include "launcher_main.h"
@@ -141,7 +140,6 @@ const int kCardPad = 20;
 // default is the folder's own scope, else both.
 const wchar_t* kScopeChoices[] = {L"VR and flat (recommended)", L"VR only", L"Flat only"};
 RECT g_scopePromptPx{};
-const char* kLanguageCodes[] = {"en", "de", "es", "fr", "pt-BR", "ru"};
 
 #ifdef EDUP_LAUNCHER
 enum class Screen { Play, Install, Settings };

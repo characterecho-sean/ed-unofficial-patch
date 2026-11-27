@@ -75,6 +75,7 @@
 #include "../../src/installer/frontier_login.h"
 #include "../../src/installer/launch_route.h"
 #include "../../src/installer/launcher_core.h"
+#include "../../src/installer/launcher_l10n.h"
 #include "../../src/installer/launcher_login_dialog.h"
 #include "../../src/installer/launcher_main.h"
 #include "../../src/installer/launcher_plan.h"
@@ -4109,6 +4110,14 @@ void testDirectPlan() {
         check(gameLanguageInBytes(none, sizeof(none) - 1).empty(), "an image without GameLanguage yields nothing");
         check(canonicalGameLanguage("DE") == "de" && canonicalGameLanguage("pt-br") == "pt-BR" && canonicalGameLanguage("en") == "en",
               "a language code is the folder name Elite ships");
+        check(resolvedGameLanguageCode("DE") == "de" && resolvedGameLanguageCode("pt-br") == "pt-BR" && resolvedGameLanguageCode("en") == "en",
+              "resolvedGameLanguageCode normalizes Elite's six languages");
+        for (const char* uiOnly : {"", "ja", "zh-CN", "cs", "it", "uk", "zz"}) {
+            const std::string got = resolvedGameLanguageCode(uiOnly);
+            const bool elite = got == "en" || got == "de" || got == "es" || got == "fr" || got == "pt-BR" || got == "ru";
+            check(elite && got == systemGameLanguageCode(),
+                  std::string("resolvedGameLanguageCode clamps non-Elite code ") + uiOnly + " to system game language: " + got);
+        }
         check(gameLanguageArgument(L"", "de") == "German\\\\DE", "with no EDLaunch folder a known language still has its GameLanguage string");
         check(gameLanguageArgument(L"", "zz") == gameLanguageArgument(L"", systemGameLanguageCode()),
               "an unknown code follows the Windows language");
@@ -5115,6 +5124,42 @@ void testStoreSession() {
         check(!rig.anyLineLeaks() && !treeHasSkipping(rig.base, frontierNeedles(true), L"frontier-login.dat"), "no sentinel in a line or another file");
     }
 
+    // A launcher-only UI language (outside Elite's six) must NEVER reach Frontier's API or /language:
+    // both fall back to the system game language (always one of Elite's six).
+    {
+        const auto isEliteLang = [](const std::string& code) {
+            return code == "en" || code == "de" || code == "es" || code == "fr" || code == "pt-BR" || code == "ru";
+        };
+        const std::string expectedSys = systemGameLanguageCode();
+        check(isEliteLang(expectedSys), "systemGameLanguageCode is always one of Elite's six: " + expectedSys);
+        for (const char* uiOnly : {"ja", "zh-CN", "cs", "it", "uk"}) {
+            DirectRig rig(std::string("store-ui-only-") + uiOnly, "direct_launch=on\n", true);
+            scriptStore(&rig.http, false);
+            saveLogin(rig.loginPath, kPassword, kMachineToken);
+            rig.session->setLanguage(uiOnly);
+            check(rig.session->language() == uiOnly, std::string("launcher session retains UI language ") + uiOnly);
+            rig.play(L"Frontier launcher", false, false);
+            check(rig.ui.pump([&]() { return rig.restored == 1; }), std::string("ui-only language ") + uiOnly + " still starts the game");
+            const HttpRequest* auth = rig.http.nth(kFAuthPath);
+            const std::string sentLang = auth ? queryValue(auth->url, "lang") : std::string();
+            check(auth && isEliteLang(sentLang) && sentLang == expectedSys,
+                  std::string("Frontier auth lang for ui-only ") + uiOnly + " stays one of Elite's six (got " + sentLang + ", expected " + expectedSys + ")");
+            check(!rig.started.empty() && contains(narrowUtf8(rig.started[0].args), "/language " + gameLanguageArgument(L"", expectedSys)),
+                  std::string("game /language arg for ui-only ") + uiOnly + " falls back to system game language");
+        }
+        {
+            DirectRig rig("store-elite-lang-de", "direct_launch=on\n", true);
+            scriptStore(&rig.http, false);
+            saveLogin(rig.loginPath, kPassword, kMachineToken);
+            rig.session->setLanguage("de");
+            rig.play(L"Frontier launcher", false, false);
+            check(rig.ui.pump([&]() { return rig.restored == 1; }), "Elite language de still starts the game");
+            const HttpRequest* auth = rig.http.nth(kFAuthPath);
+            const std::string sentLang = auth ? queryValue(auth->url, "lang") : std::string();
+            check(auth && sentLang == "de", "Frontier auth lang for de stays de (got " + sentLang + ")");
+        }
+    }
+
     // The password was not remembered: the token is, so the window asks for the password only, and no code is needed.
     {
         DirectRig rig("store-forget-password", "direct_launch=on\n", true);
@@ -5757,13 +5802,6 @@ void testArgs() {
 void testLauncherTranslations() {
     section("launcher translations");
     const char* langs[] = {"de", "es", "fr", "pt-BR", "ru"};
-    auto sameAsEnglish = [](const std::wstring& english, const char* lang) {
-        if (english == L"Elite Dangerous") return true;
-        if (english == L"VR" && (std::strcmp(lang, "de") == 0 || std::strcmp(lang, "ru") == 0)) return true;
-        if (english == L"launcher" && std::strcmp(lang, "de") != 0 && std::strcmp(lang, "ru") != 0) return true;
-        if (english == L"Code" && (std::strcmp(lang, "de") == 0 || std::strcmp(lang, "fr") == 0)) return true;
-        return false;
-    };
     auto hex = [](char c) {
         if (c >= '0' && c <= '9') return c - '0';
         if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -5871,39 +5909,19 @@ void testLauncherTranslations() {
         return out;
     };
     auto readRepo = [&](const wchar_t* rel) { return readAll(P(g_repo, rel)); };
-    const std::string catalog = stripComments(readRepo(L"src\\installer\\launcher_l10n.cpp"));
-    check(!catalog.empty(), "launcher_l10n.cpp was read");
-    struct Row { std::wstring en; std::wstring text[5]; };
-    std::vector<Row> rows;
-    for (size_t i = 0; i < catalog.size();) {
-        if (catalog.compare(i, 2, "L\"") != 0) { ++i; continue; }
-        // A catalog row is { L"english", L"de", ... five more }.
-        size_t brace = i;
-        while (brace > 0 && (catalog[brace - 1] == ' ' || catalog[brace - 1] == '\t' || catalog[brace - 1] == '\n' || catalog[brace - 1] == '\r')) --brace;
-        if (brace == 0 || catalog[brace - 1] != '{') { ++i; continue; }
-        Row row;
-        size_t at = i;
-        bool ok = parseString(catalog, at, row.en);
-        for (int n = 0; ok && n < 5; ++n) {
-            while (at < catalog.size() && catalog[at] != 'L' && catalog[at] != '}') ++at;
-            if (at >= catalog.size() || catalog.compare(at, 2, "L\"") != 0) { ok = false; break; }
-            ok = parseString(catalog, at, row.text[n]);
+    size_t langCount = 0;
+    const L10nLanguage* compiledLangs = l10nLanguages(&langCount);
+    check(compiledLangs && langCount >= 6 && std::strcmp(compiledLangs[0].code, "en") == 0,
+          "compiled launcher languages start with English and include all five core languages");
+    for (const char* req : langs) {
+        bool found = false;
+        for (size_t i = 0; i < langCount; ++i) {
+            if (std::strcmp(compiledLangs[i].code, req) == 0 && compiledLangs[i].name && *compiledLangs[i].name) found = true;
         }
-        if (ok) rows.push_back(row);
-        i = at > i ? at : i + 1;
+        check(found, std::string("compiled launcher languages include ") + req);
     }
-    check(rows.size() >= 40, "the translation table has a row per launcher string: " + std::to_string(rows.size()));
-    std::map<std::wstring, Row> byEnglish;
-    for (const Row& row : rows) {
-        check(byEnglish.find(row.en) == byEnglish.end(), "a launcher string is in the table once");
-        for (int n = 0; n < 5; ++n) {
-            if (row.text[n].empty())
-                check(false, "missing " + std::string(langs[n]) + " translation for: " + narrowUtf8(row.en));
-            else if (row.text[n] == row.en && !sameAsEnglish(row.en, langs[n]))
-                check(false, "the " + std::string(langs[n]) + " translation copies the English: " + narrowUtf8(row.en));
-        }
-        byEnglish[row.en] = row;
-    }
+    check(l10nCanonicalCode("DE") == "de" && l10nCanonicalCode("pt-br") == "pt-BR" && l10nCanonicalCode("zz") == "en",
+          "l10nCanonicalCode normalizes compiled codes case-insensitively and falls back to en");
 
     const wchar_t* files[] = {L"src\\installer\\gui.cpp", L"src\\installer\\launcher_gui.inc", L"src\\installer\\launcher_login_dialog.cpp", L"src\\installer\\launcher_l10n.cpp"};
     int uiStrings = 0;
@@ -5939,12 +5957,26 @@ void testLauncherTranslations() {
                             line.find("say(") != std::string::npos || line.find(".title") != std::string::npos || line.find(".body") != std::string::npos;
             if (ui && hasLetter(joined)) {
                 ++uiStrings;
-                const bool known = byEnglish.find(joined) != byEnglish.end();
-                if (!known) check(false, "launcher text has no translation in every language: " + narrowUtf8(joined));
+                check(l10nHasKey(joined.c_str()), "launcher text is registered in launcher.pot: " + narrowUtf8(joined));
+                for (const char* lang : langs) {
+                    l10nSet(lang);
+                    const wchar_t* got = tr(joined.c_str());
+                    if (!got || !*got) {
+                        check(false, "empty " + std::string(lang) + " string for: " + narrowUtf8(joined));
+                    }
+                }
             }
             i = at;
         }
     }
+    l10nSet("de");
+    check(std::wstring(tr(L"Setup")) == L"Einrichtung", "tr returns compiled German translation");
+    check(trLine("ED-UP v1.2.3 is available.") == L"ED-UP v1.2.3 ist verf\u00fcgbar.",
+          "trLine substitutes version into translated status pattern");
+    check(std::wstring(tr(L"__untranslated_probe__")) == L"__untranslated_probe__",
+          "unknown strings fall back to English");
+    l10nSet("en");
+    check(l10nCode() == "en", "l10nSet resets to English");
     check(uiStrings >= 40, "the scan saw the launcher's buttons and labels: " + std::to_string(uiStrings));
 }
 

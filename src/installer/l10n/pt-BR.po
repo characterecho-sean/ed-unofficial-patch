@@ -1,0 +1,602 @@
+# ED-UP launcher localization (Português).
+# Managed with Crowdin (see crowdin.yml).
+msgid ""
+msgstr ""
+"Project-Id-Version: ed-up-launcher\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: pt-BR\n"
+
+msgid "Setup"
+msgstr "Instalação"
+
+msgid "Settings"
+msgstr "Configurações"
+
+msgid "Browse..."
+msgstr "Procurar..."
+
+msgid "Keep the settings I have changed"
+msgstr "Manter as configurações que alterei"
+
+msgid "Install"
+msgstr "Instalar"
+
+msgid "Repair"
+msgstr "Reparar"
+
+msgid "Uninstall"
+msgstr "Desinstalar"
+
+msgid "Save logs"
+msgstr "Salvar registros"
+
+msgid "VR and flat (recommended)"
+msgstr "RV e plano (recomendado)"
+
+msgid "VR only"
+msgstr "Somente RV"
+
+msgid "Flat only"
+msgstr "Somente plano"
+
+msgid "VR"
+msgstr "RV"
+
+msgid "Flat"
+msgstr "Plano"
+
+msgid "Download & install"
+msgstr "Baixar e instalar"
+
+msgid "Download & update"
+msgstr "Baixar e atualizar"
+
+msgid "Include release candidates"
+msgstr "Incluir versões candidatas"
+
+msgid "Play"
+msgstr "Jogar"
+
+msgid "Play VR"
+msgstr "Jogar em RV"
+
+msgid "Play flat"
+msgstr "Jogar em plano"
+
+msgid "Start Elite directly (no Frontier launcher)"
+msgstr "Iniciar Elite diretamente (sem o launcher da Frontier)"
+
+msgid "Use Frontier account login"
+msgstr "Usar login de conta Frontier"
+
+msgid "Close the launcher once Elite has started"
+msgstr "Fechar o launcher quando Elite tiver iniciado"
+
+msgid "Clean purge on uninstall"
+msgstr "Limpeza completa ao desinstalar"
+
+msgid "Clean purge permanently deletes ED-UP settings, logs, install records, the user settings folder, and everything inside edup_backup\\ (including any backups of other mods' files or earlier edup.ini copies)."
+msgstr "A limpeza completa apaga permanentemente as configurações do ED-UP, registros, dados de instalação, a pasta de configurações do usuário e tudo dentro de edup_backup\\ (incluindo backups de outros mods ou cópias antigas de edup.ini)."
+
+msgid "Status"
+msgstr "Estado"
+
+msgid "Updates"
+msgstr "Atualizações"
+
+msgid "Install & repair"
+msgstr "Instalar e reparar"
+
+msgid "Log"
+msgstr "Registro"
+
+msgid "Launch"
+msgstr "Iniciar"
+
+msgid "Language"
+msgstr "Idioma"
+
+msgid "Install ED-UP for:"
+msgstr "Instalar o ED-UP para:"
+
+msgid "The fixes"
+msgstr "As correções"
+
+msgid "not installed"
+msgstr "não instalado"
+
+msgid "ED-UP installed as d3d11.dll"
+msgstr "ED-UP instalado como d3d11.dll"
+
+msgid "Flash fix, native on foot"
+msgstr "Correção do clarão, a pé nativo"
+
+msgid "Elite's 3D mode is unknown: ED-UP starts in VR."
+msgstr "O modo 3D do Elite é desconhecido: o ED-UP inicia em RV."
+
+msgid "Elite's 3D mode is unset: flat install runs its flat fixes."
+msgstr "O modo 3D do Elite não está definido: a instalação plana usa suas correções planas."
+
+msgid "Elite's 3D mode is off: ED-UP runs its flat fixes."
+msgstr "O modo 3D do Elite está desligado: o ED-UP usa as correções planas."
+
+msgid "Elite's 3D mode is on: ED-UP runs its VR fixes."
+msgstr "O modo 3D do Elite está ligado: o ED-UP usa as correções de RV."
+
+msgid "This install does not include flat: ED-UP stays out of the way."
+msgstr "Esta instalação não inclui o modo plano: o ED-UP fica de fora."
+
+msgid "This install does not include VR: turn 3D off in Elite or use Play flat."
+msgstr "Esta instalação não inclui RV: desligue o 3D no Elite ou use Jogar em plano."
+
+msgid "Nothing is changed until you confirm it, and every file replaced is copied into edup_backup\\ first."
+msgstr "Nada muda até você confirmar, e cada arquivo substituído é copiado antes para edup_backup\\."
+
+msgid "Pick an install above first."
+msgstr "Escolha primeiro uma instalação acima."
+
+msgid "loading"
+msgstr "carregando"
+
+msgid "no release downloaded yet"
+msgstr "nenhuma versão baixada ainda"
+
+msgid "no local package"
+msgstr "sem pacote local"
+
+msgid "launcher"
+msgstr "launcher"
+
+msgid "unofficial patch for Elite Dangerous in VR and flat"
+msgstr "patch não oficial para Elite Dangerous em RV e plano"
+
+msgid "Elite is already running."
+msgstr "Elite já está em execução."
+
+msgid "Signs in to Epic and Frontier, starts Elite itself, and exits once Elite is running."
+msgstr "Entra na Epic e na Frontier, inicia Elite e fecha quando Elite estiver rodando."
+
+msgid "Signs in itself. If that fails, it starts EDLaunch."
+msgstr "Entra por conta própria. Se falhar, inicia o EDLaunch."
+
+msgid "Signs in with your Frontier account. If that fails, it starts through Steam."
+msgstr "Entra com sua conta Frontier. Se falhar, inicia pelo Steam."
+
+msgid "Signs in itself. If that fails, it starts through Steam."
+msgstr "Entra por conta própria. Se falhar, inicia pelo Steam."
+
+msgid "Starts EDLaunch with the mode you pick, then closes it when Elite exits."
+msgstr "Inicia o EDLaunch no modo escolhido e o fecha quando Elite termina."
+
+msgid "Starts EDLaunch in VR, then closes it when Elite exits."
+msgstr "Inicia o EDLaunch em RV e o fecha quando Elite termina."
+
+msgid "Starts EDLaunch in flat, then closes it when Elite exits."
+msgstr "Inicia o EDLaunch em plano e o fecha quando Elite termina."
+
+msgid "Update"
+msgstr "Atualizar"
+
+msgid "Reinstall"
+msgstr "Reinstalar"
+
+msgid "Copy path"
+msgstr "Copiar caminho"
+
+msgid "Show folder"
+msgstr "Mostrar pasta"
+
+msgid "Search settings"
+msgstr "Buscar configurações"
+
+msgid "holds d3d11.dll; Install chains both"
+msgstr "ocupa d3d11.dll; Instalar encadeia ambos"
+
+msgid "holds d3d11.dll; Repair chains both"
+msgstr "ocupa d3d11.dll; Reparar encadeia ambos"
+
+msgid "Alongside"
+msgstr "Ao lado"
+
+msgid "another mod"
+msgstr "outro mod"
+
+msgid ", chained through "
+msgstr ", encadeado por "
+
+msgid "Elite Dangerous"
+msgstr "Elite Dangerous"
+
+msgid "Email"
+msgstr "E-mail"
+
+msgid "Password"
+msgstr "Senha"
+
+msgid "Code"
+msgstr "Código"
+
+msgid "Remember my password on this PC"
+msgstr "Lembrar minha senha neste PC"
+
+msgid "Sign in"
+msgstr "Entrar"
+
+msgid "Continue"
+msgstr "Continuar"
+
+msgid "Cancel"
+msgstr "Cancelar"
+
+msgid "Enter both the email and the password."
+msgstr "Digite o e-mail e a senha."
+
+msgid "Type the code from the email."
+msgstr "Digite o código do e-mail."
+
+msgid "Sign in to Frontier"
+msgstr "Entrar na Frontier"
+
+msgid "Enter the code from Frontier"
+msgstr "Digite o código da Frontier"
+
+#, c-format
+msgid "Frontier emailed a verification code to %s."
+msgstr "A Frontier enviou um código de verificação para %s."
+
+msgid "Your password goes only to Frontier's servers. It is stored encrypted for this Windows user, and only if the box is ticked."
+msgstr "Sua senha vai apenas aos servidores da Frontier. Ela é guardada criptografada para este usuário do Windows, e só se a caixa estiver marcada."
+
+msgid "Your password goes only to Frontier's servers. Under Wine or Proton the saved password is not strongly protected on this PC."
+msgstr "Sua senha vai apenas aos servidores da Frontier. Sob Wine ou Proton a senha salva não fica bem protegida neste PC."
+
+msgid "Sets Elite's 3D mode in Settings.xml, then starts Elite through Steam."
+msgstr "Define o modo 3D do Elite em Settings.xml e inicia Elite pelo Steam."
+
+msgid "Sets Elite's 3D mode in Settings.xml, then starts Elite through Epic."
+msgstr "Define o modo 3D do Elite em Settings.xml e inicia Elite pela Epic."
+
+msgid "VR 3D mode"
+msgstr "Modo 3D RV"
+
+msgid "Not Set"
+msgstr "Não definido"
+
+msgid "Choose your preferred VR 3D mode before launching in VR."
+msgstr "Escolha seu modo 3D RV preferido antes de iniciar em RV."
+
+msgid "HMD (Headphones)"
+msgstr "HMD (Fones de ouvido)"
+
+msgid "HMD (Speakers)"
+msgstr "HMD (Alto-falantes)"
+
+msgid "HMD Cinema (Headphones)"
+msgstr "Cinema HMD (Fones)"
+
+msgid "HMD Cinema (Speakers)"
+msgstr "Cinema HMD (Alto-falantes)"
+
+msgid "Skip the Epic launcher"
+msgstr "Pular o launcher da Epic"
+
+msgid "Ask on Discord"
+msgstr "Perguntar no Discord"
+
+msgid "ED-UP installed as openvr_api.dll"
+msgstr "ED-UP instalado como openvr_api.dll"
+
+msgid "no Openvr folder found under this install"
+msgstr "nenhuma pasta Openvr nesta instalação"
+
+msgid "not installed · the game's own runtime is in place"
+msgstr "não instalado · o runtime do jogo está no lugar"
+
+msgid "Install record"
+msgstr "Registro da instalação"
+
+msgid "older than the files here; Update refreshes it"
+msgstr "mais antigo que os arquivos; Atualizar o renova"
+
+msgid "The game's runtime"
+msgstr "O runtime do jogo"
+
+msgid "the game's own runtime is in place"
+msgstr "o runtime do jogo está no lugar"
+
+msgid "safe, renamed openvr_api_orig.dll"
+msgstr "a salvo, renomeado para openvr_api_orig.dll"
+
+msgid "ED-UP's runtime is in place; flat restores the game's own"
+msgstr "o runtime do ED-UP está no lugar; o modo plano restaura o do jogo"
+
+msgid "not found"
+msgstr "não encontrado"
+
+msgid "ED-UP's own runtime is in place"
+msgstr "o runtime próprio do ED-UP está no lugar"
+
+msgid "the game's own runtime; the install replaces it"
+msgstr "o runtime do jogo; a instalação o substitui"
+
+msgid "Your settings"
+msgstr "Suas configurações"
+
+msgid "edup.ini kept"
+msgstr "edup.ini mantido"
+
+msgid "edup.ini not yet"
+msgstr "edup.ini ainda não"
+
+msgid "edup-flat.ini kept"
+msgstr "edup-flat.ini mantido"
+
+msgid "edup-flat.ini not yet"
+msgstr "edup-flat.ini ainda não"
+
+msgid "edup-flat.ini not yet (edup.ini is copied into it)"
+msgstr "edup-flat.ini ainda não (edup.ini é copiado para ele)"
+
+msgid "running — close it before installing anything"
+msgstr "em execução — feche antes de instalar"
+
+msgid "running from a different folder — not this install"
+msgstr "em execução de outra pasta — não esta instalação"
+
+msgid "could not check whether it is running — nothing will be installed"
+msgstr "não foi possível verificar se está em execução — nada será instalado"
+
+msgid "ED-UP is installed in this folder, but this launcher has no local release package yet.\r\n\r\nPress Download when Updates shows a release to enable repair and updates, or start the launcher with --payload and the folder of an unpacked ed-up zip."
+msgstr "O ED-UP está instalado nesta pasta, mas este launcher ainda não tem um pacote local.\r\n\r\nClique em Baixar em Atualizações para ativar reparo e atualizações, ou inicie o launcher com --payload e a pasta de um zip do ED-UP descompactado."
+
+msgid "There is nothing to install from yet.\r\n\r\nPress Download when Updates shows a release, or start the launcher with --payload and the folder of an unpacked ed-up zip."
+msgstr "Ainda não há nada para instalar.\r\n\r\nClique em Baixar quando Atualizações mostrar uma versão, ou inicie o launcher com --payload e a pasta de um zip do ED-UP descompactado."
+
+msgid "Checking for updates..."
+msgstr "Procurando atualizações..."
+
+#, c-format
+msgid "ED-UP %s is available."
+msgstr "ED-UP %s está disponível."
+
+#, c-format
+msgid "ED-UP %s package available for repair and updates."
+msgstr "Pacote ED-UP %s disponível para reparo e atualizações."
+
+#, c-format
+msgid "ED-UP %s is ready to install."
+msgstr "ED-UP %s está pronto para instalar."
+
+msgid "Updating the launcher..."
+msgstr "Atualizando o launcher..."
+
+msgid "Starting the update..."
+msgstr "Iniciando a atualização..."
+
+msgid "The launcher was updated. Close this window and start ED-UP again to carry on."
+msgstr "O launcher foi atualizado. Feche esta janela e inicie o ED-UP de novo."
+
+msgid "Written into the "
+msgstr "Gravado no "
+
+msgid " of the install above, and live within a second. The few that need a game restart are marked."
+msgstr " da instalação acima, e em vigor em um segundo. Os poucos que precisam reiniciar o jogo estão marcados."
+
+msgid "EDHM compatibility"
+msgstr "Compatibilidade com EDHM"
+
+msgid "(Experimental) Use tailored 2DMigoto dll for EDHM compatibility improvements."
+msgstr "(Experimental) Usar a DLL 2DMigoto adaptada para melhorias de compatibilidade com EDHM."
+
+msgid "Backs up your standard d3d11_edhm.dll and d3dx.ini settings, installs the signed 2DMigoto build, and applies ED-UP compatibility settings. Turning off restores them."
+msgstr "Faz backup da sua d3d11_edhm.dll padrão e das opções de d3dx.ini, instala a compilação assinada 2DMigoto e aplica os ajustes de compatibilidade com ED-UP. Desativar restaura tudo."
+
+msgid "Hide Refresh/Reload messages from EDHM"
+msgstr "Ocultar mensagens de atualização/recarga do EDHM"
+
+msgid "Sets [Logging] show_reload_message = 0 in d3dx.ini while 2DMigoto is active; unchecking or turning 2DMigoto off restores your original setting."
+msgstr "Define [Logging] show_reload_message = 0 em d3dx.ini enquanto 2DMigoto estiver ativo; desmarcar ou desativar o 2DMigoto restaura o valor original."
+
+msgid "Hide Warnings from EDHM"
+msgstr "Ocultar avisos do EDHM"
+
+msgid "Sets [Logging] show_warnings = 0 in d3dx.ini while 2DMigoto is active; unchecking or turning 2DMigoto off restores your original setting."
+msgstr "Define [Logging] show_warnings = 0 em d3dx.ini enquanto 2DMigoto estiver ativo; desmarcar ou desativar o 2DMigoto restaura o valor original."
+
+msgid "Requires 2DMigoto"
+msgstr "Requer 2DMigoto"
+
+msgid "d3dx.ini not found"
+msgstr "d3dx.ini não encontrado"
+
+msgid "d3dx.ini unreadable"
+msgstr "d3dx.ini ilegível"
+
+msgid "d3dx.ini read-only"
+msgstr "d3dx.ini somente leitura"
+
+msgid "d3dx.ini unsupported encoding"
+msgstr "Codificação de d3dx.ini não suportada"
+
+msgid "Close Elite first"
+msgstr "Feche o Elite primeiro"
+
+msgid "Hidden"
+msgstr "Oculto"
+
+msgid "Shown"
+msgstr "Exibido"
+
+msgid "Something has interfered with the download, please check your antivirus and try again."
+msgstr "Algo interferiu no download; verifique seu antivírus e tente novamente."
+
+msgid "No install selected"
+msgstr "Nenhuma instalação selecionada"
+
+msgid "Applying..."
+msgstr "Aplicando..."
+
+msgid "2DMigoto active"
+msgstr "2DMigoto ativo"
+
+msgid "2DMigoto still on disk"
+msgstr "2DMigoto ainda no disco"
+
+msgid "d3dx.ini restore pending"
+msgstr "Restauração de d3dx.ini pendente"
+
+msgid "Restore standard"
+msgstr "Restaurar padrão"
+
+msgid "Download a release first"
+msgstr "Baixe primeiro uma versão"
+
+msgid "Download required"
+msgstr "Download necessário"
+
+msgid "Download now"
+msgstr "Baixar agora"
+
+msgid "Checking..."
+msgstr "Verificando..."
+
+msgid "Not in this release"
+msgstr "Não está nesta versão"
+
+msgid "EDHM not detected"
+msgstr "EDHM não detectado"
+
+msgid "EDHM updated externally"
+msgstr "EDHM atualizado externamente"
+
+msgid "Pending install"
+msgstr "Instalação pendente"
+
+msgid "Apply now"
+msgstr "Aplicar agora"
+
+msgid "Standard EDHM"
+msgstr "EDHM padrão"
+
+msgid "Off"
+msgstr "Desativado"
+
+msgid "VR headset"
+msgstr "Headset RV"
+
+msgid "Refresh"
+msgstr "Atualizar"
+
+msgid "Ready"
+msgstr "Pronto"
+
+msgid "Standby"
+msgstr "Em espera"
+
+msgid "Runtime off"
+msgstr "Runtime inativo"
+
+msgid "Not configured"
+msgstr "Não configurado"
+
+msgid "Check failed"
+msgstr "Falha na verificação"
+
+msgid "VR runtime"
+msgstr "Runtime de RV"
+
+msgid "None"
+msgstr "Nenhum"
+
+msgid "Checking VR headset and runtime..."
+msgstr "Verificando headset e runtime de RV..."
+
+msgid "Inspecting the active OpenXR runtime, running VR services, and connected hardware."
+msgstr "Verificando o runtime OpenXR ativo, os serviços de RV em execução e o hardware conectado."
+
+msgid "No headset detected"
+msgstr "Nenhum headset detectado"
+
+msgid "No VR runtime found"
+msgstr "Nenhum runtime de RV encontrado"
+
+msgid "Waiting for headset"
+msgstr "Aguardando headset"
+
+msgid "VR headset detected"
+msgstr "Headset RV detectado"
+
+msgid "Connected and ready for VR launch."
+msgstr "Conectado e pronto para iniciar em RV."
+
+#, c-format
+msgid "Connected via %s and ready for VR launch."
+msgstr "Conectado via %s e pronto para iniciar em RV."
+
+#, c-format
+msgid "%s is running, but no active headset responded. Wake or connect your headset, then refresh."
+msgstr "%s está em execução, mas nenhum headset ativo respondeu. Desperte ou conecte o headset e atualize."
+
+#, c-format
+msgid "Detected over USB. Start %s to connect before launching Elite in VR."
+msgstr "Detectado via USB. Inicie %s para conectar antes de abrir Elite em RV."
+
+#, c-format
+msgid "%s is running while %s is set as your active OpenXR runtime. Switch OpenXR or start %s."
+msgstr "%s está ativo enquanto %s está definido como seu OpenXR ativo. Troque o OpenXR ou inicie %s."
+
+#, c-format
+msgid "%s is your active OpenXR runtime, but is not running yet. Start it or connect your headset."
+msgstr "%s é seu runtime OpenXR ativo, mas ainda não está em execução. Inicie-o ou conecte o headset."
+
+msgid "Active OpenXR runtime file is missing. Open SteamVR, Meta Horizon Link, Virtual Desktop, or Pimax Play to restore it."
+msgstr "O arquivo do runtime OpenXR ativo está ausente. Abra SteamVR, Meta Horizon Link, Virtual Desktop ou Pimax Play para restaurá-lo."
+
+msgid "No active OpenXR runtime is registered. Start SteamVR, Meta Horizon Link, Virtual Desktop, Pimax Play, or WiVRn to enable VR."
+msgstr "Nenhum runtime OpenXR ativo está registrado. Inicie SteamVR, Meta Horizon Link, Virtual Desktop, Pimax Play ou WiVRn para usar RV."
+
+#, c-format
+msgid "%s was found on Linux, but no Windows OpenXR runtime is registered in this Wine/Proton prefix."
+msgstr "%s foi encontrado no Linux, mas nenhum runtime OpenXR do Windows está registrado neste prefixo Wine/Proton."
+
+#, c-format
+msgid "The active OpenXR runtime could not be queried. Restart %s and refresh."
+msgstr "Não foi possível consultar o runtime OpenXR ativo. Reinicie %s e atualize."
+
+msgid "Detected over USB, but no active OpenXR runtime is registered yet."
+msgstr "Detectado via USB, mas ainda não há um runtime OpenXR ativo registrado."
+
+msgid "OpenComposite is installed as Elite's openvr_api.dll, so ED-UP's VR bridge is not active."
+msgstr "O OpenComposite está instalado como openvr_api.dll do Elite, portanto a ponte de RV do ED-UP não está ativa."
+
+msgid "edup_openxr.ini could not be read by ED-UP. Repair ED-UP or fix the file, then refresh."
+msgstr "O ED-UP não conseguiu ler edup_openxr.ini. Repare o ED-UP ou corrija o arquivo e atualize."
+
+msgid "Active OpenXR runtime library is missing. Open SteamVR, Meta Horizon Link, Virtual Desktop, or Pimax Play to restore it."
+msgstr "A biblioteca do runtime OpenXR ativo está ausente. Abra SteamVR, Meta Horizon Link, Virtual Desktop ou Pimax Play para restaurá-la."
+
+msgid "No active OpenXR runtime was found. Elite may fail to start in VR.\n\nLaunch in VR anyway?"
+msgstr "Nenhum runtime OpenXR ativo foi encontrado. O Elite pode falhar ao iniciar em RV.\n\nIniciar em RV mesmo assim?"
+
+msgid "Your active OpenXR runtime file is missing. Open SteamVR, Meta Horizon Link, Virtual Desktop, or Pimax Play to restore it.\n\nLaunch in VR anyway?"
+msgstr "O arquivo do seu runtime OpenXR ativo está ausente. Abra SteamVR, Meta Horizon Link, Virtual Desktop ou Pimax Play para restaurá-lo.\n\nIniciar em RV mesmo assim?"
+
+msgid "Your active OpenXR runtime library is missing. Open SteamVR, Meta Horizon Link, Virtual Desktop, or Pimax Play to restore it.\n\nLaunch in VR anyway?"
+msgstr "A biblioteca do seu runtime OpenXR ativo está ausente. Abra SteamVR, Meta Horizon Link, Virtual Desktop ou Pimax Play para restaurá-la.\n\nIniciar em RV mesmo assim?"
+
+msgid "edup_openxr.ini could not be read by ED-UP, so Elite will not start in VR. Repair ED-UP or fix the file.\n\nLaunch in VR anyway?"
+msgstr "O ED-UP não conseguiu ler edup_openxr.ini, portanto o Elite não iniciará em RV. Repare o ED-UP ou corrija o arquivo.\n\nIniciar em RV mesmo assim?"
+
+#, c-format
+msgid "%s did not respond in time. Live checks are paused until you restart the launcher."
+msgstr "%s não respondeu a tempo. As verificações ao vivo ficam pausadas até reiniciar o launcher."
+
+msgid "Theme: follow Windows (switch to light)"
+msgstr "Tema: seguir o Windows (mudar para claro)"
+
+msgid "Theme: light (switch to dark)"
+msgstr "Tema: claro (mudar para escuro)"
+
+msgid "Theme: dark (follow Windows)"
+msgstr "Tema: escuro (seguir o Windows)"

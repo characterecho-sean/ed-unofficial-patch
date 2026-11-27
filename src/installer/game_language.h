@@ -19,6 +19,11 @@ std::string canonicalGameLanguage(const std::string& code);
 // is pt-BR, which is the satellite Elite installs.
 std::string systemGameLanguageCode();
 
+// Maps any saved launcher language code to one of Elite's six supported codes
+// ("en", "de", "es", "fr", "pt-BR", "ru"). Empty codes and launcher-only UI
+// languages outside Elite's six fall back to systemGameLanguageCode().
+std::string resolvedGameLanguageCode(const std::string& code);
+
 // The name shown in the language control, in that language.
 const wchar_t* gameLanguageName(const std::string& code);
 
