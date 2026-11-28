@@ -93,7 +93,8 @@ static std::vector<LegacyContract> coreLegacyContracts() {
         {"ui_layer_coverage_ps", "main", "ps_5_0", nullptr, 0xA12E6D166D50BDA1ull},
         {"ui_layer_seed", "main", "vs_5_0", nullptr, 0xCC059AB4FCFA26BCull},
         {"ui_layer_seed", "main", "ps_5_0", nullptr, 0x6204DC7B89FEB995ull},
-        {"ui_layer_seed", "main", "ps_5_0", nullptr, 0xB4E15991FFB22394ull},
+        // Re-pinned: fallback stencil-bit pass runs with DepthEnable=FALSE; drop dead D.Load()+SV_Depth (RTX 5080: 1.43-1.90x faster per stencil seed, byte-exact). Was 0xB4E15991FFB22394.
+        {"ui_layer_seed", "main", "ps_5_0", nullptr, 0xEAD1B619D3653B49ull},
         {"ui_layer_seed", "main", "ps_5_0", nullptr, 0xD5CC09085C1E6153ull},
         {"ui_depth_panel_ps", "main", "ps_5_0", nullptr, 0x1D917A3C0D1713B4ull},
         {"ui_depth_hud_ps", "main", "ps_5_0", nullptr, 0xBF9B75865E9F9E09ull},

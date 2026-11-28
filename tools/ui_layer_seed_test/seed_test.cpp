@@ -243,6 +243,88 @@ static void observedCase(ID3D11Device*d,ID3D11DeviceContext*imm,bool wideDepth,U
     check(threw&&spy.clears==0&&spy.draws==0,"invalid depth rejected before clear or draw");
     std::printf("observed dsv=%d specified=%d forcedFallback=%d size=%ux%u cases=%u clears=%u draws=%u PASS poison/legacy/all256/partial/no-draw/map-failure\n",int(vf),specified?1:0,forceFallback?1:0,ow,oh,cases,totalClear,totalDraw);
 }
+// Incremental per-bit fallback seeding (clearStencil=false): depth-only seed clears stencil once, then later
+// stencil-only seeds add disjoint bits (0x01, then 0x80) without clearing or re-drawing prior bits. Must match
+// a single full 0x81 seed byte for byte in both depth and stencil, with zero debug-layer warnings.
+static void incrementalStencilCase(ID3D11Device*d,ID3D11DeviceContext*imm,bool wideDepth,UINT ow,UINT oh) {
+    const UINT iw=7,ih=5;
+    const DXGI_FORMAT rf=wideDepth?DXGI_FORMAT_R32G8X24_TYPELESS:DXGI_FORMAT_R24G8_TYPELESS;
+    const DXGI_FORMAT vf=wideDepth?DXGI_FORMAT_D32_FLOAT_S8X24_UINT:DXGI_FORMAT_D24_UNORM_S8_UINT;
+    auto in=makeTex(d,iw,ih,rf,D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE);
+    auto id=makeDSV(d,in.Get(),vf);
+    auto ds=makeSRV(d,in.Get(),wideDepth?DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:DXGI_FORMAT_R24_UNORM_X8_TYPELESS);
+    auto ss=makeSRV(d,in.Get(),wideDepth?DXGI_FORMAT_X32_TYPELESS_G8X24_UINT:DXGI_FORMAT_X24_TYPELESS_G8_UINT);
+    auto vb=compile(kInitVS,"main","vs_5_0"),pb=compile(kInitPS,"main","ps_5_0");
+    ComPtr<ID3D11VertexShader>vs;ComPtr<ID3D11PixelShader>ps;
+    check(SUCCEEDED(d->CreateVertexShader(vb->GetBufferPointer(),vb->GetBufferSize(),nullptr,&vs)),"inc init VS");
+    check(SUCCEEDED(d->CreatePixelShader(pb->GetBufferPointer(),pb->GetBufferSize(),nullptr,&ps)),"inc init PS");
+    D3D11_DEPTH_STENCIL_DESC z{};z.DepthEnable=TRUE;z.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;z.DepthFunc=D3D11_COMPARISON_ALWAYS;
+    ComPtr<ID3D11DepthStencilState>zs;check(SUCCEEDED(d->CreateDepthStencilState(&z,&zs)),"inc init depth state");
+    auto makePaintState=[&](UINT8 writeMask){
+        D3D11_DEPTH_STENCIL_DESC s{};s.DepthEnable=FALSE;s.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
+        s.StencilEnable=TRUE;s.StencilReadMask=0xff;s.StencilWriteMask=writeMask;
+        s.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_REPLACE,D3D11_COMPARISON_ALWAYS};
+        s.BackFace=s.FrontFace;ComPtr<ID3D11DepthStencilState>st;
+        check(SUCCEEDED(d->CreateDepthStencilState(&s,&st)),"inc paint state");return st;
+    };
+    auto ps01=makePaintState(0x01),ps80=makePaintState(0x80),ps04=makePaintState(0x04);
+    D3D11_RASTERIZER_DESC rd{};rd.FillMode=D3D11_FILL_SOLID;rd.CullMode=D3D11_CULL_NONE;rd.ScissorEnable=TRUE;
+    ComPtr<ID3D11RasterizerState>rs;check(SUCCEEDED(d->CreateRasterizerState(&rd,&rs)),"inc scissor rs");
+    D3D11_VIEWPORT vp{0,0,float(iw),float(ih),0,1};
+    imm->RSSetState(nullptr);imm->RSSetViewports(1,&vp);imm->OMSetRenderTargets(0,nullptr,id.Get());
+    imm->OMSetDepthStencilState(zs.Get(),0);imm->VSSetShader(vs.Get(),nullptr,0);imm->PSSetShader(ps.Get(),nullptr,0);
+    imm->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    imm->ClearDepthStencilView(id.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);imm->Draw(3,0);
+    imm->RSSetState(rs.Get());imm->PSSetShader(nullptr,nullptr,0);
+    D3D11_RECT r1{1,0,4,5},r2{3,0,6,5},r3{0,2,7,4};
+    imm->RSSetScissorRects(1,&r1);imm->OMSetDepthStencilState(ps01.Get(),0x01);imm->Draw(3,0);
+    imm->RSSetScissorRects(1,&r2);imm->OMSetDepthStencilState(ps80.Get(),0x80);imm->Draw(3,0);
+    imm->RSSetScissorRects(1,&r3);imm->OMSetDepthStencilState(ps04.Get(),0x04);imm->Draw(3,0);
+    imm->RSSetState(nullptr);imm->OMSetRenderTargets(0,nullptr,nullptr);
+    edvr_layer_seed::Seeder s;
+    { FallbackCapability cap(d); s.init(d); }
+    check(!s.usesSpecifiedStencilRef(),"incremental case runs per-bit fallback");
+    check(s.ensure(d,ow,oh,vf),"inc ensure");
+    ComPtr<ID3D11DeviceContext>def;check(SUCCEEDED(d->CreateDeferredContext(0,&def)),"inc deferred");
+    auto stage=makeTex(d,ow,oh,rf,0,D3D11_USAGE_STAGING,D3D11_CPU_ACCESS_READ);
+    ID3D11Resource*raw=nullptr;s.view()->GetResource(&raw);ComPtr<ID3D11Resource>out;out.Attach(raw);
+    auto read=[&](){
+        imm->CopyResource(stage.Get(),out.Get());D3D11_MAPPED_SUBRESOURCE m{};
+        check(SUCCEEDED(imm->Map(stage.Get(),0,D3D11_MAP_READ,0,&m)),"inc map");
+        std::vector<unsigned long long> pixels;
+        for(UINT y=0;y<oh;++y)for(UINT x=0;x<ow;++x){
+            const BYTE*p=static_cast<const BYTE*>(m.pData)+y*m.RowPitch+x*(wideDepth?8:4);
+            UINT depth=0;memcpy(&depth,p,4);if(!wideDepth)depth&=0xffffff;
+            pixels.push_back(static_cast<unsigned long long>(depth)|(static_cast<unsigned long long>(p[wideDepth?4:3])<<32));
+        }
+        imm->Unmap(stage.Get(),0);return pixels;
+    };
+    CommandSpy spy(def.Get());
+    auto runStep=[&](UINT mask,bool needDepth,bool clearStencil,UINT expectClears,UINT expectDraws){
+        spy.clears=spy.draws=0;
+        check(s.record(def.Get(),ds.Get(),ss.Get(),iw,ih,0.25f,-0.25f,mask,needDepth,clearStencil),"inc record");
+        check(spy.clears==expectClears,"inc expected clear count");
+        check(spy.draws==expectDraws,"inc expected draw count");
+        ComPtr<ID3D11CommandList>list;check(SUCCEEDED(def->FinishCommandList(FALSE,&list)),"inc finish");
+        imm->ExecuteCommandList(list.Get(),TRUE);
+    };
+    debugClear(d);
+    imm->ClearDepthStencilView(s.view(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,0.93f,0xa5);
+    runStep(0x81,true,true,1,3);
+    auto expected=read();
+    imm->ClearDepthStencilView(s.view(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,0.93f,0xa5);
+    runStep(0x00,true,true,1,1);
+    runStep(0x01,false,false,0,1);
+    runStep(0x80,false,false,0,1);
+    auto actual=read();
+    check(actual==expected,"incremental clearStencil=false seed matches full 0x81 seed byte for byte");
+    bool seen00=false,seen01=false,seen80=false,seen81=false;
+    for(auto p:actual){UINT st=UINT(p>>32);seen00|=st==0x00;seen01|=st==0x01;seen80|=st==0x80;seen81|=st==0x81;}
+    check(seen00&&seen01&&seen80&&seen81,"incremental case covers all 0x00/0x01/0x80/0x81 stencil combinations");
+    check(debugErrors(d)==0,"incremental seed produces zero debug-layer warnings");
+    std::printf("incremental dsv=%d size=%ux%u PASS depth+0x01+0x80 == full 0x81 (clears=1, draws=3)\n",int(vf),ow,oh);
+}
+
 // --bench-seed (a desk measurement on the default hardware adapter, never part of the build): the production Seeder at the layer's real size,
 // 2016^2 game depth-stencil -> 4032^2, mask 00 with depth (what the flight of 2026-10-14 ran), as a command list executed on the immediate context,
 // timed on the GPU with and without the CopyResource that seedLayerDepth made before 2026-10-14 (docs\edvr-gpu-trims-2026-10-14.md).
@@ -309,6 +391,10 @@ int main(int argc,char**argv) {
         for(bool wide:{false,true})for(bool fallback:{false,true}) {
             observedCase(d.Get(),imm.Get(),wide,13,9,fallback);
             observedCase(d.Get(),imm.Get(),wide,7,5,fallback);
+        }
+        for(bool wide:{false,true}) {
+            incrementalStencilCase(d.Get(),imm.Get(),wide,13,9);
+            incrementalStencilCase(d.Get(),imm.Get(),wide,7,5);
         }
         std::printf("seed_test PASS checks=%u driver=%s\n",g_checks,hardware?"hardware":"WARP");return 0;
     }catch(const std::exception&e){std::fprintf(stderr,"seed_test FAIL: %s\n",e.what());return 1;}
