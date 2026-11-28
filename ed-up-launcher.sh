@@ -24,4 +24,10 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-exec python3 "$wrapper" --launcher "$@"
+if [ -f "/usr/bin/prime-run" ]; then
+    #check for prime-run (i.e. "run with nvidia card", and use it if it exists)
+    printf '%s\n' 'ED-UP: Prime-Run detected, running with Nvidia dGPU'
+    exec prime-run python3 "$wrapper" --launcher "$@"
+else
+    exec python3 "$wrapper" --launcher "$@"
+fi
