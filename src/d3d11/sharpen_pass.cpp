@@ -156,7 +156,7 @@ struct EyeState {
     uint32_t                   outW = 0, outH = 0;
     DXGI_FORMAT                outFmt = DXGI_FORMAT_UNKNOWN;
 };
-EyeState g_eye[2];
+EyeState g_eye[4];   // [2] and [3]: frame generation's S of each eye (Phase 2.3b, sharpenPassFrameGen), kept apart from the eyes' own
 
 void releaseSrc(EyeState& e) {
     if (e.srcSrv) { e.srcSrv->Release(); e.srcSrv = nullptr; }
@@ -413,7 +413,7 @@ bool setParams(ID3D11DeviceContext* ctx, const PassParams& p) {
     return true;
 }
 
-void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
+void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength, bool frameGen = false) {
     ID3D11Texture2D* src = nullptr;
     static_cast<IUnknown*>(srcTex)->QueryInterface(
         __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
@@ -628,7 +628,7 @@ void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
         ctx->CSGetUnorderedAccessViews(0, 1, &savedUav);
         ctx->CSGetConstantBuffers(0, 1, &savedCb);
 
-        const int qs = acquireQuerySlot(dev, ctx);
+        const int qs = frameGen ? -1 : acquireQuerySlot(dev, ctx);   // S's sharpening is timed on the synthesizer's line, not in these totals
 
         if (viaCopy) {
             D3D11_BOX box{};
@@ -666,10 +666,14 @@ void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
             ctx->CSSetConstantBuffers(0, 1, &cb);
             ctx->CSSetShaderResources(0, 1, &inSrv);
             ctx->CSSetUnorderedAccessViews(0, 1, &e.outUav, nullptr);
-            GpuCensusScope census(ctx, GpuCensusSection::DoorSharpen);
             // 16x16 (fixed_extra_shader_source.h kSharpenMain): the 8x8 group launched 254,000 groups at the
             // eye's size and the launch was the cost (0.131 ms an eye against 0.089; ui_holo_pass_test --bench-groups).
-            ctx->Dispatch((regionW + 15) / 16, (regionH + 15) / 16, 1);
+            if (frameGen) {
+                ctx->Dispatch((regionW + 15) / 16, (regionH + 15) / 16, 1);   // S's: not in the census's sharpen line (the synthesizer's finish times it)
+            } else {
+                GpuCensusScope census(ctx, GpuCensusSection::DoorSharpen);
+                ctx->Dispatch((regionW + 15) / 16, (regionH + 15) / 16, 1);
+            }
         }
 
         if (qs >= 0) g_qring[qs].timer.end(ctx); // Poll consumes failed End samples too.
@@ -689,7 +693,9 @@ void* sharpenInner(void* srcTex, int eye, const float* bounds, float strength) {
 
         // A parameter write that fails means the dispatch never ran, and a
         // texture nothing dispatched into must never go out as a frame.
-        if (ran) {
+        if (ran && frameGen) {
+            result = e.outTex;   // S's: not counted with the eyes'
+        } else if (ran) {
             result = e.outTex;
             ++g_treats;
             g_lastW = regionW;
@@ -871,6 +877,13 @@ void sharpenPassHeldForTest(SharpenPassHeld* out) {
     out->shaderTried = g_csTried;
     out->formatSupportAsks = g_fmtAsks;
     for (const QuerySlot& q : g_qring) out->queriesInFlight += q.inUse ? 1 : 0;
+}
+
+void* sharpenPassFrameGen(void* srcTex, int eye, const float* bounds, float strength) {
+    if (graphicsRuntimeDisabled() || !srcTex || eye < 0 || eye > 1) return nullptr;
+    void* out = nullptr;
+    guardedBudget(g_budget, [&] { out = sharpenInner(srcTex, eye + 2, bounds, strength, true); });
+    return out;
 }
 
 }  // namespace edvr

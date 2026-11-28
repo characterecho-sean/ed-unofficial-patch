@@ -494,6 +494,15 @@ struct Eye {
     uint32_t wMarkMissStreak = 0;    // consecutive frames whose marks no re-issue published
     bool wPubMatched = false;        // the re-issue that stamped wPubSeq composited by the tonemap difference (false: the plain add)
     uint64_t wMarkNotedSeq = 0;      // the last frame whose mark the door counted (scopeZoomNoteMarkComposite), once an eye-frame
+    // Frame generation, Phase 2.3b (uiLayerFrameGenInputs): what the door did at fgDoorSeq for the synthesized S finished after it -- whether the ripple or the scope lens
+    // rewrote the picture (fgEdit: 1 ripple, 2 scope), and, when the composite ran (fgCompSeq), the layer view it read (the SMAA output when smoothed), its multiply, size and
+    // rectangle. Views are the layer's own, alive until its next composite or release.
+    uint64_t fgDoorSeq = 0, fgCompSeq = 0;
+    uint32_t fgEdit = 0;
+    ID3D11ShaderResourceView* fgLayer = nullptr;
+    ID3D11ShaderResourceView* fgMult = nullptr;
+    uint32_t fgW = 0, fgH = 0;
+    float fgUv[4] = {};
 
     // The half-resolution canopy's glass target G: R16G16B16A16_FLOAT at the draw target's size, cleared at the eye-frame's first half
     // route canopy draw, added bilinearly into W once at the tonemap re-issue, before W is composited. gDs is its own depth-stencil at the same size, seeded from the game's, so no other
@@ -3854,6 +3863,13 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     if (savedCb) savedCb->Release();
 
     ++g_win.composites;
+    // Phase 2.3b: the inputs this composite read, for S's (uiLayerFrameGenInputs).
+    e.fgCompSeq = e.seq;
+    e.fgLayer = layerSrv;
+    e.fgMult = useMult ? e.mSrv.Get() : nullptr;
+    e.fgW = static_cast<uint32_t>(e.w);
+    e.fgH = static_cast<uint32_t>(e.h);
+    std::memcpy(e.fgUv, uv, sizeof(e.fgUv));
     const bool smoothWanted = aaMode != HudAaMode::kOff;
     g_flatEdge.result.outcome = !smoothWanted ? UiLayerEdgeSmoothing::kRaw : (smoothed ? UiLayerEdgeSmoothing::kSmoothed : UiLayerEdgeSmoothing::kFault);
     g_flatEdge.result.applied = appliedAa;
@@ -7987,6 +8003,22 @@ bool uiLayerDoorFromPass(uint32_t eye) {
     return eye <= 1 && g_eye[eye].doorFromPass;
 }
 
+bool uiLayerFrameGenInputs(uint64_t sequence, uint32_t eye, UiLayerFrameGenInputs* out) {
+    if (!out || eye > 1) return false;
+    *out = UiLayerFrameGenInputs{};
+    const Eye& e = g_eye[eye];
+    if (e.fgDoorSeq != sequence) return false;
+    out->pictureEdit = e.fgEdit;
+    if (e.fgCompSeq == sequence && e.compositedSeq == sequence && e.fgLayer) {
+        out->layer = e.fgLayer;
+        out->mult = e.fgMult;
+        out->w = e.fgW;
+        out->h = e.fgH;
+        std::memcpy(out->uv, e.fgUv, sizeof(out->uv));
+    }
+    return true;
+}
+
 // F26: the eye check's re-arm on a native on-foot mode change. The eye tables are reset on each change; a mismatch is tolerated for
 // kEyeSwapPersist composites after it (kEyeRearmWindow composites counts the window), and only a mismatch that persists stands down.
 uint32_t g_eyeEdgeSeen = 0;             // nativeOnFootEdges() at the last composite
@@ -8024,7 +8056,11 @@ ID3D11Texture2D* uiLayerComposite(uint64_t sequence, uint32_t eye, ID3D11Texture
     // The shield ripple: the picture is rewritten over the bubble's coverage BEFORE the weapons/HUD composite below (the ripple must not touch them). A frame
     // that is not EDVR's own comes back rewritten in EDVR's copy of it, which stands in for it from here on.
     Ptr<ID3D11Texture2D> rewritten;
+    const uint64_t rippleBefore = g_win.rippleApplied;
     if (g_rippleLive) guarded("shieldRipple.door", [&] { rippleDoor(e, eye, sequence, frame, region, layerUv, ownedFrame, resolved, &rewritten); });
+    // Phase 2.3b: what this door does to the picture, for the S finished after it (uiLayerFrameGenInputs).
+    e.fgDoorSeq = sequence;
+    e.fgEdit = g_win.rippleApplied != rippleBefore ? 1u : (scopeZoomWanted() ? 2u : 0u);
     const auto handOn = [&]() -> ID3D11Texture2D* {
         if (!rewritten) return nullptr;
         rewritten->AddRef();

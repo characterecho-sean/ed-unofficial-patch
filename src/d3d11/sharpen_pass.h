@@ -80,6 +80,10 @@ void sharpenPassNeverRanText(char* out, size_t cap, bool flat, bool antiAliasing
 
 void sharpenPassShutdown();
 
+// Frame generation, Phase 2.3b: B's sharpening on the synthesized S of `eye` (0 or 1), exactly as edvrSharpen does it to B (the same pass, strength and bounds), into a result
+// texture of S's own (not B's), uncounted in the totals and the census's sharpen line (the synthesizer's finish times it). Null as edvrSharpen is null.
+void* sharpenPassFrameGen(void* srcTex, int eye, const float* bounds, float strength);
+
 // Rigs only. The pass keeps everything it makes -- shader, parameter buffer, both
 // eyes' textures and views -- on one D3D11 device, and a frame whose source lives on
 // another device releases all of it and starts over (a view over a texture another

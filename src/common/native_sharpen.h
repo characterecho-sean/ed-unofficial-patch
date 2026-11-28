@@ -29,4 +29,9 @@ struct EdvrNativeSharpenTable {
   EdvrNativeSharpenClose close;
 };
 extern "C" HRESULT WINAPI edvrAcquireNativeSharpen(const EdvrNativeSharpenRequest*, EdvrNativeSharpenTable*);
-namespace edvr { bool nativeSharpenActive(); }
+namespace edvr {
+bool nativeSharpenActive();
+// Frame generation, Phase 2.3b: whether B's door will sharpen this frame (fix.render_sharpness above 0, the pass not stood down), asked by the temporal pass before the door runs,
+// so the synthesized S is built where the door's sharpener reads it. The door itself decides again (framegen_synth.h: a disagreement leaves that S unfinished).
+bool nativeSharpenWillSharpen();
+}
