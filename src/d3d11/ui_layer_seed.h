@@ -43,7 +43,7 @@ class Seeder {
     x.StencilEnable=TRUE; x.StencilReadMask=0xff; x.StencilWriteMask=0xff; x.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_REPLACE,D3D11_COMPARISON_ALWAYS}; x.BackFace=x.FrontFace;
     if(FAILED(d->CreateDepthStencilState(&x,&all_))) throw std::runtime_error("CreateDepthStencilState");
     x.StencilEnable=FALSE; x.StencilWriteMask=0; if(FAILED(d->CreateDepthStencilState(&x,&depthOnly_))) throw std::runtime_error("CreateDepthOnlyState");
-    x.DepthEnable=FALSE; x.StencilEnable=TRUE; x.StencilReadMask=0xff; x.StencilWriteMask=0xff; x.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_REPLACE,D3D11_COMPARISON_ALWAYS}; x.BackFace=x.FrontFace; if(FAILED(d->CreateDepthStencilState(&x,&stencilOnly_))) throw std::runtime_error("CreateStencilOnlyState"); for(UINT i=0;i<8;i++){x.StencilWriteMask=1u<<i;if(FAILED(d->CreateDepthStencilState(&x,&stencilBits_[i])))throw std::runtime_error("CreateStencilBitState");}
+    x.DepthEnable=FALSE; x.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO; x.StencilEnable=TRUE; x.StencilReadMask=0xff; x.StencilWriteMask=0xff; x.FrontFace={D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_KEEP,D3D11_STENCIL_OP_REPLACE,D3D11_COMPARISON_ALWAYS}; x.BackFace=x.FrontFace; if(FAILED(d->CreateDepthStencilState(&x,&stencilOnly_))) throw std::runtime_error("CreateStencilOnlyState"); for(UINT i=0;i<8;i++){x.StencilWriteMask=1u<<i;if(FAILED(d->CreateDepthStencilState(&x,&stencilBits_[i])))throw std::runtime_error("CreateStencilBitState");}
     D3D11_SAMPLER_DESC s{}; s.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT; s.AddressU=s.AddressV=s.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP; s.MaxLOD=D3D11_FLOAT32_MAX;
     if(FAILED(d->CreateSamplerState(&s,&point_))) throw std::runtime_error("CreateSamplerState");
     D3D11_BUFFER_DESC b{}; b.ByteWidth=(sizeof(C)+15u)&~15u; b.Usage=D3D11_USAGE_DYNAMIC; b.BindFlags=D3D11_BIND_CONSTANT_BUFFER; b.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
@@ -72,20 +72,21 @@ public:
   }
   ID3D11DepthStencilView* view() const { return outputView_.Get(); }
   bool record(ID3D11DeviceContext* freshDeferred, ID3D11ShaderResourceView* inputDepth, ID3D11ShaderResourceView* inputStencil,
-              UINT inputWidth, UINT inputHeight, float jitterX, float jitterY, UINT stencilMask=255, bool needsDepth=true) {
+              UINT inputWidth, UINT inputHeight, float jitterX, float jitterY, UINT stencilMask=255, bool needsDepth=true, bool clearStencil=true) {
     if(!freshDeferred || freshDeferred->GetType()!=D3D11_DEVICE_CONTEXT_DEFERRED || !outputView_) return false;
-    seed(freshDeferred,inputDepth,inputStencil,outputView_.Get(),inputWidth,inputHeight,outW_,outH_,jitterX,jitterY,stencilMask,needsDepth); return true;
+    seed(freshDeferred,inputDepth,inputStencil,outputView_.Get(),inputWidth,inputHeight,outW_,outH_,jitterX,jitterY,stencilMask,needsDepth,clearStencil); return true;
   }
   void seed(ID3D11DeviceContext* c, ID3D11ShaderResourceView* depth, ID3D11ShaderResourceView* stencil, ID3D11DepthStencilView* out,
-            UINT inW,UINT inH,UINT outW,UINT outH,float jitterX,float jitterY,UINT stencilMask=255,bool needsDepth=true) {
+            UINT inW,UINT inH,UINT outW,UINT outH,float jitterX,float jitterY,UINT stencilMask=255,bool needsDepth=true,bool clearStencil=true) {
     if(!c||!depth||!out||!vs_||!ps_) throw std::runtime_error("invalid seeder arguments"); inW_=inW;inH_=inH;outW_=outW;outH_=outH;
-    if(stencil)c->ClearDepthStencilView(out,D3D11_CLEAR_STENCIL,0,0);
+    if(stencil && clearStencil)c->ClearDepthStencilView(out,D3D11_CLEAR_STENCIL,0,0);
     c->RSSetState(nullptr);c->IASetInputLayout(nullptr);c->GSSetShader(nullptr,nullptr,0);c->HSSetShader(nullptr,nullptr,0);c->DSSetShader(nullptr,nullptr,0);c->SetPredication(nullptr,FALSE);
     D3D11_MAPPED_SUBRESOURCE m{}; if(FAILED(c->Map(cb_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&m))) throw std::runtime_error("Map constants"); C x{{inW,inH},{outW,outH},{jitterX,jitterY},0}; memcpy(m.pData,&x,sizeof(x)); c->Unmap(cb_.Get(),0);
     D3D11_VIEWPORT vp{0,0,(float)outW,(float)outH,0,1}; c->RSSetViewports(1,&vp); c->OMSetRenderTargets(0,nullptr,out); const bool hasStencil=stencil!=nullptr; const bool fallback=hasStencil&&!specified_; c->OMSetDepthStencilState((fallback?depthOnly_:(hasStencil?all_:depthOnly_)).Get(),0); c->VSSetShader(vs_.Get(),nullptr,0); c->PSSetShader((fallback?psNoStencil_:(hasStencil?ps_:psNoStencil_)).Get(),nullptr,0); c->VSSetConstantBuffers(0,1,cb_.GetAddressOf()); c->PSSetConstantBuffers(0,1,cb_.GetAddressOf()); ID3D11ShaderResourceView* sr[]={depth,stencil}; c->PSSetShaderResources(0,hasStencil?2:1,sr); c->PSSetSamplers(0,1,point_.GetAddressOf()); c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST); if(needsDepth || (hasStencil && specified_ && stencilMask))c->Draw(3,0);
     ID3D11ShaderResourceView* n[2]={nullptr,nullptr}; c->PSSetShaderResources(0,2,n);
-    if(!specified_ && hasStencil) { /* The fallback requires one pass per set stencil bit. */
-      for(UINT bit=1,bi=0;bit<256;bit<<=1,bi++) { if(!(stencilMask&bit))continue; if(FAILED(c->Map(cb_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&m))) throw std::runtime_error("Map fallback constants"); x.writeBit=bit; memcpy(m.pData,&x,sizeof(x)); c->Unmap(cb_.Get(),0); c->OMSetDepthStencilState(stencilBits_[bi].Get(),bit); c->OMSetRenderTargets(0,nullptr,out); c->PSSetShader(ps_.Get(),nullptr,0); c->PSSetShaderResources(0,2,sr); c->Draw(3,0); c->PSSetShaderResources(0,2,n); }
+    if(!specified_ && hasStencil) { /* The fallback requires one pass per set stencil bit; the void PS reads t1 only. */
+      ID3D11ShaderResourceView* stencilOnlySr[]={nullptr,stencil};
+      for(UINT bit=1,bi=0;bit<256;bit<<=1,bi++) { if(!(stencilMask&bit))continue; if(FAILED(c->Map(cb_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&m))) throw std::runtime_error("Map fallback constants"); x.writeBit=bit; memcpy(m.pData,&x,sizeof(x)); c->Unmap(cb_.Get(),0); c->OMSetDepthStencilState(stencilBits_[bi].Get(),bit); c->OMSetRenderTargets(0,nullptr,out); c->PSSetShader(ps_.Get(),nullptr,0); c->PSSetShaderResources(0,2,stencilOnlySr); c->Draw(3,0); c->PSSetShaderResources(0,2,n); }
     }
   }
 };

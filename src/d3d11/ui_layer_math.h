@@ -600,6 +600,41 @@ inline bool uiLayerSeedKeepsDepth(bool stale, bool seededDepth, bool specifiedSt
     return !stale && seededDepth && !specifiedStencilRef && !privateDepthWriteThisFrame && sameJitter;
 }
 
+// Per-bit refinement of uiLayerSeedWriterDropsStencilOnly: a stencil-only game
+// draw with StencilWriteMask W can only modify bits in W, so seeded bits outside
+// W remain byte-exact copies of the game's stencil plane.
+inline uint8_t uiLayerSeedWriterDroppedStencilMask(const UiDsEffect& writer, uint8_t stencilWriteMask,
+                                                   uint8_t seededMask, bool seededDepth,
+                                                   bool privateDepthWriteThisFrame) {
+    return uiLayerSeedWriterDropsStencilOnly(writer, seededMask, seededDepth, privateDepthWriteThisFrame)
+               ? static_cast<uint8_t>(seededMask & stencilWriteMask)
+               : uint8_t(0);
+}
+
+// ClearDepthStencilView on the game's depth-stencil buffer: D3D11_CLEAR_DEPTH=1,
+// D3D11_CLEAR_STENCIL=2, D3D11_DSV_READ_ONLY_DEPTH=1, D3D11_DSV_READ_ONLY_STENCIL=2.
+// A clear that does not touch the depth plane preserves an unmodified depth seed.
+inline bool uiLayerSeedClearPreservesDepth(uint32_t clearFlags, uint32_t dsvFlags,
+                                           bool seededDepth, bool privateDepthWriteThisFrame) {
+    const bool clearsDepth = (clearFlags & 1u) != 0u && (dsvFlags & 1u) == 0u;
+    return !clearsDepth && seededDepth && !privateDepthWriteThisFrame;
+}
+
+inline bool uiLayerSeedClearTouchesStencil(uint32_t clearFlags, uint32_t dsvFlags) {
+    return (clearFlags & 2u) != 0u && (dsvFlags & 2u) == 0u;
+}
+
+// Incremental per-bit fallback stencil seeding: when a fresh layer keeps its depth
+// and every newly requested bit is still guaranteed zero in the layer's own stencil
+// plane (from the frame's initial stencil clear, untouched by prior seeds or layer
+// stencil writes), we can draw only the newly requested bits without clearing and
+// re-drawing already-seeded bits.
+inline bool uiLayerSeedCanSkipStencilClear(bool stale, bool specifiedStencilRef, bool copyDepth,
+                                           uint8_t newBits, uint8_t stencilZeroedMask) {
+    return !stale && !specifiedStencilRef && !copyDepth && newBits != 0u &&
+           static_cast<uint8_t>(newBits & stencilZeroedMask) == newBits;
+}
+
 struct UiLayerPrivateDepthGuard {
     uint64_t sequence = 0;
     void note(uint64_t current, bool rawDepthWritePotential) {

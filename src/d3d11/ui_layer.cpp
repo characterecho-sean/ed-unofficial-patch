@@ -359,6 +359,7 @@ struct LayerDs {
     uint64_t seq = 0;              // seeded for this frame (0: not, or stale)
     const void* source = nullptr;  // the game's depth texture it was seeded from
     uint8_t seededMask = 0;        // stencil bits seeded
+    uint8_t stencilZeroedMask = 0; // stencil bits in this layer DSV guaranteed 0 (from the last ClearDepthStencilView)
     bool seededDepth = false;
     // The eye's jitter the depth was last copied with (uiLayerSeedKeepsDepth: a repeat seed keeps the depth only at this jitter).
     float seedJx = 0.0f, seedJy = 0.0f;
@@ -633,6 +634,7 @@ struct Draw {
     UiBlendShape shape = UiBlendShape::kRefused;  // as decided
     UiDsEffect ds;               // what it does with the game's depth-stencil
     bool rawDepthWritePotential = false; // before the original DSV's read-only mask
+    bool rawStencilWritePotential = false; // before the original DSV's read-only mask
     uint8_t stencilRead = 0;     // its stencil read mask, for the seed
     // Saved at Begin, put back at End.
     ID3D11RenderTargetView* rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
@@ -1898,6 +1900,7 @@ void releaseLayerDs(LayerDs& l) {
     l.seq = 0;
     l.source = nullptr;
     l.seededMask = 0;
+    l.stencilZeroedMask = 0;
     l.seededDepth = false;
     l.seedJx = l.seedJy = 0.0f;
 }
@@ -2336,7 +2339,7 @@ void mapBodiesPunch(ID3D11DeviceContext* ctx, Eye& e) {
 bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint32_t outW,
                     uint32_t outH, ID3D11DepthStencilView* gameDsv, uint8_t stencilMask,
                     bool needDepth, UiRouteStage stage, const char* who, const UiSeedPlan& seedPlan,
-                    bool keepDepth) {
+                    bool keepDepth, bool clearStencil = true) {
     if (!gameDsv || !g_seeder || !g_deferred) return false;
     Ptr<ID3D11Resource> res;
     gameDsv->GetResource(&res);
@@ -2441,12 +2444,16 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
     }
     // The layer's own target, at the layer's size, in the game's format.
     if (!l.tex || l.w != outW || l.h != outH || l.viewFmt != vd.Format) {
-        // A layer made anew here holds no depth to keep (the callers only keep it for a current layer): copy it.
+        // A layer made anew here holds no depth or zeroed stencil to keep (the callers only keep them for a current layer).
         if (keepDepth) { needDepth = true; keepDepth = false; }
+        if (!clearStencil) { stencilMask = static_cast<uint8_t>(stencilMask | l.seededMask); clearStencil = true; }
         l.tex.Reset();
         l.dsv.Reset();
         l.w = l.h = 0;
         l.seq = 0;
+        l.seededMask = 0;
+        l.stencilZeroedMask = 0;
+        l.seededDepth = false;
         D3D11_TEXTURE2D_DESC ld{};
         ld.Width = outW;
         ld.Height = outH;
@@ -2514,7 +2521,7 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
     try {
         g_seeder->seed(g_deferred.Get(), srcDepth, srcStencil, l.dsv.Get(),
                        td.Width, td.Height, outW, outH, g_draw.jx, g_draw.jy, stencilMask,
-                       needDepth);
+                       needDepth, clearStencil);
         recorded = true;
     } catch (const std::exception&) {
         recorded = false;
@@ -2541,7 +2548,13 @@ bool seedLayerDepth(ID3D11DeviceContext* ctx, Eye& e, LayerDs& l, int eye, uint3
     const bool full = hasStencil && g_seeder->usesSpecifiedStencilRef() && (needDepth || stencilMask);
     l.seq = g_draw.seq;
     l.source = tex.Get();
-    l.seededMask = full ? 0xFF : (hasStencil ? stencilMask : 0);
+    if (clearStencil) {
+        l.seededMask = full ? 0xFF : (hasStencil ? stencilMask : 0);
+        l.stencilZeroedMask = (!full && hasStencil) ? static_cast<uint8_t>(~stencilMask) : uint8_t(0);
+    } else {
+        l.seededMask = full ? 0xFF : static_cast<uint8_t>(l.seededMask | (hasStencil ? stencilMask : 0));
+        l.stencilZeroedMask = (!full && hasStencil) ? static_cast<uint8_t>(l.stencilZeroedMask & ~stencilMask) : uint8_t(0);
+    }
     l.seededDepth = needDepth || full || keepDepth;
     // The jitter the depth was copied with; a kept depth keeps the jitter it has.
     if (needDepth || full) { l.seedJx = g_draw.jx; l.seedJy = g_draw.jy; }
@@ -3121,16 +3134,18 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
         const bool shortBits = (wantMask & ~lds.seededMask) != 0;
         const bool shortDepth = g_draw.ds.depthTest && !lds.seededDepth;
         if (g_draw.ds.tests() && (stale || shortBits || shortDepth)) {
-            const uint8_t mask =
-                static_cast<uint8_t>(wantMask | (stale ? 0 : lds.seededMask));
             const bool depth = g_draw.ds.depthTest || (!stale && lds.seededDepth);
+            const bool specifiedRef = g_seeder && g_seeder->usesSpecifiedStencilRef();
             // A repeat seed whose layer depth is still exactly what a fresh copy would write copies the stencil bits
             // only (uiLayerSeedKeepsDepth). The guard is read before this draw's own note below: this draw writes
             // after its seed. The freshness rule is unchanged.
             const bool keepDepth = uiLayerSeedKeepsDepth(stale, lds.seededDepth,
-                g_seeder && g_seeder->usesSpecifiedStencilRef(), g_privateDepthGuard.active(g_draw.seq),
+                specifiedRef, g_privateDepthGuard.active(g_draw.seq),
                 lds.seedJx == g_draw.jx && lds.seedJy == g_draw.jy);
             const bool copyDepth = depth && !keepDepth;
+            const uint8_t newBits = static_cast<uint8_t>(wantMask & ~lds.seededMask);
+            const bool skipClear = uiLayerSeedCanSkipStencilClear(stale, specifiedRef, copyDepth, newBits, lds.stencilZeroedMask);
+            const uint8_t mask = skipClear ? newBits : static_cast<uint8_t>(wantMask | (stale ? 0 : lds.seededMask));
             UiSeedPlan seedPlan;
             // G's seed is outside the seed census's per-layer tracks (they are the 8-bit layer's and the HDR layer's, keyed by size and eye): the census is a diagnostic and would read a layer of
             // a third size as the HDR layer changing size.
@@ -3142,11 +3157,11 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
                 const bool stencil = dsFormats(vd.Format, &tf, &df, &sf) && sf != DXGI_FORMAT_UNKNOWN;
                 seedPlan = g_seedCensus.plan(g_draw.eye, g_draw.hdr, g_draw.seq, gameDs,
                     layerW, layerH, stale, shortDepth, shortBits, mask, copyDepth,
-                    g_seeder && g_seeder->usesSpecifiedStencilRef(), stencil);
+                    specifiedRef, stencil);
             }
             const bool seeded = seedLayerDepth(ctx, e, lds, g_draw.eye, layerW, layerH, g_draw.dsv, mask, copyDepth,
                                 g_draw.hdr ? UiRouteStage::kHdrSeed : UiRouteStage::kSeed,
-                                gh ? "the half-resolution legacy canopy" : g_draw.hdr ? "a cockpit HUD draw" : "a UI draw", seedPlan, keepDepth);
+                                gh ? "the half-resolution legacy canopy" : g_draw.hdr ? "a cockpit HUD draw" : "a UI draw", seedPlan, keepDepth, !skipClear);
             if (censusSeed) g_seedCensus.seed(g_draw.eye, g_draw.hdr, g_draw.seq,
                 gameDs, layerW, layerH, seedPlan, seeded);
             if (censusSeed && seeded) noteSeedCounts(g_draw.seq, static_cast<int>(g_draw.eye), g_draw.hdr, seedPlan);
@@ -3159,6 +3174,7 @@ bool beginInner(ID3D11DeviceContext* ctx, int which) {
             }
         }
         layerDsv = lds.dsv.Get();
+        if (g_draw.ds.stencilWrite || g_draw.rawStencilWritePotential) lds.stencilZeroedMask = 0;
         if (g_draw.ds.tests() && !g_draw.counted) ++g_win.dsTested;
     }
     // A map sprite's issue binds the eye's sprite depth in the layer's depth place. The game's own state on these is depth off and a stencil write; that write is not made while the
@@ -5442,6 +5458,7 @@ bool uiLayerDecide(ID3D11DeviceContext* ctx, int familyInt, bool verdictForwards
     g_draw.ds = f.ds;
     g_draw.stencilRead = dsState.readMask;
     g_draw.rawDepthWritePotential = dsState.depthEnable && dsState.depthWriteAll;
+    { UiDsState w = dsState; w.readOnlyStencil = false; g_draw.rawStencilWritePotential = uiLayerDsEffect(w, true).stencilWrite; }
     // The pass computed the jitter against the eye's submitted region, which
     // is the target (targetMatchesEye above).
     // The jitter cancel, from the family's table (weapons_fire.h; default cancel, as for the space dust): a pair whose matrices do not
@@ -7491,6 +7508,7 @@ bool uiLayerWorldReissueBegin(ID3D11DeviceContext* ctx) {
             g_draw.ds = UiDsEffect{};
             g_draw.stencilRead = 0;
             g_draw.rawDepthWritePotential = false;
+            g_draw.rawStencilWritePotential = false;
             g_draw.eye = plan.eye;
             g_draw.family = UiLayerFamily::kScreen;
             g_draw.seq = plan.seq;
@@ -7706,9 +7724,12 @@ void seedWritersCheck(ID3D11DeviceContext* ctx, uint32_t count, uint32_t instanc
                 g_seedCensus.event(eye, hdr, g_lastRedirectSeq, key, invalidated);
             }
             if (dropStencilOnly) {
-                l->seededMask = 0;
+                const uint8_t dropped = uiLayerSeedWriterDroppedStencilMask(
+                    writer, ds.writeMask, l->seededMask, l->seededDepth, privateGuard);
+                l->seededMask = static_cast<uint8_t>(l->seededMask & ~dropped);
             } else if (invalidated) {
                 l->seq = 0;
+                l->stencilZeroedMask = 0;
                 ++g_win.seedStale;
             }
         }
@@ -7883,22 +7904,31 @@ void uiLayerNoteDepthClear(void* dsv, uint32_t flags, float depth, uint8_t stenc
     if (!any && !g_seedCensus.enabled) return;
     ResourceInfo info;
     if (!bindingResolve(dsv, &info) || !info.resource) return;
+    D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
+    static_cast<ID3D11DepthStencilView*>(dsv)->GetDesc(&vd);
+    const bool privateGuard = g_privateDepthGuard.active(g_lastRedirectSeq);
+    const bool touchesStencil = uiLayerSeedClearTouchesStencil(flags, vd.Flags);
     for (uint32_t eye = 0; eye < 2; ++eye) {
         Eye& e = g_eye[eye];
         for (LayerDs* l : {&e.ds, &e.hdrDs, &e.gDs}) {
             const bool hdr = l == &e.hdrDs;
-            const bool invalidated = l->seq && l->source == info.resource;
+            const bool matching = l->seq && l->source == info.resource;
+            const bool matchingFresh = matching && l->seq == g_lastRedirectSeq;
+            const bool preservesDepth = matchingFresh &&
+                uiLayerSeedClearPreservesDepth(flags, vd.Flags, l->seededDepth, privateGuard);
+            const bool invalidated = matching && !preservesDepth;
             if (l != &e.gDs && g_seedCensus.matches(eye, hdr, info.resource)) {
-                D3D11_DEPTH_STENCIL_VIEW_DESC vd{};
-                static_cast<ID3D11DepthStencilView*>(dsv)->GetDesc(&vd);
                 DXGI_FORMAT tf, df, sf;
                 const bool hasStencil = dsFormats(vd.Format, &tf, &df, &sf) && sf != DXGI_FORMAT_UNKNOWN;
                 g_seedCensus.event(eye, hdr, g_lastRedirectSeq,
                     uiSeedClearKey(flags, depth, stencil, vd.Flags, uint32_t(vd.Format), hasStencil),
                     invalidated);
             }
-            if (invalidated) {
+            if (preservesDepth) {
+                if (touchesStencil) l->seededMask = 0;
+            } else if (invalidated) {
                 l->seq = 0;
+                l->stencilZeroedMask = 0;
                 ++g_win.seedStale;
             }
         }

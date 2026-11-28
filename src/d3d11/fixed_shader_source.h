@@ -604,12 +604,11 @@ O main(float4 p:SV_POSITION) {
 
 inline constexpr const char* kUiSeedPsDepthOnly = R"(
 cbuffer C:register(b0) { uint2 inSize; uint2 outSize; float2 jitter; uint writeBit; };
-Texture2D<float> D:register(t0); Texture2D<uint4> S:register(t1);
-struct O { float d:SV_Depth; };
-O main(float4 p:SV_POSITION) {
+Texture2D<uint4> S:register(t1);
+void main(float4 p:SV_POSITION) {
   int2 q=int2(floor(p.xy*float2(inSize)/float2(outSize)+float2(jitter)));
-  q=clamp(q,int2(0,0),int2(inSize)-1); uint s=S.Load(int3(q,0)).y;
-  if ((s & writeBit)==0) discard; O o; o.d=D.Load(int3(q,0)); return o;
+  q=clamp(q,int2(0,0),int2(inSize)-1);
+  if ((S.Load(int3(q,0)).y & writeBit)==0) discard;
 })";
 
 inline constexpr const char* kUiSeedPsDepthNoStencil = R"(

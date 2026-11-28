@@ -27,6 +27,30 @@ void testSeedWriterRule() {
           !uiLayerSeedWriterDropsStencilOnly(mixed, 255, true, false) &&
           !uiLayerSeedWriterDropsStencilOnly(UiDsEffect{}, 255, true, false),
           "drop-stencil-only never triggers on depth-only seeds, private depth writes, unseeded depth, or depth writers");
+    check(uiLayerSeedWriterDroppedStencilMask(stencil, 0x04, 0x81, true, false) == 0 &&
+          uiLayerSeedWriterDroppedStencilMask(stencil, 0x05, 0x81, true, false) == 0x01 &&
+          uiLayerSeedWriterDroppedStencilMask(stencil, 0xFF, 0x85, true, false) == 0x85 &&
+          uiLayerSeedWriterDroppedStencilMask(stencil, 0xFF, 0x81, true, true) == 0 &&
+          uiLayerSeedWriterDroppedStencilMask(stencil, 0xFF, 0x81, false, false) == 0 &&
+          uiLayerSeedWriterDroppedStencilMask(depth, 0xFF, 0x81, true, false) == 0 &&
+          uiLayerSeedWriterDroppedStencilMask(mixed, 0xFF, 0x81, true, false) == 0,
+          "per-bit stencil drop invalidates only bits overlapping StencilWriteMask");
+    check(uiLayerSeedClearPreservesDepth(0, 0, true, false) &&
+          uiLayerSeedClearPreservesDepth(2, 0, true, false) &&
+          uiLayerSeedClearPreservesDepth(1, 1, true, false) &&
+          uiLayerSeedClearPreservesDepth(3, 1, true, false) &&
+          !uiLayerSeedClearPreservesDepth(1, 0, true, false) &&
+          !uiLayerSeedClearPreservesDepth(3, 0, true, false) &&
+          !uiLayerSeedClearPreservesDepth(2, 0, false, false) &&
+          !uiLayerSeedClearPreservesDepth(2, 0, true, true),
+          "depth-preserving clear predicate handles CLEAR_DEPTH, CLEAR_STENCIL, READ_ONLY_DEPTH, and private guard");
+    check(!uiLayerSeedClearTouchesStencil(0, 0) &&
+          !uiLayerSeedClearTouchesStencil(1, 0) &&
+          uiLayerSeedClearTouchesStencil(2, 0) &&
+          uiLayerSeedClearTouchesStencil(3, 0) &&
+          !uiLayerSeedClearTouchesStencil(2, 2) &&
+          !uiLayerSeedClearTouchesStencil(3, 2),
+          "stencil-touching clear predicate respects CLEAR_STENCIL and READ_ONLY_STENCIL");
     UiLayerPrivateDepthGuard guard;
     check(guard.active(0) && !guard.active(71), "sequence zero/bootstrap remains conservative");
     guard.note(71, true);
@@ -63,6 +87,15 @@ void testSeedKeepsDepthRule() {
     check(!uiLayerSeedKeepsDepth(false, true, false, guard.active(71), true) &&
           uiLayerSeedKeepsDepth(false, true, false, guard.active(72), true),
           "the private depth guard keeps the predicate false for its frame only");
+    check(uiLayerSeedCanSkipStencilClear(false, false, false, 0x01, 0xFF) &&
+          uiLayerSeedCanSkipStencilClear(false, false, false, 0x80, 0xFE) &&
+          !uiLayerSeedCanSkipStencilClear(false, false, false, 0x01, 0xFE) &&
+          !uiLayerSeedCanSkipStencilClear(false, false, false, 0x81, 0xFE) &&
+          !uiLayerSeedCanSkipStencilClear(true, false, false, 0x01, 0xFF) &&
+          !uiLayerSeedCanSkipStencilClear(false, true, false, 0x01, 0xFF) &&
+          !uiLayerSeedCanSkipStencilClear(false, false, true, 0x01, 0xFF) &&
+          !uiLayerSeedCanSkipStencilClear(false, false, false, 0x00, 0xFF),
+          "incremental stencil-clear skip holds only for fresh per-bit stencil-only growth into guaranteed-zero bits");
 }
 
 using CensusCopyFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
@@ -104,6 +137,7 @@ struct FreshWorld {
         uint64_t seq = 0;
         uint32_t seededW = 0, seededH = 0;
         uint8_t mask = 0;
+        uint8_t zeroed = 0;
         bool depth = false;
         float jx = 0, jy = 0;  // the jitter the depth was last copied with
     };
@@ -148,6 +182,7 @@ struct FreshWorld {
         // Production target recreation sets render sequence zero. Retain old
         // descriptive masks only until the next successful seed, as it does.
         c.seq = 0;
+        c.zeroed = 0;
     }
     void draw(ID3D11DepthStencilView* dst, ID3D11RenderTargetView* colour,
               ID3D11DepthStencilState* state, const float rect[4], uint32_t w, uint32_t h,
@@ -159,7 +194,7 @@ struct FreshWorld {
     }
     // `keepDepth`: production's repeat seed that leaves the layer's depth as it stands (depth is then false, the
     // Seeder copies stencil bits only, and the layer still holds the depth it had, at the jitter it had).
-    bool seed(unsigned cache, unsigned game, uint8_t mask, bool depth, bool keepDepth = false) {
+    bool seed(unsigned cache, unsigned game, uint8_t mask, bool depth, bool keepDepth = false, bool clearStencil = true) {
         ++seedAttempts;
         if (failNextSeed) { failNextSeed = false; return false; }
         Cache& c = caches[cache];
@@ -174,7 +209,7 @@ struct FreshWorld {
             CensusCommandSpy spy(deferred.Get()); check(spy.installed, "real seed Draw/clear observation installed");
             g_censusDraws = g_censusClears = 0;
             seeder.seed(deferred.Get(), copies[game].depth.Get(), copies[game].stencil.Get(), c.layer.dsv.Get(),
-                        12, 8, c.layer.w, c.layer.h, jx, jy, mask, depth);
+                        12, 8, c.layer.w, c.layer.h, jx, jy, mask, depth, clearStencil);
             seedDraws += g_censusDraws; seedClears += g_censusClears;
         }
         ComPtr<ID3D11CommandList> list;
@@ -183,7 +218,14 @@ struct FreshWorld {
         gpu.ctx->ExecuteCommandList(list.Get(), TRUE);
         const bool full = seeder.usesSpecifiedStencilRef() && (depth || mask);
         c.seq = seq; c.source = games[game].tex.Get();
-        c.mask = full ? 255 : mask; c.depth = depth || full || keepDepth;
+        if (clearStencil) {
+            c.mask = full ? 255 : mask;
+            c.zeroed = !full ? static_cast<uint8_t>(~mask) : uint8_t(0);
+        } else {
+            c.mask = full ? 255 : static_cast<uint8_t>(c.mask | mask);
+            c.zeroed = !full ? static_cast<uint8_t>(c.zeroed & ~mask) : uint8_t(0);
+        }
+        c.depth = depth || full || keepDepth;
         if (depth || full) { c.jx = jx; c.jy = jy; }
         if (keepDepth) ++depthKept;
         c.seededW = c.layer.w; c.seededH = c.layer.h; ++seeds;
@@ -195,13 +237,17 @@ struct FreshWorld {
             c.seededW == c.layer.w && c.seededH == c.layer.h;
         const bool shortBits = (requestedMask & ~c.mask) != 0;
         if (!current || shortBits || !c.depth) {
-            const uint8_t want = uint8_t(requestedMask | (current ? c.mask : 0));
             // Production's decision (ui_layer.cpp, the seed in beginInner): a repeat seed for missing stencil bits
-            // keeps the layer's depth when uiLayerSeedKeepsDepth holds. Legacy copies everything every time.
+            // keeps the layer's depth when uiLayerSeedKeepsDepth holds, and skips the stencil clear when every new bit
+            // is still guaranteed zero. Legacy copies everything every time.
             const bool keep = optimized && current && c.depth && shortBits &&
                 uiLayerSeedKeepsDepth(!current, c.depth, seeder.usesSpecifiedStencilRef(),
                                       privateDepthGuard.active(seq), c.jx == jx && c.jy == jy);
-            if (!seed(cache, game, want, !keep, keep)) return false;
+            const uint8_t newBits = static_cast<uint8_t>(requestedMask & ~c.mask);
+            const bool skipClear = optimized && current &&
+                uiLayerSeedCanSkipStencilClear(!current, seeder.usesSpecifiedStencilRef(), !keep, newBits, c.zeroed);
+            const uint8_t want = skipClear ? newBits : static_cast<uint8_t>(requestedMask | (current ? c.mask : 0));
+            if (!seed(cache, game, want, !keep, keep, !skipClear)) return false;
         }
         D3D11_DEPTH_STENCIL_DESC d{};
         d.DepthEnable = TRUE; d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
@@ -229,8 +275,12 @@ struct FreshWorld {
                 effect, c.mask, c.depth, guardActive);
             const bool dirty = optimized ? (!dropStencilOnly && uiLayerSeedWriterInvalidates(
                 effect, c.mask, c.depth, guardActive)) : effect.writes();
-            if (dropStencilOnly) { c.mask = 0; ++preserved; }
-            else if (dirty) c.seq = 0;
+            if (dropStencilOnly) {
+                const uint8_t dropped = uiLayerSeedWriterDroppedStencilMask(
+                    effect, description.writeMask, c.mask, c.depth, guardActive);
+                c.mask = static_cast<uint8_t>(c.mask & ~dropped);
+                ++preserved;
+            } else if (dirty) { c.seq = 0; c.zeroed = 0; }
             else if (effect.writes()) ++preserved;
         }
         D3D11_DEPTH_STENCIL_VIEW_DESC vd{}; games[game].dsv->GetDesc(&vd); vd.Flags = viewFlags;
@@ -252,10 +302,29 @@ struct FreshWorld {
         check(g_censusDraws == 1, "source writer always forwards its original command exactly once");
         gameWriterCommands += g_censusDraws;
     }
-    void clear(unsigned game, UINT flags) {
-        // All clear invalidation deliberately remains the existing rule.
-        for (Cache& c : caches) if (c.seq && c.source == games[game].tex.Get()) c.seq = 0;
-        gpu.ctx->ClearDepthStencilView(games[game].dsv.Get(), flags, .25f, 60);
+    void clear(unsigned game, UINT flags, uint32_t dsvFlags = 0) {
+        const bool guardActive = privateDepthGuard.active(seq);
+        const bool touchesStencil = uiLayerSeedClearTouchesStencil(flags, dsvFlags);
+        for (Cache& c : caches) {
+            if (!c.seq || c.source != games[game].tex.Get()) continue;
+            const bool preservesDepth = optimized && c.seq == seq &&
+                uiLayerSeedClearPreservesDepth(flags, dsvFlags, c.depth, guardActive);
+            if (preservesDepth) {
+                if (touchesStencil) c.mask = 0;
+                ++preserved;
+            } else {
+                c.seq = 0;
+                c.zeroed = 0;
+            }
+        }
+        ID3D11DepthStencilView* target = games[game].dsv.Get();
+        ComPtr<ID3D11DepthStencilView> roView;
+        if (dsvFlags) {
+            D3D11_DEPTH_STENCIL_VIEW_DESC vd{}; games[game].dsv->GetDesc(&vd); vd.Flags = dsvFlags;
+            check(SUCCEEDED(gpu.dev->CreateDepthStencilView(games[game].tex.Get(), &vd, &roView)), "clear view flags");
+            target = roView.Get();
+        }
+        gpu.ctx->ClearDepthStencilView(target, flags, .25f, 60);
     }
     void privateWriter(unsigned cache, unsigned game, bool depth, bool readOnlyOriginal = false,
                        uint64_t capturedSequence = 0) {
@@ -275,6 +344,7 @@ struct FreshWorld {
         const UiDsState raw = uiLayerDsStateFrom(&d, readOnlyOriginal ? D3D11_DSV_READ_ONLY_DEPTH : 0);
         const bool potential = raw.depthEnable && raw.depthWriteAll;
         privateDepthGuard.note(seq, potential);
+        { UiDsState w = raw; w.readOnlyStencil = false; if (uiLayerDsEffect(w, true).stencilWrite) c.zeroed = 0; }
         draw(c.layer.dsv.Get(), nullptr, state.Get(), rect, c.layer.w, c.layer.h, 0, 0);
         // Raw replay deliberately bypasses the game-writer freshness hook.
         D3D11_DEPTH_STENCIL_VIEW_DESC vd{}; games[game].dsv->GetDesc(&vd);
@@ -448,9 +518,9 @@ void testSeedKeepsDepthGpu(Gpu& g) {
         check(freshnessSameDepth(layerBefore, readBackDs(g, opt.caches[0].layer)),
               "keep depth (d): the layer's depth is the same bytes after both stencil-only seeds");
         compareFreshWorlds(old, opt, 0, 0, 3);
-        check(perBit ? (opt.depthKept == 2 && opt.seedDraws + 2 == old.seedDraws)
+        check(perBit ? (opt.depthKept == 2 && opt.seedDraws + 3 == old.seedDraws && opt.seedClears + 2 == old.seedClears)
                      : (opt.depthKept == 0 && opt.seedDraws == old.seedDraws),
-              "keep depth (d): each of the two repeat seeds runs one Draw fewer");
+              "keep depth (d): repeat seeds skip depth passes, stencil clears, and re-drawing bit 0");
     }
     {   // (e) another jitter: the depth is copied again at the new one
         FreshWorld old(g, false), opt(g, true);
@@ -465,6 +535,33 @@ void testSeedKeepsDepthGpu(Gpu& g) {
         compareFreshWorlds(old, opt, 0, 0, 4);
         check(opt.depthKept == 0 && opt.seedDraws == old.seedDraws,
               "keep depth (e): another jitter copies depth again, as legacy does");
+    }
+    {   // (f) per-bit stencil drop + dirty-bit clear-skip refusal
+        FreshWorld old(g, false), opt(g, true);
+        check(old.consume(0, 0) && opt.consume(0, 0), "per-bit (f): initial depth seeds complete");
+        old.gameWriter(0, count, rectA); opt.gameWriter(0, count, rectA);
+        old.gameWriter(0, count, rectB); opt.gameWriter(0, count, rectB);
+        check(old.consume(0, 0, 3) && opt.consume(0, 0, 3), "per-bit (f): bits 0x03 seeded");
+        compareFreshWorlds(old, opt, 0, 0, 3);
+        // Disjoint game stencil writer (writeMask=0x04) leaves seeded bits 0x03 intact -> 0 re-seeds!
+        const unsigned seedsBeforeDisjoint = opt.seeds;
+        old.gameWriter(0, observed, rectA); opt.gameWriter(0, observed, rectA);
+        check(old.consume(0, 0, 3) && opt.consume(0, 0, 3), "per-bit (f): disjoint writer consumer completes");
+        check(opt.seeds == seedsBeforeDisjoint, "per-bit (f): disjoint StencilWriteMask causes zero re-seeds");
+        compareFreshWorlds(old, opt, 0, 0, 3);
+        // Overlapping game stencil writer (writeMask=0x01) drops only bit 0x01; bit 0x02 survives!
+        auto writeBit0 = observed; writeBit0.StencilWriteMask = 0x01;
+        writeBit0.FrontFace.StencilPassOp = D3D11_STENCIL_OP_ZERO; writeBit0.BackFace = writeBit0.FrontFace;
+        old.gameWriter(0, writeBit0, rectA); opt.gameWriter(0, writeBit0, rectA);
+        check(old.consume(0, 0, 2) && opt.consume(0, 0, 2), "per-bit (f): unaffected bit 0x02 survives");
+        check(opt.seeds == seedsBeforeDisjoint, "per-bit (f): unaffected bit 0x02 needs zero re-seeds");
+        compareFreshWorlds(old, opt, 0, 0, 2);
+        // Re-requesting dropped bit 0x01 MUST clear stencil (bit 0 was previously seeded, not zeroed) so zeroed pixels clear!
+        const unsigned clearsBefore = opt.seedClears;
+        check(old.consume(0, 0, 1) && opt.consume(0, 0, 1), "per-bit (f): dropped bit 0x01 re-seeds cleanly");
+        check(opt.seeds == seedsBeforeDisjoint + 1 && opt.seedClears == clearsBefore + 1,
+              "per-bit (f): dirty dropped bit refuses clear-skip and clears stale 1s");
+        compareFreshWorlds(old, opt, 0, 0, 3);
     }
 }
 
@@ -571,8 +668,31 @@ void testSeedFreshnessGpu(Gpu& g) {
         FreshWorld baseline(g, false), guarded(g, true);
         check(baseline.consume(0, 0) && guarded.consume(0, 0), "clear-case seeds complete");
         baseline.clear(0, flags); guarded.clear(0, flags);
-        check(baseline.consume(0, 0) && guarded.consume(0, 0), "all clear flags retain legacy refresh including zero flags");
+        check(baseline.consume(0, 0) && guarded.consume(0, 0), "clear-case follow-up depth consumers complete");
         compareFreshWorlds(baseline, guarded, 0, 0);
-        check(baseline.seeds == 2 && guarded.seeds == 2, "no clear shortcut introduced");
+        const bool preservesDepth = (flags & D3D11_CLEAR_DEPTH) == 0;
+        check(baseline.seeds == 2 && guarded.seeds == (preservesDepth ? 1u : 2u),
+              "stencil-only and no-op clears preserve depth seed; depth clears invalidate");
+    }
+    {   // CLEAR_STENCIL after a stencil consumer drops stencil bits while preserving depth
+        FreshWorld baseline(g, false), guarded(g, true);
+        baseline.gameWriter(0, observed, writes[0]); guarded.gameWriter(0, observed, writes[0]);
+        check(baseline.consume(0, 0, 4) && guarded.consume(0, 0, 4), "stencil-clear case initial seeds complete");
+        compareFreshWorlds(baseline, guarded, 0, 0, 4);
+        baseline.clear(0, D3D11_CLEAR_STENCIL); guarded.clear(0, D3D11_CLEAR_STENCIL);
+        check(baseline.consume(0, 0, 4) && guarded.consume(0, 0, 4), "stencil-clear case follow-up stencil consumers complete");
+        compareFreshWorlds(baseline, guarded, 0, 0, 4);
+        check(baseline.seeds == 2 && guarded.seeds == 2, "CLEAR_STENCIL re-seeds stencil for stencil consumers");
+        if (!guarded.seeder.usesSpecifiedStencilRef())
+            check(guarded.depthKept == 1, "CLEAR_STENCIL repeat seed keeps depth on per-bit seeder");
+    }
+    {   // CLEAR_DEPTH on a READ_ONLY_DEPTH view cannot touch depth -> depth seed preserved
+        FreshWorld baseline(g, false), guarded(g, true);
+        check(baseline.consume(0, 0) && guarded.consume(0, 0), "read-only-depth clear initial seeds complete");
+        baseline.clear(0, D3D11_CLEAR_DEPTH, D3D11_DSV_READ_ONLY_DEPTH);
+        guarded.clear(0, D3D11_CLEAR_DEPTH, D3D11_DSV_READ_ONLY_DEPTH);
+        check(baseline.consume(0, 0) && guarded.consume(0, 0), "read-only-depth clear follow-up consumers complete");
+        compareFreshWorlds(baseline, guarded, 0, 0);
+        check(baseline.seeds == 2 && guarded.seeds == 1, "READ_ONLY_DEPTH clear preserves depth seed");
     }
 }
