@@ -11,6 +11,8 @@
 #include "../../src/common/config.h"
 #include "../../src/openxr/native_sharpen_client.h"
 #include "../../src/common/system_d3d11.h"
+#include "../../src/d3d11/framegen_synth.h"   // Phase 2.3b: the finish the door hands S to (stubbed below)
+#include "../../src/d3d11/ui_layer.h"         // ...and UiLayerFrameGenInputs
 #pragma comment(linker, "/EXPORT:edvrAcquireNativeSharpen")
 using Microsoft::WRL::ComPtr;
 unsigned checks=0, failures=0, calls=0, lastEye=0;
@@ -57,6 +59,22 @@ ID3D11Texture2D* uiLayerComposite(uint64_t,uint32_t,ID3D11Texture2D* frame,const
   if(layeredOut){layeredOut->AddRef();return layeredOut;} return nullptr;
 }
 }
+// Frame generation, Phase 2.3b: the door finishes the synthesizer's S after B (src/d3d11/framegen_synth.h). Stubbed: off by default (the door then asks nothing); `fgOn` with
+// `fgPending` makes the synthesizer hold an S, and the stubs record what the door handed over for it.
+bool fgOn=false,fgPending=false; unsigned fgSharpened=0,fgFinishes=0; uint32_t fgWhy=99; ID3D11Texture2D* fgFrame=nullptr; ID3D11Texture2D* fgB=nullptr; ID3D11Texture2D* fgS=nullptr;
+uint32_t (*fgMenuSink)(ID3D11DeviceContext*,uint32_t,ID3D11Texture2D*,const float*,const float*,const float*)=nullptr; float fgMenuBox[4]{};
+namespace edvr {
+bool frameGenSynthOn(){return fgOn;}
+ID3D11Texture2D* frameGenSynthFinishSource(ID3D11Device*,ID3D11DeviceContext*,uint32_t){return fgOn&&fgPending?fgS:nullptr;}
+ID3D11Texture2D* frameGenSynthFinish(ID3D11DeviceContext*,uint32_t,const FrameGenSynthFinishInputs& in){
+  ++fgFinishes; order+='F'; fgWhy=in.why; fgFrame=in.frame; fgB=in.bFinished; fgPending=false; fgMenuSink=in.menuSink; std::memcpy(fgMenuBox,in.menuBox,sizeof(fgMenuBox)); return nullptr;
+}
+void* sharpenPassFrameGen(void* source,int,const float*,float){++fgSharpened; order+='s'; return source;}
+void temporalPassStageFrameGenDump(ID3D11DeviceContext*,int,ID3D11Texture2D*,ID3D11Texture2D*){}
+bool uiLayerFrameGenInputs(uint64_t,uint32_t,UiLayerFrameGenInputs* out){*out=UiLayerFrameGenInputs{};return true;}
+}
+// EDVR's menu on S (src/d3d11/native_menu.h): the door hands this to the finish; the menu rig draws with the real one.
+uint32_t nativeMenuFrameGenDraw(ID3D11DeviceContext*,uint32_t,ID3D11Texture2D*,const float[4],const float[9],const float[3]){return edvr::kFrameGenFinishDone;}
 struct Device {
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
@@ -256,6 +274,43 @@ void run() {
     layerOnlyEye[0]=layerOnlyEye[1]=false;layerOnlySeq=0;
     check(door.close(door.context)==S_OK,"layer-only door close");
     cfg.set("fix.render_sharpness","0.5");layeredOut=nullptr;   // the client section below sharpens
+  }
+  // Frame generation, Phase 2.3b: with the synthesizer holding an S for the eye, the door finishes it AFTER B, as B was finished: S sharpened by B's strength through its own
+  // slots, then handed with B's finished frame; B's own steps and output are what they are without it. Keys off: the door asks the synthesizer nothing.
+  {
+    auto door=acquire(device,17);auto layer=device.texture();auto sTex=device.texture();
+    cfg.set("fix.render_sharpness","0.6");layeredOut=layer.Get();passSucceeds=true;
+    ID3D11Texture2D* out=nullptr;float box[4]{};
+    order.clear();fgOn=false;fgPending=true;fgS=sTex.Get();
+    check(door.treatEye(door.context,1,0,source.Get(),nullptr,&out,box)==S_OK&&out==layer.Get()&&order=="SC"&&fgFinishes==0,"synthesizer off: B's door alone (no S asked for)");
+    if(out)out->Release();out=nullptr;
+    fgOn=true;fgPending=true;order.clear();
+    check(door.treatEye(door.context,2,0,source.Get(),nullptr,&out,box)==S_OK&&out==layer.Get()&&order=="SCsF"&&fgFinishes==1,
+          "an S waiting: B is sharpened and composited first, then S is sharpened through the frame-generation slots and finished");
+    check(fgWhy==edvr::kFrameGenFinishDone&&fgFrame==sTex.Get()&&fgB==layer.Get(),"...finished (not refused), on S's sharpened frame, with B as its door finished it beside it");
+    check(fgMenuSink==&nativeMenuFrameGenDraw&&fgMenuBox[0]==0.f&&fgMenuBox[1]==0.f&&fgMenuBox[2]==1.f&&fgMenuBox[3]==1.f,
+          "...and hands it EDVR's menu on S, with the bounds B's menu gets (the whole frame)");
+    if(out)out->Release();out=nullptr;
+    cfg.set("fix.render_sharpness","0");fgPending=true;order.clear();
+    check(door.treatEye(door.context,3,0,source.Get(),nullptr,&out,box)==S_OK&&order=="CF"&&fgWhy==edvr::kFrameGenFinishDone&&!fgFrame,"sharpening off for B: S is not sharpened either");
+    if(out)out->Release();out=nullptr;
+    layerOnlyEye[0]=true;layerOnlySeq=4;fgPending=true;order.clear();
+    door.treatEye(door.context,4,0,source.Get(),nullptr,&out,box);
+    check(fgWhy==edvr::kFrameGenFinishLayerOnly&&!fgFrame,"a layer-only eye leaves S unfinished, named layer_only");
+    if(out)out->Release();out=nullptr;
+    layerOnlyEye[0]=false;layerOnlySeq=0;fgPending=true;
+    check(door.treatEye(door.context,4,0,source.Get(),nullptr,&out,box)==E_INVALIDARG&&fgWhy==edvr::kFrameGenFinishNoDoor,"a door that refuses the eye leaves S unfinished, named no_door");
+    if(out)out->Release();out=nullptr;
+    {
+      const float flippedU[4]={1.f,0.f,0.f,1.f};fgPending=true;fgMenuSink=nullptr;order.clear();
+      door.treatEye(door.context,5,0,source.Get(),flippedU,&out,box);
+      check(fgWhy==edvr::kFrameGenFinishDone&&fgMenuSink==&nativeMenuFrameGenDraw&&fgMenuBox[0]==1.f&&fgMenuBox[1]==0.f&&fgMenuBox[2]==0.f&&fgMenuBox[3]==1.f,
+            "a B flipped across: S's menu gets B's flips");
+      if(out)out->Release();out=nullptr;
+    }
+    fgOn=false;fgPending=false;layeredOut=nullptr;
+    check(door.close(door.context)==S_OK,"frame-generation door close");
+    cfg.set("fix.render_sharpness","0.5");
   }
   edvr::openxr::NativeSharpenClient client;
   require(client.acquire(GetModuleHandleW(nullptr),device.device.Get(),11)==S_OK,"client validates same-module export table");

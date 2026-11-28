@@ -219,6 +219,7 @@ const char* kSampleIni =
     "# Developer instrument. Empty is off.\r\n"
     "#dump_draws =\r\n"
     "#dump_eyes =\r\n"
+    "#frame_generation =\r\n"
     "read_game_bindings = 1\r\n"
     "\r\n"
     "[menu]\r\n"
@@ -240,6 +241,7 @@ void testIniRoundTrip() {
         {"dump_draws", joy(kGladiator, 0)},
         {"dump_eyes", pad(kPadLeftShoulder)},
         {"dump_eyes", key(0xBA)},                  // ';': the one the ini's own comment rule would eat
+        {"frame_generation", key(0xE2)},           // the OEM_102 key (vk 0xE2), a free one on ISO keyboards
     };
     for (const Case& c : cases) {
         const std::string text = format(c.value);
@@ -2429,7 +2431,7 @@ void testRows() {
         checkf(contains(all, nEveryone, i), "hotkey.%s is on the page with developer mode off", key);
         checkf(contains(dev, nDev, i), "hotkey.%s is on the page with developer mode on", key);
     }
-    for (const char* key : {"dump_draws", "dump_eyes"}) {
+    for (const char* key : {"dump_draws", "dump_eyes", "frame_generation"}) {
         const int i = rowIndex(key);
         checkf(i >= 0, "hotkey.%s has a generated row", key);
         checkf(i >= 0 && kMenuRows[i].kind == MenuKind::Hotkey && kMenuRows[i].tier == MenuTier::Advanced &&
@@ -2438,7 +2440,7 @@ void testRows() {
         checkf(!contains(all, nEveryone, i), "hotkey.%s is NOT on the page with developer mode off", key);
         checkf(contains(dev, nDev, i), "hotkey.%s is on the page with developer mode on", key);
     }
-    check(nEveryone == 3 && nDev == 5, "three rows for everyone (menu, AA comparison, camera history), five in developer mode");
+    check(nEveryone == 3 && nDev == 6, "three rows for everyone (menu, AA comparison, camera history), six in developer mode");
     check(rowIndex("read_game_bindings") < 0, "a plain [hotkey] setting is not a row");
     // The flat profile's page (hotkeyPageRowsFor): the Fix rows whose key the flat profile reads, and nothing else, whatever the developer switch says. VR's is as it was.
     {
@@ -2467,7 +2469,7 @@ void testRows() {
         for (int i = 0; i < kCount; ++i)
             investigationRow |= kMenuRows[i].kind == MenuKind::Hotkey && (strncmp(kMenuRows[i].key, "concourse_", 10) == 0 || strcmp(kMenuRows[i].key, "gpu_pass_profile") == 0);
         check(!investigationRow, "no investigation hotkey (concourse_*, gpu_pass_profile) is a menu row");
-        check(nVr == nEveryone && nVrDev == nDev && nVr == 3 && nVrDev == 5, "the VR page is unchanged: three rows, five with developer mode");
+        check(nVr == nEveryone && nVrDev == nDev && nVr == 3 && nVrDev == 6, "the VR page is unchanged: three rows, six with developer mode");
         bool same = true;
         for (int k = 0; k < nVr; ++k) same &= vr[k] == all[k];
         check(same, "the VR page's rows are hotkeyPageRows' own");

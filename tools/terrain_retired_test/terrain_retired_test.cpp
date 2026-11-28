@@ -351,12 +351,13 @@ struct Mutation {
     bool needsWorld;
 };
 const Mutation kMutations[] = {
-    {"mv head path: tvUsed sign flipped", "mv", "dp = dp * z + tvUsed.xyz;", "dp = dp * z - tvUsed.xyz;", false},
-    {"mv world path: tvCam sign flipped", "mv", "\n                    dp = dp * z + tvCam.xyz;",
-     "\n                    dp = dp * z - tvCam.xyz;", true},
-    {"main head path: fetchHistoryT tv sign flipped", "main", "dp = dp * z + tv;", "dp = dp * z - tv;", false},
-    {"main world path: fetchHistoryT tvCam sign flipped", "main", "\n                dp = dp * z + tvCam.xyz;",
-     "\n                dp = dp * z - tvCam.xyz;", true},
+    {"mv head path: tvUsed sign flipped", "mv", "dR2.xyz, tvUsed.xyz);", "dR2.xyz, -tvUsed.xyz);", false},
+    {"mv world path: tvCam sign flipped", "mv", "\n                dp = temporalCarry(d, z, far, c2R0.xyz, c2R1.xyz, c2R2.xyz, tvCam.xyz);",
+     "\n                dp = temporalCarry(d, z, far, c2R0.xyz, c2R1.xyz, c2R2.xyz, -tvCam.xyz);", true},
+    {"main head path: fetchHistoryT tv sign flipped", "main", "dp = temporalCarry(d, z, far, r0, r1, r2, tv);",
+     "dp = temporalCarry(d, z, far, r0, r1, r2, -tv);", false},
+    {"main world path: fetchHistoryT tvCam sign flipped", "main", "\n            dp = temporalCarry(d, z, far, c2R0.xyz, c2R1.xyz, c2R2.xyz, tvCam.xyz);",
+     "\n            dp = temporalCarry(d, z, far, c2R0.xyz, c2R1.xyz, c2R2.xyz, -tvCam.xyz);", true},
 };
 constexpr int kMutationCount = 4;
 
