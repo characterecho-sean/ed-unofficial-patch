@@ -23,7 +23,7 @@ From a script, Steam Launch Options, or another launcher such as `min-ed-launche
 - In Steam's **Launch Options**, wrap `%command%` using the full path to `ed-up-launcher.exe` (Steam does not expand `%LOCALAPPDATA%` in Launch Options; replace `<your-name>` with your Windows user name) so ED-UP runs its pre-launch steps and then starts Steam's wrapped `EDLaunch.exe` directly with `/vr` or `/novr` instead of re-entering `steam://rungameid`:
 
 ```text
-"C:\Users\<your-name>\AppData\Local\EDVR\launcher\ed-up-launcher.exe" --headless %command%
+"C:\Users\<your-name>\AppData\Local\EDUP\launcher\ed-up-launcher.exe" --headless %command%
 ```
 
 - As a pre-launch update hook in `min-ed-launcher` (without launching the game through ED-UP):
@@ -98,7 +98,7 @@ Download `ed-up-launcher-linux-<version>.zip` from the [release](https://github.
 
 `--dry-run` prints what would run and writes nothing. Options for the launcher itself go after a lone `--`, for example `./ed-up-launcher.sh -- --channel rc`.
 
-It runs inside Elite's Proton prefix. Downloads and settings stay there, under `drive_c/users/steamuser/AppData/Local/EDVR` in `steamapps/compatdata/359320/pfx`.
+It runs inside Elite's Proton prefix. Downloads and settings stay there, under `drive_c/users/steamuser/AppData/Local/EDUP` in `steamapps/compatdata/359320/pfx`.
 
 Play starts Elite through Steam. Starting the game directly, without Steam, is a Windows checkbox. On Linux, Play is for a Steam install. An Epic copy can be installed with the launcher, which is run under the copy's own Wine or Proton ([Epic on Linux](Install-on-Linux.md#epic-on-linux)), and it starts from Heroic, Legendary, Lutris or Epic.
 
