@@ -47,6 +47,10 @@ class EyeCapture final {
   // metadata; transfer retirement still drains any outstanding handoff.
   HRESULT completePending(GpuWorkObserver* observer = nullptr,
                           TransferWallTimes* times = nullptr);
+  // Frame generation 2.3 (Lock): takes a texture of this capture's own device as the eye's image, by reference and with no copy (the synthetic frame S, which the
+  // runtime already holds in a private texture of its own, framegen_slot_transfer.h). Local captures only (initialize, not initializeShared). The texture must be an
+  // 8-bit RGBA/BGRA typeless one, the formats shaderView makes views of. It stays the eye's image until the next adopt, capture, reset or shutdown.
+  HRESULT adopt(vr::EVREye eye, ID3D11Texture2D* texture, const vr::VRTextureBounds_t& bounds, vr::EColorSpace colorSpace);
   bool hasPending() const;
 
   // Borrowed pointers: pixels remain immutable until reset, shutdown, or the

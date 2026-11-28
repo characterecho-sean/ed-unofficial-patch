@@ -888,7 +888,18 @@ void readoutMachine() {
     m.didSubmit(7);check(!m.compositing(),"readout machine: and is not shown until its own raster is taken");
 }
 }
-int wmain(int argc,wchar_t** argv) {
+// Frame generation 2.4 (common/framegen_gate.h): the GPU and CPU series' median and maximum over a window, the gate's H1 inputs.
+void spreads() {
+    NativePerfHistory h;
+    const double ms[]={9,12,11,30,10};
+    for(unsigned i=0;i<5;++i)h.noteFrameWork(i+1,10000+i*10,ms[i]);
+    const NativePerfSpread s=h.applicationGpuSpread(10045,2000);
+    check(s.count==5&&approx(s.medianMs,11)&&approx(s.maxMs,30),"frame generation gate: the GPU series' median and maximum over the window");
+    const NativePerfSpread last=h.applicationGpuSpread(10045,10);
+    check(last.count==1&&approx(last.medianMs,10)&&approx(last.maxMs,10),"frame generation gate: the window cuts the older samples");
+    check(!h.applicationGpuSpread(13000,2000).count,"frame generation gate: a stale series spreads nothing");
+    check(!h.applicationCpuSpread(10045,2000).count,"frame generation gate: an empty series spreads nothing");
+}int wmain(int argc,wchar_t** argv) {
     if(argc!=2)return 2;
     if(!std::wcscmp(argv[1],L"--dry-run")){std::puts("native_perf_history_test: dry-run (no runtime, device or files)");return 0;}
     if(std::wcscmp(argv[1],L"--self-test"))return 2;
@@ -896,5 +907,6 @@ int wmain(int argc,wchar_t** argv) {
     frameTicksChain();frameTicksTopThree();frameTicksOddClocks();frameTicksUncut();frameShareText();nativeLongFrameFits();frameTickCostNote();
     fpsOverlayModes();detailedText();flatCorner();readoutMachine();
     presentedTally();presentedRing();presentedBudgets();readoutText();
+    spreads();
     std::printf("native_perf_history_test: %u checks, %u failures\n",checks,failures);return failures?1:0;
 }

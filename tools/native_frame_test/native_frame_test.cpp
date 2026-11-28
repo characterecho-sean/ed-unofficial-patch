@@ -6381,14 +6381,14 @@ int wmain(int argc, wchar_t** argv) {
               "F101: F31 to F100's version 1 input (84 bytes, the words alone) is still accepted; a version 1 input of 80 or 96 bytes is refused");
         // This runtime's every step (11 down to 1, the shapes native_frame.h gives the client) is taken by this provider in the shape asked.
         bool newOk = true;
-        for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_11; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
+        for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_12; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
             EdvrNativeFrameInput f = input(41, 7, ++seq);
             edvr::nativeFrameInputShape(v, f);
             EdvrNativeFrameOutput o = edvr::nativeFrameAsk(v);
             const EdvrNativeFrameOutput asked = o;
             newOk = newOk && table.beginFrame(table.context, &f, &o) == S_OK && o.version == asked.version && o.size == asked.size;
         }
-        check(newOk, "F101: this runtime's every ladder step (11 to 1) is accepted by this provider and answered in the shape asked");
+        check(newOk, "F101: this runtime's every ladder step (12 to 1) is accepted by this provider and answered in the shape asked");
     }
 
     // ---- World scale (visual.world_scale): version 11 ----------------------------------------------------------------------------------------------------------
@@ -6453,6 +6453,54 @@ int wmain(int argc, wchar_t** argv) {
                   offsetof(EdvrNativeFrameOutput, positionRecentre) == offsetof(EdvrNativeFrameOutput, reservedTerrainGuard) - 4u,
               "world scale: the percent is the last of the retired guard's 21 words (the struct is 184 bytes, as it was)");
         cfg.set("visual.world_scale", "");
+    }
+
+    // ---- Frame generation, Phase 1: version 12 ----------------------------------------------------------------------------------------------------------------
+    // A version 12 answer carries fix.frame_generation_shadow in reservedTerrainGuard[18]; a version 11 answer and every older one leave it zero (the runtime reads off);
+    // the world scale and the version 11 words ride beside it unchanged; a version 12 ask with a version 2 input is refused like 10 and 11.
+    {
+        EdvrNativeFrameInput base = input(41, 7, 100000);
+        base.version = EDVR_NATIVE_FRAME_INPUT_VERSION_3;
+        const float local[12] = {1, 0, 0, 0.1f, 0, 1, 0, 1.6f, 0, 0, 1, -0.2f};
+        std::memcpy(base.localHead, local, sizeof(local));
+        base.localValid = 1;
+        const auto ask = [&](uint32_t version, uint64_t sequence) {
+            EdvrNativeFrameInput f = base;
+            f.sequence = sequence;
+            EdvrNativeFrameOutput o{sizeof(o), version};
+            for (uint32_t& w : o.reservedTerrainGuard) w = 0xA5A5A5A5u;
+            const bool ok = table.beginFrame(table.context, &f, &o) == S_OK;
+            return std::make_pair(ok, o);
+        };
+        // Phase 2.3: fix.frame_generation (Lock) rides word 17 of the same version 12 answer, with no ladder step; the shadow's word 18 beside it is its own; a version 11 or
+        // older answer leaves word 17 zero whatever the key says (an old runtime never reads it; one that asks 11 reads off).
+        edvr::nativeFrameSetFrameGenLock(false);
+        const auto lockOff = ask(EDVR_NATIVE_FRAME_VERSION_12, 100006);
+        edvr::nativeFrameSetFrameGenLock(true);
+        const auto lockOn = ask(EDVR_NATIVE_FRAME_VERSION_12, 100007);
+        const auto lockOn11 = ask(EDVR_NATIVE_FRAME_VERSION_11, 100008);
+        edvr::nativeFrameSetFrameGenLock(false);
+        const uint32_t lw = EDVR_NATIVE_FRAME_FRAMEGEN_LOCK_WORD;
+        check(lockOff.first && lockOff.second.reservedTerrainGuard[lw] == 0u && lockOn.first && lockOn.second.version == EDVR_NATIVE_FRAME_VERSION_12 &&
+                  lockOn.second.reservedTerrainGuard[lw] == 1u && lw == 17u,
+              "frame generation lock: a version 12 answer carries fix.frame_generation in word 17 (1 on, 0 off)");
+        // Phase 2.4: auto rides the same word as 2 (the gate closed) or 3 (open); a version 11 answer still leaves it zero.
+        edvr::nativeFrameSetFrameGenLockWord(2u);
+        const auto autoClosed = ask(EDVR_NATIVE_FRAME_VERSION_12, 100010);
+        edvr::nativeFrameSetFrameGenLockWord(3u);
+        const auto autoOpen = ask(EDVR_NATIVE_FRAME_VERSION_12, 100011);
+        const auto autoOpen11 = ask(EDVR_NATIVE_FRAME_VERSION_11, 100012);
+        edvr::nativeFrameSetFrameGenLockWord(0u);
+        const auto autoOff = ask(EDVR_NATIVE_FRAME_VERSION_12, 100013);
+        check(autoClosed.first && autoClosed.second.reservedTerrainGuard[lw] == 2u && autoOpen.first && autoOpen.second.reservedTerrainGuard[lw] == 3u &&
+                  autoOpen11.first && autoOpen11.second.reservedTerrainGuard[lw] == 0u && autoOff.first &&
+                  autoOff.second.reservedTerrainGuard[lw] == 0u,
+              "frame generation 2.4: auto rides word 17 as 2 (gate closed) or 3 (open), a version 11 answer leaves it zero, and 0 is off again");
+        check(lockOn11.first && lockOn11.second.version == EDVR_NATIVE_FRAME_VERSION_11 && lockOn11.second.reservedTerrainGuard[lw] == 0u,
+              "frame generation lock: a version 11 answer leaves word 17 zero whatever the key says (an older runtime reads off)");
+        bool rest = true;
+        for (uint32_t i = 10; i < 19; ++i) if (i != lw) rest = rest && lockOn.second.reservedTerrainGuard[i] == 0u;
+        check(rest && sizeof(EdvrNativeFrameOutput) == 184, "frame generation lock: the retired words 10..16 stay zero and the struct is still 184 bytes");
     }
 
     check(table.close(table.context) == S_OK && !edvr::glitchConsumerPresent(),

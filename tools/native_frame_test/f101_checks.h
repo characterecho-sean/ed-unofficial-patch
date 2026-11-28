@@ -93,7 +93,7 @@ inline EdvrNativeFrameOutput releasedAsk(uint32_t version) {
 // ladder settles on, 0 when every step was refused.
 template <class Accept>
 inline uint32_t ladder(Accept&& accept, bool wordsOnly = false) {
-    for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_11; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
+    for (uint32_t v = EDVR_NATIVE_FRAME_VERSION_12; v >= EDVR_NATIVE_FRAME_VERSION_1; --v) {
         EdvrNativeFrameInput in{};
         edvr::nativeFrameInputShape(v, in);
         if (wordsOnly && in.version == EDVR_NATIVE_FRAME_INPUT_VERSION_1) in.size = EDVR_NATIVE_FRAME_INPUT_WORDS_1;

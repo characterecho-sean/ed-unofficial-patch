@@ -145,6 +145,35 @@ void run() {
   check(d.pixels(previous.texture(vr::Eye_Left),firstColor)&&d.pixels(previous.texture(vr::Eye_Right),secondColor),"next incomplete capture and mutable game texture cannot corrupt saved pair");
   cap.capture(vr::Eye_Right,&texture);
   check(cap.exchangeBuffers(previous)&&d.pixels(previous.texture(vr::Eye_Left),0xFF000000)&&d.pixels(cap.texture(vr::Eye_Right),secondColor),"second completed pair rotates both buffers");
+  // Frame generation 2.3: adopt takes a typeless 8-bit texture of the capture's own device by reference (no copy), with the bounds and colour space given; views follow it.
+  {
+    EyeCapture slot;check(SUCCEEDED(slot.initialize(d.device.Get())),"adopt: a local capture");
+    auto s0=d.texture(DXGI_FORMAT_R8G8B8A8_TYPELESS),s1=d.texture(DXGI_FORMAT_B8G8R8A8_TYPELESS);
+    d.fill(s0.Get(),firstColor);d.fill(s1.Get(),secondColor);
+    const vr::VRTextureBounds_t half{0.f,0.f,0.5f,1.f};
+    check(slot.adopt(vr::Eye_Left,s0.Get(),half,vr::ColorSpace_Gamma)==S_OK&&slot.adopt(vr::Eye_Right,s1.Get(),{0.f,0.f,1.f,1.f},vr::ColorSpace_Linear)==S_OK,
+          "adopt: both eyes take a typeless RGBA / BGRA texture");
+    check(slot.texture(vr::Eye_Left)==s0.Get()&&slot.texture(vr::Eye_Right)==s1.Get()&&slot.bounds(vr::Eye_Left).uMax==0.5f&&slot.colorSpace(vr::Eye_Right)==vr::ColorSpace_Linear,
+          "adopt: the very textures (no copy), with the bounds and colour space given");
+    ComPtr<ID3D11ShaderResourceView> v0,v1;
+    check(slot.shaderView(vr::Eye_Left,&v0)==S_OK&&slot.shaderView(vr::Eye_Right,&v1)==S_OK&&slot.shaderViewsCreated()==2,"adopt: views are made for both");
+    ComPtr<ID3D11ShaderResourceView> again;
+    check(slot.adopt(vr::Eye_Left,s0.Get(),half,vr::ColorSpace_Gamma)==S_OK&&slot.shaderView(vr::Eye_Left,&again)==S_OK&&again==v0&&slot.shaderViewsCreated()==2,
+          "adopt: the same texture again keeps its view");
+    auto other=d.texture(DXGI_FORMAT_R8G8B8A8_TYPELESS);
+    ComPtr<ID3D11ShaderResourceView> moved;
+    check(slot.adopt(vr::Eye_Left,other.Get(),half,vr::ColorSpace_Gamma)==S_OK&&slot.shaderView(vr::Eye_Left,&moved)==S_OK&&moved!=v0,"adopt: another texture gets a view of its own");
+    auto typed=d.texture(DXGI_FORMAT_R8G8B8A8_UNORM),wide=d.texture(DXGI_FORMAT_R11G11B10_FLOAT),theirs=foreign.texture(DXGI_FORMAT_R8G8B8A8_TYPELESS);
+    check(slot.adopt(vr::Eye_Left,typed.Get(),half,vr::ColorSpace_Gamma)==E_INVALIDARG&&slot.adopt(vr::Eye_Left,wide.Get(),half,vr::ColorSpace_Gamma)==E_INVALIDARG&&
+          slot.adopt(vr::Eye_Left,theirs.Get(),half,vr::ColorSpace_Gamma)==E_INVALIDARG&&slot.adopt(vr::Eye_Left,nullptr,half,vr::ColorSpace_Gamma)==E_INVALIDARG&&
+          slot.adopt(vr::EVREye(2),s0.Get(),half,vr::ColorSpace_Gamma)==E_INVALIDARG&&slot.adopt(vr::Eye_Left,s0.Get(),{0.f,0.f,2.f,1.f},vr::ColorSpace_Gamma)==E_INVALIDARG,
+          "adopt: a typed or float format, another device's texture, none, a bad eye and bad bounds are refused");
+    check(slot.texture(vr::Eye_Left)==other.Get(),"adopt: ...and a refusal leaves the eye as it was");
+    slot.reset();
+    check(!slot.texture(vr::Eye_Left)&&!slot.texture(vr::Eye_Right),"adopt: reset lets both go");
+    EyeCapture none;
+    check(none.adopt(vr::Eye_Left,s0.Get(),half,vr::ColorSpace_Gamma)==E_UNEXPECTED,"adopt: an uninitialized capture refuses");
+  }
 }
 }
 int main(int argc,char** argv) {

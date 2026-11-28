@@ -28,6 +28,18 @@ NativePerfAverage NativePerfHistory::Stream::average(unsigned field,uint64_t now
     if(result.count)result.meanMs=sum/result.count;
     return result;
 }
+NativePerfSpread NativePerfHistory::Stream::spread(unsigned field,uint64_t now,uint64_t window) const noexcept {
+    NativePerfSpread result{};
+    if(!fresh(now))return result;
+    double v[kCapacity];
+    unsigned n=0;
+    for(unsigned i=0;i<count;++i)if(age(now,at(i).at,window))v[n++]=at(i).values[field];
+    if(!n)return result;
+    std::nth_element(v,v+n/2,v+n);
+    result.count=n;result.medianMs=v[n/2];
+    result.maxMs=*std::max_element(v,v+n);
+    return result;
+}
 int NativePerfHistory::Stream::graph(float* out,int max,uint64_t now) const noexcept {
     if(!out||max<=0||!fresh(now))return 0;
     unsigned eligible=0;
@@ -140,6 +152,8 @@ void NativePerfHistory::observe(bool native,const NativeTimingSnapshot& t,const 
 NativePerfAverage NativePerfHistory::submit(uint64_t n,uint64_t w)const noexcept{return cpu_.average(0,n,w);}
 NativePerfAverage NativePerfHistory::applicationCpu(uint64_t n,uint64_t w)const noexcept{return applicationCpu_.average(0,n,w);}
 NativePerfAverage NativePerfHistory::applicationGpu(uint64_t n,uint64_t w)const noexcept{return applicationGpu_.average(0,n,w);}
+NativePerfSpread NativePerfHistory::applicationCpuSpread(uint64_t n,uint64_t w)const noexcept{return applicationCpu_.spread(0,n,w);}
+NativePerfSpread NativePerfHistory::applicationGpuSpread(uint64_t n,uint64_t w)const noexcept{return applicationGpu_.spread(0,n,w);}
 void NativePerfHistory::noteFrameWork(uint64_t sequence,uint64_t now,double ms) noexcept {
     // The frame's GPU work span with the application clock off (gpu_census.cpp): the same series the application render reads.
     if (sequence && duration(ms)) applicationGpu_.add(sequence,now,ms);

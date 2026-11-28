@@ -24,6 +24,13 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format (main)
 RWTexture2D<float4> N : register(u1);    // the new history
+#ifndef EDVR_FG_MOTION
+#define EDVR_FG_MOTION 0
+#endif
+#if EDVR_FG_MOTION
+// Only mv uses this alias; main history N is eliminated from that entry.
+RWTexture2D<float2> FGPhysicalMotion : register(u1);
+#endif
 RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 unused (the mover mask's, retired); 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 the pixels that took the celestial path (decision 12; mv only), 40-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-55 the engine path's pixel kinds (mv only, gCount 48-53)
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (the mv entry)
@@ -739,6 +746,48 @@ groupshared float mainDepthTile[100];
 static bool gMainDepthTile = false;
 static int2 gMainDepthTileOrigin = int2(0, 0);   // the group's first pixel (main sets it)
 #endif
+)HLSL"
+// (adjacent literals: MSVC caps one at 16 KB)
+R"HLSL(
+// The pixel class and the carry, as functions of their inputs alone (no constant-buffer globals): the history fetch and the motion pass use them,
+// and so does the frame-generation shadow scorer (docs/design-frame-generation-2026-10-26.md, "One owner"), which cuts them out between the two
+// EDVR_TEMPORAL_CARRY markers below.
+// EDVR_TEMPORAL_CARRY begin
+// Shared by the history fetch, the motion pass and the frame-generation shadow scorer: the view direction of render pixel p (z = -1).
+float3 temporalPixelDir(float2 p, float4 tn, int2 sz) {
+    float3 d;
+    d.x = tn.x + (p.x + 0.5) / float(sz.x) * (tn.y - tn.x);
+    d.y = tn.w - (p.y + 0.5) / float(sz.y) * (tn.w - tn.z);
+    d.z = -1.0;
+    return d;
+}
+// Shared by the history fetch, the motion pass and the frame-generation shadow scorer: metres from the written depth (depth = A + B / z); far is set when there is none.
+float temporalDepthMetres(float zr, float depthA, float depthB, out bool far) {
+    float den = zr - depthA;
+    far = zr <= 0.0 || den <= 0.0;
+    return far ? 0.0 : depthB / den;
+}
+// Shared by the history fetch, the motion pass and the frame-generation shadow scorer: whether a pixel takes the camera's path (the world) rather than the head's (the ship).
+bool temporalWorldPath(bool worldOn, bool far, float z, float splitMetres, bool scannerUi) {
+    return worldOn && (far || z > splitMetres) && !scannerUi;
+}
+// Shared by the history fetch, the motion pass and the frame-generation shadow scorer: the pixel's direction through the rows, carried by the translation at its depth unless it is far.
+float3 temporalCarry(float3 d, float z, bool far, float3 r0, float3 r1, float3 r2, float3 t) {
+    float3 dp = float3(dot(r0, d), dot(r1, d), dot(r2, d));
+    if (!far) dp = dp * z + t;
+    return dp;
+}
+// Shared by the history fetch, the motion pass and the frame-generation shadow scorer: the position in the previous eye image; false behind the eye. The off-image test is the caller's.
+bool temporalProjectPixel(float3 dp, float4 tn, int2 sz, out float2 pp) {
+    pp = 0.0;
+    if (dp.z >= -1e-6) return false;
+    float xt = dp.x / -dp.z;
+    float yt = dp.y / -dp.z;
+    pp.x = (xt - tn.x) / (tn.y - tn.x) * float(sz.x) - 0.5;
+    pp.y = (tn.w - yt) / (tn.w - tn.z) * float(sz.y) - 0.5;
+    return true;
+}
+// EDVR_TEMPORAL_CARRY end
 // zPred: the predicted view depth of this pixel's surface in last frame's
 // eye space, metres -- 0 when the pixel took no real depth (the far plane, no
 // depth bound).
@@ -747,10 +796,7 @@ static int2 gMainDepthTileOrigin = int2(0, 0);   // the group's first pixel (mai
 bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                    bool useDepth, bool allowWorld, out uint world, out float2 mvOut,
                    out float zPred, out uint depthN, out float3 hy) {
-    float3 d;
-    d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
-    d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
-    d.z = -1.0;
+    float3 d = temporalPixelDir(p, tanNow, size);
     float3 dp = float3(dot(r0, d), dot(r1, d), dot(r2, d));
     world = 0;
     mvOut = 0.0;
@@ -804,9 +850,8 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
                 if (zs > 0.0) ++depthN;
             }
         }
-        float den = zr - knobs.x;   // depth = A + B / z: z = B / (depth - A)
-        bool far = zr <= 0.0 || den <= 0.0;
-        float z = far ? 0.0 : knobs.z / den;
+        bool far;
+        float z = temporalDepthMetres(zr, knobs.x, knobs.z, far);
         // The scanner's interface (probe.w bit 128: the FSS screen is up)
         // reads a scene depth past the split, and the rule for a stroke --
         // the camera's path at the pixel's depth -- assumes the camera is
@@ -815,11 +860,10 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
         // docs/fss-scanner.md). Those pixels take the head's rows given,
         // at whatever depth they read.
         bool scannerUi = (uint(probe.w + 0.5) & 128u) != 0u && uiCovered(region.xy + int2(p));
-        if (worldOn && (far || z > split.x) && !scannerUi) {
+        if (temporalWorldPath(worldOn, far, z, split.x, scannerUi)) {
             world = 1;
-            dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
+            dp = temporalCarry(d, z, far, c2R0.xyz, c2R1.xyz, c2R2.xyz, tvCam.xyz);
             if (!far) {
-                dp = dp * z + tvCam.xyz;
                 zPred = -dp.z;
 #if EDVR_CELESTIAL
                 float3 celestialDp;
@@ -830,7 +874,7 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
 #endif
             }
         } else if (useDepth && !far) {
-            dp = dp * z + tv;
+            dp = temporalCarry(d, z, far, r0, r1, r2, tv);
             zPred = -dp.z;
         }
     }
@@ -848,12 +892,8 @@ bool fetchHistoryT(float2 p, float3 r0, float3 r1, float3 r2, float3 tv,
             return true;
         }
     }
-    if (dp.z >= -1e-6) return false;
-    float xt = dp.x / -dp.z;
-    float yt = dp.y / -dp.z;
     float2 pp;
-    pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
-    pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+    if (!temporalProjectPixel(dp, tanPrev, size, pp)) return false;
     if (pp.x < 0.0 || pp.y < 0.0 || pp.x > float(size.x) - 1.0 ||
         pp.y > float(size.y) - 1.0) {
         return false;
@@ -927,11 +967,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 #endif
     if (id.x < (uint)size.x && id.y < (uint)size.y) {
         float2 p = float2(id.xy);
-        float3 d;
         if ((uint(probe.w + 0.5) & 4u) != 0u) UN[id.xy] = uiEvidence(int2(id.xy));
-        d.x = tanNow.x + (p.x + 0.5) / float(size.x) * (tanNow.y - tanNow.x);
-        d.y = tanNow.w - (p.y + 0.5) / float(size.y) * (tanNow.w - tanNow.z);
-        d.z = -1.0;
+        float3 d = temporalPixelDir(p, tanNow, size);
         float3 dp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
         float zraw = mvDepthTile[(local.y + 2) * 12 + local.x + 2];
         const float sceneZraw = zraw;
@@ -946,17 +983,15 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                     if (zs > 0.0) ++depthN;
                 }
             }
-            float den = zr - knobs.x;   // depth = A + B / z: z = B / (depth - A)
-            bool far = zr <= 0.0 || den <= 0.0;
-            float z = far ? 0.0 : knobs.z / den;
+            bool far;
+            float z = temporalDepthMetres(zr, knobs.x, knobs.z, far);
             bool worldOn = tvCam.w != 0.0 && split.x > 0.0;
             // The scanner's interface keeps the head's path (fetchHistoryT says).
             bool scannerUi = (uint(probe.w + 0.5) & 128u) != 0u && uiCovered(region.xy + int2(p));
-            if (worldOn && (far || z > split.x) && !scannerUi) {
+            if (temporalWorldPath(worldOn, far, z, split.x, scannerUi)) {
                 count15 = 1;
-                dp = float3(dot(c2R0.xyz, d), dot(c2R1.xyz, d), dot(c2R2.xyz, d));
+                dp = temporalCarry(d, z, far, c2R0.xyz, c2R1.xyz, c2R2.xyz, tvCam.xyz);
                 if (!far) {
-                    dp = dp * z + tvCam.xyz;
                     zPred = -dp.z;
 #if EDVR_CELESTIAL
                     float3 celestialDp;
@@ -968,7 +1003,7 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
 #endif
                 }
             } else if (!far) {
-                dp = dp * z + tvUsed.xyz;
+                dp = temporalCarry(d, z, far, dR0.xyz, dR1.xyz, dR2.xyz, tvUsed.xyz);
                 zPred = -dp.z;
             }
             float luma = rgbToYcocg(S.Load(int3(region.xy + int2(p), 0)).rgb).x;
@@ -982,12 +1017,8 @@ void mv(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
         uint decisionPath = 0u;
         bool projectionValid = false;
         bool worldAvailable = tvCam.w != 0.0 && split.x > 0.0 && knobs.y != 0.0;
-        if (dp.z < -1e-6) {
-            float xt = dp.x / -dp.z;
-            float yt = dp.y / -dp.z;
-            float2 pp;
-            pp.x = (xt - tanPrev.x) / (tanPrev.y - tanPrev.x) * float(size.x) - 0.5;
-            pp.y = (tanPrev.w - yt) / (tanPrev.w - tanPrev.z) * float(size.y) - 0.5;
+        float2 pp;
+        if (temporalProjectPixel(dp, tanPrev, size, pp)) {
             motion = pp - p;
 #if EDVR_CELESTIAL
             decisionPath = count39 != 0 ? 12u : (count15 != 0 ? 2u : 1u);
@@ -1060,6 +1091,45 @@ R"HLSL(
         // history lookup is invalidated, as with new source-screen pixels.
         float2 written = hidden ? float2(size)*2 : motion;
         MV[id.xy] = written;
+#if EDVR_FG_MOTION
+        // Undilated physical motion for VR frame generation: center-texel depth
+        // (no 3x3 dilation from SR) and no SR reactive/disocclusion sentinel on
+        // valid geometry. Invalid or engine-masked pixels carry size*2 so
+        // framegen_synth FG_SENTINEL handles them identically.
+        float2 fgMotion = motion;
+        bool fgValid = projectionValid;
+        if (!trackedForeground && !engineMasked) {
+            float3 fgDp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
+            if (knobs.y != 0.0) {
+                bool fgFar;
+                float fgZ = temporalDepthMetres(sceneZraw, knobs.x, knobs.z, fgFar);
+                bool fgScannerUi = (uint(probe.w + 0.5) & 128u) != 0u && uiCovered(region.xy + int2(p));
+                if (temporalWorldPath(worldAvailable, fgFar, fgZ, split.x, fgScannerUi)) {
+                    fgDp = temporalCarry(d, fgZ, fgFar, c2R0.xyz, c2R1.xyz, c2R2.xyz, tvCam.xyz);
+#if EDVR_CELESTIAL
+                    if (!fgFar) {
+                        float3 fgCelDp;
+                        if (celestialPixel(p, d, fgZ, fgCelDp)) fgDp = fgCelDp;
+                    }
+#endif
+                } else if (!fgFar) {
+                    const float3 fgHeadTv = tvUsed.xyz;
+                    fgDp = temporalCarry(d, fgZ, fgFar, dR0.xyz, dR1.xyz, dR2.xyz, fgHeadTv);
+                }
+            }
+            float2 fgPp;
+            fgValid = temporalProjectPixel(fgDp, tanPrev, size, fgPp);
+            if (fgValid) {
+                fgMotion = fgPp - p;
+                if (!projectionValid) {
+                    float2 holoP; float holoZ;
+                    if (holoPixel(p, 0, holoP, holoZ)) fgMotion = holoP - p;
+                }
+            }
+        }
+        fgValid = fgValid && !engineMasked && all(isfinite(fgMotion));
+        FGPhysicalMotion[id.xy] = fgValid ? fgMotion : float2(size) * 2;
+#endif
 #if EDVR_TEMPORAL_TRACE
         // depthValid is a usable non-screen sample on the final route. Screen
         // z uses its source projection's private encoding, so bit 256 stays

@@ -3,6 +3,8 @@
 #include "ui_layer.h"
 #include "ui_layer_math.h"  // uiLayerUvFromRegion
 #include "temporal_pass.h"
+#include "framegen_synth.h"   // Phase 2.3b: S finished at B's door
+#include "native_menu.h"      // EDVR's menu on the finished S (nativeMenuFrameGenDraw)
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../common/supersample_math.h"
@@ -50,8 +52,9 @@ float readStrength() {
 }
 void clear(ID3D11Texture2D** out,float* b) { if(out)*out=nullptr; if(b)std::memset(b,0,4*sizeof(float)); }
 
-HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,const float* bounds,ID3D11Texture2D** output,float* outBounds) {
-  clear(output,outBounds); std::lock_guard<std::mutex> lock(mutex); State* s=identify(p);
+bool g_layerOnlyEye=false;   // Phase 2.3b: B's door just took the layer-only path (treatB, read by finishS under the same lock)
+HRESULT treatB(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,const float* bounds,ID3D11Texture2D** output,float* outBounds) {
+  g_layerOnlyEye=false; State* s=identify(p);
   edvr::uiLayerMapRunEnd(nullptr);   // the Galaxy Map's run of sprites leaves EDVR's targets bound; the door reads and sets the output merger (ui_layer.h)
   if(!s||!s->active||s!=current||GetCurrentThreadId()!=s->thread||eye>1||!seq||seq<s->floor||(s->invalidated&&seq<=s->floor)||!source||!output||!outBounds||!validBounds(bounds)||!validTexture(source)||FAILED(s->device->GetDeviceRemovedReason())||!sameDevice(s->device,source)) return E_INVALIDARG;
   if(seq==s->floor&&s->consumed[eye])return E_INVALIDARG;
@@ -79,6 +82,7 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   // reverses (RCAS on the frame, then the layer over it, so the sharpener never rings the text), which would sharpen a
   // black frame. The strength rules are the ordinary ones (fix.render_sharpness).
   if(edvr::uiLayerDoorLayerOnly(eye,seq)) {
+    g_layerOnlyEye=true;
     ++s->layerOnly;
     ID3D11Texture2D* layered=edvr::uiLayerComposite(seq,eye,source,region,layerUv);
     const uint32_t whole[4]={0,0,region[2]-region[0],region[3]-region[1]};
@@ -127,6 +131,49 @@ HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,c
   edvr::temporalPassCaptureFinalEye(seq,eye,result,whole,composite,flipU,flipV);
   *output=result; std::memcpy(outBounds,full,sizeof(full)); ++s->treated; s->engagedMask|=1u<<eye; if(s->engagedMask==3&&!s->engagedNoted){s->engagedNoted=true;edvr::Log::get().note("native sharpen: engaged for both eyes.");} return S_OK;
 }
+// Frame generation, Phase 2.3b (framegen_synth.h): the S the synthesizer built with this eye's B, finished here as B just was, after B's door, which it never changes: B's
+// sharpener on S (the same strength and bounds), then B's UI composite over it, the layer moved by the head's step (frameGenSynthFinish). Whatever B's door did that S cannot have
+// leaves S unfinished, named: S is then not handed over and the runtime does not show it. Nothing happens while the synthesizer holds no S for the eye (its keys off).
+void finishS(State* s,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,const float* bounds,HRESULT bHr,ID3D11Texture2D* bFinished) {
+  if(!s||!s->device||eye>1||!edvr::frameGenSynthOn())return;
+  ID3D11DeviceContext* ctx=nullptr; s->device->GetImmediateContext(&ctx); if(!ctx)return;
+  ID3D11Texture2D* sTex=edvr::frameGenSynthFinishSource(s->device,ctx,eye);
+  if(sTex) {
+    edvr::FrameGenSynthFinishInputs in;
+    in.why=edvr::kFrameGenFinishDone;
+    in.bFinished=bFinished;
+    in.dumpSink=edvr::temporalPassStageFrameGenDump;
+    D3D11_TEXTURE2D_DESC d{}; if(source)source->GetDesc(&d); uint32_t region[4]{};
+    if(FAILED(bHr)||!source) in.why=edvr::kFrameGenFinishNoDoor;
+    else if(g_layerOnlyEye) in.why=edvr::kFrameGenFinishLayerOnly;
+    else if(!edvr::supersampleRegionFromBounds(d.Width,d.Height,bounds,region,nullptr,nullptr)||region[0]||region[1]||region[2]!=d.Width||region[3]!=d.Height) in.why=edvr::kFrameGenFinishCropped;
+    else {
+      edvr::UiLayerFrameGenInputs li;
+      if(edvr::uiLayerFrameGenInputs(seq,eye,&li)) {
+        if(li.pictureEdit==1) in.why=edvr::kFrameGenFinishRipple;
+        else if(li.pictureEdit==2) in.why=edvr::kFrameGenFinishScope;
+        in.layer=li.layer; in.mult=li.mult; in.layerW=li.w; in.layerH=li.h; std::memcpy(in.layerUv,li.uv,sizeof(in.layerUv));
+      }
+      if(in.why==edvr::kFrameGenFinishDone&&s->strength>0.f&&!s->stoodDown) {
+        void* raw=edvr::sharpenPassFrameGen(sTex,int(eye),bounds,s->strength);
+        if(raw)in.frame=static_cast<ID3D11Texture2D*>(raw); else in.why=edvr::kFrameGenFinishSharpen;
+      }
+      // EDVR's menu, which the runtime draws on B after this door: drawn on the finished S too (native_menu.h), with the bounds B's menu gets (the whole frame, B's flips).
+      const bool flipU=bounds&&bounds[0]>bounds[2],flipV=bounds&&bounds[1]>bounds[3];
+      in.menuSink=nativeMenuFrameGenDraw;
+      in.menuBox[0]=flipU?1.f:0.f;in.menuBox[1]=flipV?1.f:0.f;in.menuBox[2]=flipU?0.f:1.f;in.menuBox[3]=flipV?0.f:1.f;
+    }
+    edvr::frameGenSynthFinish(ctx,eye,in);
+  }
+  ctx->Release();
+}
+HRESULT WINAPI treat(void* p,uint64_t seq,uint32_t eye,ID3D11Texture2D* source,const float* bounds,ID3D11Texture2D** output,float* outBounds) {
+  clear(output,outBounds); std::lock_guard<std::mutex> lock(mutex);
+  const HRESULT hr=treatB(p,seq,eye,source,bounds,output,outBounds);
+  // B's door hands on its output (S_OK) or B as it arrived (S_FALSE): that is B finished, before the runtime's menu.
+  if(State* s=identify(p))if(s->active&&s==current&&GetCurrentThreadId()==s->thread)finishS(s,seq,eye,source,bounds,hr,hr==S_OK&&output?*output:source);
+  return hr;
+}
 HRESULT WINAPI invalidate(void* p) { std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s||!s->active||s!=current)return E_INVALIDARG;s->invalidated=true;s->consumed[0]=s->consumed[1]=false;++s->invalidations;return S_OK; }
 HRESULT WINAPI close(void* p) { std::lock_guard<std::mutex> lock(mutex);State*s=identify(p);if(!s)return E_INVALIDARG;if(!s->active)return S_FALSE;edvr::Log::get().note("native sharpen totals: treated=%llu, off=%llu, refusals=%llu, invalidations=%llu, stood_down=%u, layer_only=%llu, layer_only_black=%llu.",(unsigned long long)s->treated,(unsigned long long)s->off,(unsigned long long)s->refusals,(unsigned long long)s->invalidations,unsigned(s->stoodDown),(unsigned long long)s->layerOnly,(unsigned long long)s->layerOnlyBlack);s->active=false;s->device=nullptr;s->invalidated=true;available.store(false);if(current==s)current=nullptr;return S_OK; }
 }
@@ -138,4 +185,10 @@ extern "C" HRESULT WINAPI edvrAcquireNativeSharpen(const EdvrNativeSharpenReques
   std::lock_guard<std::mutex> lock(mutex);if(current||used==16)return E_PENDING;State&s=pool[used++];s={};s.device=r->gameDevice;s.thread=GetCurrentThreadId();s.generation=r->generation;s.active=true;current=&s;available.store(true);t->context=&s;t->treatEye=treat;t->invalidate=invalidate;t->close=close;edvr::Log::get().note("native sharpen: acquired generation %llu.",(unsigned long long)r->generation);return S_OK;
 }
 
-namespace edvr { bool nativeSharpenActive() { return available.load(); } }
+namespace edvr {
+bool nativeSharpenActive() { return available.load(); }
+bool nativeSharpenWillSharpen() {
+  std::lock_guard<std::mutex> lock(mutex);
+  return current&&current->active&&!current->stoodDown&&readStrength()>0.f;
+}
+}

@@ -64,6 +64,10 @@
 #include "gpu_timing.h"
 #include "gpu_census.h"   // issue #38: the per-feature GPU cost census
 #include "binding_shadow.h"   // the render target a camera write is drawn into (bindingGet, bindingResolve)
+#include "framegen_synth.h"    // frame generation Phase 2.1, the synthesizer (the same key; nothing it builds is shown)
+#include "../common/framegen_gate.h"   // frame generation Phase 2.4: fix.frame_generation's off / auto / on and word 17
+#include "../common/native_sharpen.h"   // Phase 2.3b: B's door, which finishes S (nativeSharpenActive, nativeSharpenWillSharpen)
+#include "../common/native_frame.h"   // nativeFrameSetFrameGenShadow: the key, carried to the runtime in a version 12 answer
 #include "sky_ring.h"   // I-2: the sky ring (diag.sky_ring, TEMPORARY; docs/sky-flicker-2026-10-13.md)
 #include "../common/camera_nearest.h"       // the nearest write: a veto on the legacy pick (fix.camera_nearest, TEMPORARY A/B)
 #include "../common/camera_jump_guard.h"    // the jump guard: a legacy pick's jump replaced by the next-best candidate (fix.camera_jump_guard, TEMPORARY A/B)
@@ -192,6 +196,9 @@ struct EyeState {
     ID3D11Texture2D*           dlMv = nullptr;
     ID3D11UnorderedAccessView* dlMvUav = nullptr;
     ID3D11ShaderResourceView*  dlMvSrv = nullptr;
+    ID3D11Texture2D*           dlFgMv = nullptr;   // undilated non-reactive physical MV for frame generation (u1)
+    ID3D11UnorderedAccessView* dlFgMvUav = nullptr;
+    ID3D11ShaderResourceView*  dlFgMvSrv = nullptr;
     // Exists only while an explicit eye run asks for the capture-only mv
     // variant (its u7 decision texture).
     ID3D11Texture2D*           dlDecision = nullptr;
@@ -204,6 +211,7 @@ struct EyeState {
     ID3D11ShaderResourceView*  dlOutSrv = nullptr;
     ID3D11Texture2D*           dlSubmit = nullptr;  // NVIDIA's frame copied into the game's own format: what goes out
     ID3D11UnorderedAccessView* dlSubmitUav = nullptr;
+    ID3D11ShaderResourceView*  dlSubmitSrv = nullptr;  // frame generation, Phase 2.3b: the synthesizer reads it (made when first needed, with fix.frame_generation(_shadow) on)
     bool                      uiResolvedHistory = false;
     bool                      screenHistory = false;
     uint32_t                   dlW = 0, dlH = 0;
@@ -253,6 +261,13 @@ struct EyeState {
     bool                       headNoted = false;
     uint32_t                   headNotedFrame = UINT32_MAX;
     uint32_t                   eyesNotedFrame = UINT32_MAX;
+    // Frame generation, Phase 2.2: the head step B -> S from the runtime's slot pose, and whether the runtime takes S, noted before the treat (temporalPassNoteFrameGenSlot).
+    float                      fgSlotRot[9] = {};
+    float                      fgSlotT[3] = {};
+    bool                       fgSlotPose = false;
+    bool                       fgSlotConsumer = false;
+    uint64_t                   fgSlotSequence = 0;
+    uint32_t                   fgSlotFrame = UINT32_MAX;
     float                      rasterJitter[2] = {};
     uint32_t                   jitterFrame = UINT32_MAX;
 
@@ -287,6 +302,9 @@ void releaseDl(EyeState& e) {
     if (e.uiMaskSrv) { e.uiMaskSrv->Release(); e.uiMaskSrv = nullptr; }
     e.uiMaskRes = nullptr;
     if (e.dlColourSrv) { e.dlColourSrv->Release(); e.dlColourSrv = nullptr; }
+    if (e.dlFgMvSrv) { e.dlFgMvSrv->Release(); e.dlFgMvSrv = nullptr; }
+    if (e.dlFgMvUav) { e.dlFgMvUav->Release(); e.dlFgMvUav = nullptr; }
+    if (e.dlFgMv) { e.dlFgMv->Release(); e.dlFgMv = nullptr; }
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
@@ -301,6 +319,7 @@ void releaseDl(EyeState& e) {
     if (e.dlOut) { e.dlOut->Release(); e.dlOut = nullptr; }
     if (e.dlSubmit) { e.dlSubmit->Release(); e.dlSubmit = nullptr; }
     if (e.dlSubmitUav) { e.dlSubmitUav->Release(); e.dlSubmitUav = nullptr; }
+    if (e.dlSubmitSrv) { e.dlSubmitSrv->Release(); e.dlSubmitSrv = nullptr; }
     e.uiResolvedHistory = false;
     e.dlW = e.dlH = 0;
     e.dlOutW = e.dlOutH = 0;
@@ -1084,11 +1103,27 @@ ID3D11ComputeShader*       g_csMv = nullptr;     // the motion-vector entry, for
 bool                       g_csMvTried = false;
 ID3D11ComputeShader*       g_csMvFast = nullptr;
 bool                       g_csMvFastTried = false;
+ID3D11ComputeShader*       g_csMvFg = nullptr;
+bool                       g_csMvFgTried = false;
+ID3D11ComputeShader*       g_csMvFgFast = nullptr;
+bool                       g_csMvFgFastTried = false;
 ID3D11ComputeShader*       g_csMvTrace = nullptr;
 bool                       g_csMvTraceTried = false;
 ID3D11ComputeShader*       g_csEyeJumpLattice = nullptr;
 bool                       g_csEyeJumpLatticeTried = false;
 
+ID3D11ComputeShader* motionShaderFg(ID3D11DeviceContext* ctx, bool diagnostics) {
+    auto*& shader = diagnostics ? g_csMvFg : g_csMvFgFast;
+    auto& tried = diagnostics ? g_csMvFgTried : g_csMvFgFastTried;
+    if (!shader && !tried) {
+        tried = true;
+        shader = shaderSwapCreateCs(ctx,
+            diagnostics ? kTemporalMvFgBytecode : kTemporalMvFgFastBytecode,
+            diagnostics ? sizeof(kTemporalMvFgBytecode) : sizeof(kTemporalMvFgFastBytecode),
+            diagnostics ? "temporal_mv_fg_cs" : "temporal_mv_fg_fast_cs", "temporal aa");
+    }
+    return shader;
+}
 ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
     auto*& shader = diagnostics ? g_csMv : g_csMvFast;
     auto& tried = diagnostics ? g_csMvTried : g_csMvFastTried;
@@ -1289,6 +1324,22 @@ ID3D11Texture2D* g_eyeRawStaging[kEyeRun] = {};
 ID3D11Texture2D* g_eyeTreatedStaging[kEyeRun] = {};
 ID3D11Texture2D* g_eyeDecisionStaging[kEyeRun] = {};
 ID3D11Texture2D* g_eyePreUiStaging[kEyeRun] = {};
+std::atomic<bool> g_frameGenLockKey{false};   // fix.frame_generation (Phase 2.3, TEMPORARY): Lock 2:1 forced; set where the keys are read, read by the treat. 2.4: auto or on
+std::atomic<uint8_t> g_frameGenMode{0};       // Phase 2.4: fix.frame_generation as framegen_gate.h FrameGenMode (0 off, 1 auto, 2 on)
+std::atomic<bool> g_frameGenAdmit{false};     // Phase 2.4: the gate admits Lock (auto), so a reload of the keys keeps word 17 as the gate left it
+std::atomic<bool> g_frameGenAutoHeld{false};  // Phase 2.4: auto with a runtime that cannot read it (perf_monitor.cpp's gate): the synthesizer is held, frame generation behaves as off
+std::atomic<uint32_t> g_frameGenCameraJumps{0};   // Phase 2.4: the gate's camera cut (temporalPassFrameGenCameraJumps)
+// The synthesizer runs for Lock: auto or on, unless auto is held for an older runtime.
+inline bool frameGenLockSynth() { return g_frameGenLockKey.load(std::memory_order_relaxed) && !g_frameGenAutoHeld.load(std::memory_order_relaxed); }
+// Phase 2.4: S is built on every frame under the shadow key, under on, and in auto while the gate admits Lock. Auto with the gate closed shows S nowhere: one sample per eye a
+// second keeps the cost the gate reads measured (frameGenSynthSampleDue), and the other eye-frames dispatch nothing (frameGenSynthIdle).
+inline bool frameGenSynthEveryFrame() {
+    return g_frameGenMode.load(std::memory_order_relaxed) != static_cast<uint8_t>(FrameGenMode::Auto) ||
+           g_frameGenAdmit.load(std::memory_order_relaxed);
+}
+std::atomic<uint32_t> g_frameGenSynthFrames{0};   // Phase 2.4: left-eye builds of S, all time (temporalPassFrameGenSynthFrames)
+ID3D11Texture2D* g_eyeSynthStaging[kEyeRun] = {};   // the frame-generation synthesizer's f = 0.5 S of frame k (fix.frame_generation_shadow on; S<k> beside the P<k> pre-interface output and the next frame's P<k+1>)
+ID3D11Texture2D* g_eyeSynthBStaging[kEyeRun] = {};  // Phase 2.3b: B of frame k as its door finished it, in S<k>'s crop (SB<k>), staged with the finished S
 int              g_eyeRunLeft = 0;    // captures still to take
 int              g_eyeRunTaken = 0;
 wchar_t          g_eyeRunStamp[16] = L"";
@@ -2431,6 +2482,21 @@ void writeEyeDecisionArtifacts(ID3D11DeviceContext* ctx, const std::wstring& dir
         if (d.diagnostic && d.preUi && g_eyeRawWritten[k] && g_eyeTreatedWritten[k] && d.dlssSuccess) d.error = "";
         if (g_eyePreUiStaging[k]) { g_eyePreUiStaging[k]->Release(); g_eyePreUiStaging[k]=nullptr; }
         if (g_eyeDecisionStaging[k]) { g_eyeDecisionStaging[k]->Release(); g_eyeDecisionStaging[k]=nullptr; }
+        // The frame-generation synthesizer's f = 0.5 S of frame k, in the pre-interface crop: eye_<stamp>_S<k>.bmp, to be read with P<k> (B's output) and P<k+1> (C's). The write is
+        // best-effort and says nothing when it fails: it is an instrument for the synthesizer's flights.
+        if (g_eyeSynthStaging[k]) {
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_S%02d.bmp", dir.c_str(), g_eyeRunStamp, k);
+            D3D11_TEXTURE2D_DESC desc{}; g_eyeSynthStaging[k]->GetDesc(&desc);
+            writeEyeBmp(ctx, g_eyeSynthStaging[k], desc, 0, path);
+            g_eyeSynthStaging[k]->Release(); g_eyeSynthStaging[k]=nullptr;
+        }
+        // Phase 2.3b: B of the same frame as its door finished it (sharpened, the UI composited), in S<k>'s crop: eye_<stamp>_SB<k>.bmp, S<k> being the finished S.
+        if (g_eyeSynthBStaging[k]) {
+            _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_SB%02d.bmp", dir.c_str(), g_eyeRunStamp, k);
+            D3D11_TEXTURE2D_DESC desc{}; g_eyeSynthBStaging[k]->GetDesc(&desc);
+            writeEyeBmp(ctx, g_eyeSynthBStaging[k], desc, 0, path);
+            g_eyeSynthBStaging[k]->Release(); g_eyeSynthBStaging[k]=nullptr;
+        }
     }
     wchar_t manifest[MAX_PATH];
     _snwprintf_s(manifest, MAX_PATH, _TRUNCATE, L"%s\\eye_%s_decisions.json", dir.c_str(), g_eyeRunStamp);
@@ -2734,6 +2800,7 @@ void writeEyeRun(ID3D11DeviceContext* ctx, uint32_t cw, uint32_t ch) {
                         wrote,g_eyeRunTaken-1,cw,ch,g_eyeRunStamp);
     } else {
         writeEyeDecisionArtifacts(ctx, dir);
+        frameGenReplayFinish(dir.c_str(), g_eyeRunStamp);   // the synthesizer's replay capture of the run (nothing unless the key was on and the run's frames were taken), written over the next frames
         writeEyeMotionTrace(dir);
         Log::get().note("temporal aa: paired eye run %ls: %d treated crops T00..%02d (%ux%u), "
                         "%d raw crops plus overview written. C and T share scene-frame IDs in "
@@ -3478,6 +3545,11 @@ bool ensureUiHistory(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
                     w,h,static_cast<double>(w)*h*8.0/1048576.0);
     return true;
 }
+bool ensureFgMotion(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+    if (e.dlFgMv) return true;
+    return makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, &e.dlFgMv, &e.dlFgMvSrv, &e.dlFgMvUav);
+}
 bool ensureBiasMask(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
     if (e.dlMask) return true;
     return maskFormatOk(dev) && makeTex(dev,w,h,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R8_UNORM,
@@ -4049,6 +4121,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
         float tvCam[3] = {0.0f, 0.0f, 0.0f};
         float worldDelta[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
         bool worldValid = false;
+        bool gateJump = false;   // the camera gate dropped the translation (a floating-origin jump) or carried the last delta in place of this frame's: the frame-generation shadow scorer skips it
         const uint32_t sceneDraws = depthProbeSceneDraws();
         if (candValid[2]) {
             // The delta and its z flip: temporalWorldFromRows (temporal_math.h).
@@ -4135,6 +4208,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
             // witness on the line.
             const TemporalCameraStep step = temporalCameraGateStep(
                 g_cameraGate, g_prevRows, g_curRows, move, diffDeg, worldDelta, tvCam);
+            gateJump = step.jump || step.carried;
             if (step.jump) {
                 ++g_camDropMove;
                 // The jump's frame, for the eye run's trace and the
@@ -4832,6 +4906,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             } else {
                 ID3D11ComputeShader* mvCs = motionShader(ctx, diagnostics);
+                bool fgMvActive = false;
                 const bool eyeRunTrace = eye == 0 && g_eyeRunLeft > 0 &&
                                          g_eyeRunTaken < kEyeRun && !amdEngine && !intelEngine && !dittoEngine && !fsr4Engine;
                 // TEMPORARY, the blend probe (blend_probe.h): a collecting capture wants eye 0's per-pixel decisions too. The same
@@ -4894,8 +4969,9 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 if (traceRequested && made) {
                     ID3D11ComputeShader* traceCs = motionTraceShader(ctx);
                     traceReady = traceCs && ensureDecisionTexture(dev, e, w, h);
-                    if (traceReady) mvCs = traceCs;
-                    else {
+                    if (traceReady) {
+                        mvCs = traceCs;
+                    } else {
                         if (eyeRunTrace) g_eyeDecisions[g_eyeRunTaken].error = traceCs ? "decision_texture_unavailable"
                                                                                        : "decision_shader_unavailable";
                         if (probeTrace) blendProbeGridRefuse(traceCs ? "the decision texture could not be made"
@@ -4906,6 +4982,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     g_eyeDecisions[g_eyeRunTaken].error = "non_nvidia_trace_unsupported";
                 } else if (probeTrace && !made) {
                     blendProbeGridRefuse("the pass's own textures were not made this frame");
+                }
+                fgMvActive = false;
+                if (!traceReady && made && frameGenLockSynth() && ensureFgMotion(dev, e, w, h)) {
+                    if (ID3D11ComputeShader* fgCs = motionShaderFg(ctx, diagnostics)) { mvCs = fgCs; fgMvActive = true; }
+                } else if (!frameGenLockSynth() && e.dlFgMv) {
+                    if (e.dlFgMvSrv) { e.dlFgMvSrv->Release(); e.dlFgMvSrv = nullptr; }
+                    if (e.dlFgMvUav) { e.dlFgMvUav->Release(); e.dlFgMvUav = nullptr; }
+                    e.dlFgMv->Release(); e.dlFgMv = nullptr;
                 }
                 if (made && setParams(ctx, p)) {
                     if(uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
@@ -5022,7 +5106,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ++g_mvDepthLayers[(layersAbsentM & 64u ? 2u : 0u) | (layersAbsentM & 256u ? 1u : 0u)];
                     setParams(ctx, p);
                     ID3D11UnorderedAccessView* uavsM[8] = {nullptr,
-                                                           nullptr, g_statsUav, e.dlMvUav,
+                                                           fgMvActive ? e.dlFgMvUav : nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
                                                             uiTrack && !uiResolve ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr,
                                                             traceReady ? e.dlDecisionUav : nullptr};
@@ -5365,6 +5449,81 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                         skyRingEyeFrame(dev, ctx, static_cast<uint32_t>(eye), g_rowsFrame, e.dlColourSrv, e.dlOutSrv, e.dlMvSrv, e.dlDepthSrv,
                                         w, h, oW, oH, projA, zcWritten);
                         gpuCensusEnd(ctx, GpuCensusSection::DoorSkyRing);
+                    }
+                    // Frame generation, Phase 1 (fix.frame_generation_shadow, TEMPORARY): the key off costs the branch. Phase 2.3: fix.frame_generation (Lock) runs the synthesizer too,
+                    // and the scorer only under its own key.
+                    if (usedDlaa && frameGenLockSynth()) {
+                        // Phase 2.1, the synthesizer: S one display period after this frame, built beside the scorer and shown nowhere. Its own census section, "frame generation synth".
+                        // The eye dump (a run of the left eye, beginEyeRun) asks for the f = 0.5 S on every frame of the run and stages it in the crop the pre-interface output has.
+                        // Phase 2.4: auto with the gate closed builds once per eye a second (frameGenSynthEveryFrame), and the eye dump's run builds on every frame as before.
+                        if (eye == 0 && (gateJump || jumpedNow)) g_frameGenCameraJumps.fetch_add(1, std::memory_order_relaxed);   // 2.4: the gate's camera cut, built or not
+                        if (!frameGenSynthEveryFrame() && g_eyeRunLeft <= 0 && !frameGenSynthSampleDue(static_cast<uint32_t>(eye))) {
+                            frameGenSynthIdle(ctx, static_cast<uint32_t>(eye));
+                        } else {
+                            const bool dumpFrame = eye == 0 && g_eyeRunLeft > 0 && g_eyeRunTaken < kEyeRun && g_eyeRawTaken[g_eyeRunTaken] && !g_eyeRunUntreated;
+                            FrameGenSynthFrame sy;
+                            sy.renderW = w; sy.renderH = h; sy.outW = oW; sy.outH = oH;
+                            sy.outSrv = e.dlOutSrv;
+                            // Phase 2.3b: B's door (native_sharpen.cpp) finishes S as it finishes B. S is then made from what goes to the door, dlSubmit (the UI resolve's
+                            // output, or dlOut copied), read through a UNORM view as dlOut is; a game format the view cannot take keeps dlOut.
+                            sy.finish = nativeSharpenActive();
+                            if (sy.finish) {
+                                if (!e.dlSubmitSrv && e.dlSubmitUav) {
+                                    D3D11_SHADER_RESOURCE_VIEW_DESC vd{};
+                                    vd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                                    vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                                    vd.Texture2D.MipLevels = 1;
+                                    if (FAILED(dev->CreateShaderResourceView(e.dlSubmit, &vd, &e.dlSubmitSrv))) e.dlSubmitSrv = nullptr;
+                                }
+                                if (e.dlSubmitSrv) sy.outSrv = e.dlSubmitSrv;
+                                sy.finishSharpen = nativeSharpenWillSharpen();
+                                sy.dumpIndex = dumpFrame ? g_eyeRunTaken : -1;
+                            }
+                            sy.depthSrv = e.dlDepthSrv;
+                            sy.mvSrv = (fgMvActive && e.dlFgMvSrv) ? e.dlFgMvSrv : e.dlMvSrv;
+                            sy.tanNow = tanNow;
+                            sy.depthA = p.knobs[0];
+                            sy.depthB = p.knobs[2];
+                            sy.splitMetres = p.split[0];
+                            memcpy(sy.deltas.Hd, delta, sizeof(sy.deltas.Hd));
+                            for (int i = 0; i < 3; ++i) sy.deltas.th[i] = p.tvUsed[i];
+                            sy.depthWritten = zcWritten;
+                            sy.cameraJump = gateJump || jumpedNow;
+                            sy.wantShown = dumpFrame;
+                            // Replay capture (format in framegen_replay_math.h): the dump's first six left-eye frames, with what the constant block and the bench need beside the Hd and th above.
+                            if (worldOn) memcpy(sy.deltas.W, cand[2], sizeof(sy.deltas.W));
+                            for (int i = 0; i < 3; ++i) sy.deltas.tv[i] = p.tvCam[i];
+                            sy.worldValid = worldOn;
+                            sy.tanPrev = useTanPrev ? tanPrev : nullptr;
+                            sy.replay = dumpFrame && g_eyeRunTaken < static_cast<int>(kFrameGenReplayFrames);
+                            sy.replayIndex = static_cast<uint32_t>(g_eyeRunTaken);
+                            // Phase 2.2: the runtime's slot pose for this treat (noted on this frame only), and whether it takes S.
+                            const bool slotNow = e.fgSlotFrame == g_rowsFrame;
+                            sy.slotPose = slotNow && e.fgSlotPose;
+                            if (sy.slotPose) {
+                                memcpy(sy.slotRot, e.fgSlotRot, sizeof(sy.slotRot));
+                                memcpy(sy.slotT, e.fgSlotT, sizeof(sy.slotT));
+                            }
+                            sy.consumer = slotNow && e.fgSlotConsumer;
+                            sy.slotSequence = slotNow ? e.fgSlotSequence : 0;
+                            // Phase 2.3: under fix.frame_generation the f = 0.5 S is built on every frame (S is shown in every other slot); the f = 1 S and its score run only
+                            // under the shadow key while Lock is not engaged (the 2.2 alternation).
+                            sy.everyHalf = frameGenLockSynth();
+                            // The dump stages the f = 0.5 S while the module still holds it (on the transfer's path S is the runtime's once it is handed over).
+                            if (dumpFrame) {
+                                sy.shownSink = [](void* ctxp, ID3D11DeviceContext* c, ID3D11Texture2D* shown) {
+                                    const EyeState& es = *static_cast<const EyeState*>(ctxp);
+                                    uint32_t wantW = 0, wantH = 0, cw = 0, ch = 0;
+                                    eyeOutputCropSize(g_eyeRunTaken, es.dlOut, &wantW, &wantH);
+                                    stageEyeCrop(c, shown, &g_eyeSynthStaging[g_eyeRunTaken], &cw, &ch, nullptr, wantW, wantH);
+                                };
+                                sy.shownSinkContext = &e;
+                            }
+                            if (eye == 0) g_frameGenSynthFrames.fetch_add(1, std::memory_order_relaxed);   // 2.4: the gate's share of frames whose GPU span holds S
+                            gpuCensusBegin(ctx, GpuCensusSection::DoorFrameGenSynth);
+                            frameGenSynthEyeFrame(dev, ctx, static_cast<uint32_t>(eye), g_rowsFrame, sy);
+                            gpuCensusEnd(ctx, GpuCensusSection::DoorFrameGenSynth);
+                        }
                     }
                 }
             }
@@ -5909,6 +6068,34 @@ void temporalPassConfigure(Config& cfg) {
                                         : "");
         }
         skyRingConfigure(cfg.getString("diag.sky_ring", "off") == "on");
+        // Frame generation, Phase 1 (TEMPORARY; docs/design-frame-generation-2026-10-26.md): live, VR only (the flat allow-list does not list it, so flat reads off).
+        // Phase 2.3 (TEMPORARY; on = Lock 2:1 forced, for test flights; a row of the Performance page since 2026-11-07): live, VR only like the shadow key. Carried to the runtime in a version 12 answer's word 17; it
+        // runs the synthesizer as the shadow key does.
+        // Phase 2.4: auto, Lock only while the performance gate admits it (perf_monitor.cpp frameGenGateFrame, common/framegen_gate.h): word 17 is 2 (closed) until the gate says
+        // otherwise, 3 while it admits Lock. off is exactly as before (word 0, no synthesizer, no gate line); on is 2.3's forced Lock (word 1).
+        {
+            const std::string text = cfg.getString("fix.frame_generation", "off");
+            const FrameGenMode fgMode = frameGenModeParse(text.c_str());
+            const bool lockKey = fgMode != FrameGenMode::Off;
+            static bool lockTold = false;
+            if (!runtimeFlatProfile() && (!lockTold || static_cast<uint8_t>(fgMode) != g_frameGenMode.load(std::memory_order_relaxed))) {
+                lockTold = true;
+                Log::get().note("frame generation: fix.frame_generation=%s (%s).", frameGenModeName(fgMode),
+                                fgMode == FrameGenMode::On ? "Lock 2:1 forced: the synthesizer builds S on every frame and the runtime shows it between Elite's frames once Lock engages"
+                                : fgMode == FrameGenMode::Auto ? "Lock 2:1 only while the performance gate admits it: the synthesizer builds S on every frame while the gate admits Lock and "
+                                                               "once per eye a second while it does not (to keep its cost measured), and the "
+                                                               "\"frame generation gate:\" line says each second whether Lock is allowed and why not"
+                                                             : "no Lock: the frame loop is today's");
+            }
+            if (static_cast<uint8_t>(fgMode) != g_frameGenMode.load(std::memory_order_relaxed)) {
+                g_frameGenAutoHeld.store(false, std::memory_order_relaxed);
+                g_frameGenAdmit.store(false, std::memory_order_relaxed);
+            }
+            g_frameGenMode.store(static_cast<uint8_t>(fgMode), std::memory_order_relaxed);
+            g_frameGenLockKey.store(lockKey, std::memory_order_relaxed);
+            nativeFrameSetFrameGenLockWord(frameGenLockWord(fgMode, g_frameGenAdmit.load(std::memory_order_relaxed)));
+        }
+        frameGenSynthConfigure(g_frameGenLockKey.load(std::memory_order_relaxed));   // the synthesizer rides either key (no key of its own)
     }
     // The same test native_temporal.cpp's Settings::dlaa makes (flags bit 1
     // at the treat): only an external engine (dlaa, dlss, fsr) touches NGX
@@ -6492,6 +6679,38 @@ void temporalPassNoteHead(int eye, const float* prevPose, const float* nowPose,
     e.headNoted = true;
     e.headNotedFrame = g_rowsFrame;
 }
+void temporalPassNoteFrameGenSlot(int eye, const float* rot, const float* t, bool consumer, uint64_t sequence) {
+    if (eye < 0 || eye > 1) return;
+    EyeState& e = g_eye[eye];
+    e.fgSlotPose = rot && t;
+    if (e.fgSlotPose) {
+        memcpy(e.fgSlotRot, rot, sizeof(e.fgSlotRot));
+        memcpy(e.fgSlotT, t, sizeof(e.fgSlotT));
+    }
+    e.fgSlotConsumer = consumer;
+    e.fgSlotSequence = sequence;
+    e.fgSlotFrame = g_rowsFrame;
+}
+uint8_t temporalPassFrameGenMode() { return g_frameGenMode.load(std::memory_order_relaxed); }
+void temporalPassFrameGenGate(bool admit, bool hold) {
+    if (g_frameGenMode.load(std::memory_order_relaxed) != static_cast<uint8_t>(FrameGenMode::Auto)) return;
+    g_frameGenAdmit.store(admit && !hold, std::memory_order_relaxed);
+    g_frameGenAutoHeld.store(hold, std::memory_order_relaxed);
+    nativeFrameSetFrameGenLockWord(frameGenLockWord(FrameGenMode::Auto, admit && !hold));
+}
+uint32_t temporalPassFrameGenCameraJumps() { return g_frameGenCameraJumps.load(std::memory_order_relaxed); }
+uint32_t temporalPassFrameGenSynthFrames() { return g_frameGenSynthFrames.load(std::memory_order_relaxed); }void temporalPassStageFrameGenDump(ID3D11DeviceContext* ctx, int k, ID3D11Texture2D* finishedS, ID3D11Texture2D* finishedB) {
+    if (!ctx || k < 0 || k >= kEyeRun) return;
+    uint32_t wantW = 0, wantH = 0, cw = 0, ch = 0;
+    if (finishedS) {
+        eyeOutputCropSize(k, finishedS, &wantW, &wantH);
+        stageEyeCrop(ctx, finishedS, &g_eyeSynthStaging[k], &cw, &ch, nullptr, wantW, wantH);
+    }
+    if (finishedB) {
+        eyeOutputCropSize(k, finishedB, &wantW, &wantH);
+        stageEyeCrop(ctx, finishedB, &g_eyeSynthBStaging[k], &cw, &ch, nullptr, wantW, wantH);
+    }
+}
 
 void temporalPassLogMap() {
     if (g_mapKept == 0 && g_mapReset == 0) return;
@@ -6566,6 +6785,7 @@ static void temporalPassSkyDiagTick() {
 
 void temporalPassFrameBoundary() {
     g_eyeFinalClock.boundary(g_eyeFinalRun.armed);
+    frameGenSynthFrameBoundary();    // the synthesizer's, right after it
     if (!detail::g_temporalPassWantedFssChrome) return;
     for (int eye = 0; eye < 2; ++eye) {
         if (g_rigidDraw[eye].seen && g_rigidDraw[eye].frame == g_rowsFrame) {
@@ -7072,6 +7292,8 @@ static bool beginEyeRun(bool companion,const edvr::NativeOnFootAirborneSnapshot*
     for(int k=0;k<kEyeRun;++k) {
         if(g_eyeDecisionStaging[k]){g_eyeDecisionStaging[k]->Release();g_eyeDecisionStaging[k]=nullptr;}
         if(g_eyePreUiStaging[k]){g_eyePreUiStaging[k]->Release();g_eyePreUiStaging[k]=nullptr;}
+        if(g_eyeSynthStaging[k]){g_eyeSynthStaging[k]->Release();g_eyeSynthStaging[k]=nullptr;}
+        if(g_eyeSynthBStaging[k]){g_eyeSynthBStaging[k]->Release();g_eyeSynthBStaging[k]=nullptr;}
         g_eyeDecisions[k]=EyeDecisionFrame{};
     }
     for(auto& texture:g_eyeInputs)if(texture){texture->Release();texture=nullptr;}
@@ -7162,6 +7384,9 @@ void temporalPassShutdown() {
     // The same for fsr4Shutdown, whose bridge is the same kind of D3D12 device and GPU wait.
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
+    if (g_csMvFg) { g_csMvFg->Release(); g_csMvFg = nullptr; }
+    if (g_csMvFgFast) { g_csMvFgFast->Release(); g_csMvFgFast = nullptr; }
+    g_csMvFgTried = g_csMvFgFastTried = false;
     if (g_csMvTrace) { g_csMvTrace->Release(); g_csMvTrace = nullptr; }
     g_csMvTraceTried = false;
     if (g_passDevice) { g_passDevice->Release(); g_passDevice = nullptr; }
@@ -7196,6 +7421,8 @@ void temporalPassShutdown() {
         if (g_eyeTreatedStaging[k]) { g_eyeTreatedStaging[k]->Release(); g_eyeTreatedStaging[k] = nullptr; }
         if (g_eyeDecisionStaging[k]) { g_eyeDecisionStaging[k]->Release(); g_eyeDecisionStaging[k] = nullptr; }
         if (g_eyePreUiStaging[k]) { g_eyePreUiStaging[k]->Release(); g_eyePreUiStaging[k] = nullptr; }
+        if (g_eyeSynthStaging[k]) { g_eyeSynthStaging[k]->Release(); g_eyeSynthStaging[k] = nullptr; }
+        if (g_eyeSynthBStaging[k]) { g_eyeSynthBStaging[k]->Release(); g_eyeSynthBStaging[k] = nullptr; }
     }
     g_eyeRunLeft = 0;
     g_eyeRunTaken = 0;

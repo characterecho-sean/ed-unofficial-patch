@@ -2,6 +2,7 @@
 #include "menu_panel.h"
 #include "input_gate.h"
 #include "../common/frame_flag.h"
+#include "../common/framegen_slot_report.h"   // kFrameGenFinish*
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -87,6 +88,21 @@ void headLockAnchor(const float head[12], float yaw, float pitch, float out[12])
     out[row*4+3] = head[row*4+3];
   }
 }
+// The composite's transform: the eye's rotation in the anchor's frame (row-major 3x3), then the eye's origin in it.
+void eyeInAnchor(const float anchor[12], const float eyePose[12], float transform[12]) {
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) transform[i*3+j] = anchor[i]*eyePose[j] + anchor[4+i]*eyePose[4+j] + anchor[8+i]*eyePose[8+j];
+    transform[9+i] = anchor[i]*(eyePose[3]-anchor[3]) + anchor[4+i]*(eyePose[7]-anchor[7]) + anchor[8+i]*(eyePose[11]-anchor[11]);
+  }
+}
+// The eye's published frustum, for the composite's duration. These signed physical magnitudes also represent an off-centre frustum.
+struct FrustumScope {
+  FrustumScope(const State& s, uint32_t eye) {
+    const float physical[4] = {-s.frusta[eye][0], s.frusta[eye][1], s.frusta[eye][3], -s.frusta[eye][2]};
+    edvr::menuPanelSetNativeFrustum(physical);
+  }
+  ~FrustumScope() { edvr::menuPanelClearNativeFrustum(); }
+};
 HRESULT WINAPI treat(void* context, uint32_t eye, ID3D11Texture2D* source,
     const float* box, ID3D11Texture2D** output, float* outBox) {
   if (output) *output = nullptr;
@@ -112,18 +128,9 @@ HRESULT WINAPI treat(void* context, uint32_t eye, ID3D11Texture2D* source,
     headLockAnchor(s->head, yaw, pitch, anchor);
   } else if (!edvr::menuAnchor(anchor, nullptr)) return S_FALSE;
   if (!rigid(anchor)) return E_INVALIDARG;
-  const auto* eyePose = s->eyes[eye];
   float transform[12]{};
-  for (int i = 0; i < 3; ++i) {
-    for (int j = 0; j < 3; ++j) transform[i*3+j] = anchor[i]*eyePose[j] + anchor[4+i]*eyePose[4+j] + anchor[8+i]*eyePose[8+j];
-    transform[9+i] = anchor[i]*(eyePose[3]-anchor[3]) + anchor[4+i]*(eyePose[7]-anchor[7]) + anchor[8+i]*(eyePose[11]-anchor[11]);
-  }
-  // These signed physical magnitudes also represent an off-centre frustum.
-  const float physical[4] = {-s->frusta[eye][0], s->frusta[eye][1], s->frusta[eye][3], -s->frusta[eye][2]};
-  struct FrustumScope {
-    explicit FrustumScope(const float* value) { edvr::menuPanelSetNativeFrustum(value); }
-    ~FrustumScope() { edvr::menuPanelClearNativeFrustum(); }
-  } frustumScope(physical);
+  eyeInAnchor(anchor, s->eyes[eye], transform);
+  FrustumScope frustumScope(*s, eye);
   auto* treated = static_cast<ID3D11Texture2D*>(edvr::menuPanelCompositeNative(source, int(eye), box, transform));
   if (!treated) return S_FALSE;
   treated->AddRef(); *output = treated;
@@ -154,6 +161,38 @@ bool nativeMenuEyePoses(float out[2][12]) {
   if (!out || !current || !current->active || !current->pose) return false;
   std::memcpy(out, current->eyes, sizeof(current->eyes));
   return true;
+}
+uint32_t nativeMenuFrameGenDraw(ID3D11DeviceContext* ctx, uint32_t eye, ID3D11Texture2D* target, const float box[4], const float rot[9], const float t[3]) {
+  std::lock_guard<std::mutex> lock(mutex);
+  auto* s = current;
+  // What makes the runtime's treat draw nothing on B draws nothing on S: no menu session, the menu not showing, no anchor yet, or the panel outside the eye.
+  if (!s || !s->active) return edvr::kFrameGenFinishDone;
+  float alpha = 0; uint32_t stamp = 0;
+  if (!edvr::menuVisible(&alpha, &stamp) || alpha <= 0.f) return edvr::kFrameGenFinishDone;
+  if (!ctx || eye > 1 || !target || !box || !rot || !t || !s->pose || GetCurrentThreadId() != s->thread || !sameDevice(s->device, target))
+    return edvr::kFrameGenFinishMenu;
+  float anchor[12]{}, yaw = 0, pitch = 0;
+  const bool headLocked = edvr::menuHeadLock(&yaw, &pitch);
+  if (headLocked) {
+    if (!std::isfinite(yaw) || !std::isfinite(pitch)) return edvr::kFrameGenFinishMenu;
+    headLockAnchor(s->head, yaw, pitch, anchor);
+  } else if (!edvr::menuAnchor(anchor, nullptr)) return edvr::kFrameGenFinishDone;
+  if (!rigid(anchor) || !finite(rot, 9) || !finite(t, 3)) return edvr::kFrameGenFinishMenu;
+  float transform[12]{};
+  eyeInAnchor(anchor, s->eyes[eye], transform);
+  if (!headLocked) {
+    // S's eye is B's carried by the step (x_S = rot x_B + t): eye_S = eye_B * step^-1, so in the anchor's frame its rotation is R rot^T and its origin o - R rot^T t. A
+    // head-locked anchor moves with the head, so there the eye's place in it is B's.
+    float r[9];
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j) r[i*3+j] = transform[i*3]*rot[j*3] + transform[i*3+1]*rot[j*3+1] + transform[i*3+2]*rot[j*3+2];
+    for (int i = 0; i < 3; ++i) transform[9+i] -= r[i*3]*t[0] + r[i*3+1]*t[1] + r[i*3+2]*t[2];
+    std::memcpy(transform, r, sizeof(r));
+  }
+  FrustumScope frustumScope(*s, eye);
+  auto* drawn = static_cast<ID3D11Texture2D*>(edvr::menuPanelCompositeNativeFrameGen(target, int(eye), box, transform));
+  if (drawn) ctx->CopyResource(target, drawn);
+  return edvr::kFrameGenFinishDone;
 }
 extern "C" HRESULT WINAPI edvrAcquireNativeMenu(const EdvrNativeMenuRequest* request, EdvrNativeMenuTable* table) {
   if (!table || table->size != sizeof(*table) || table->version != EDVR_NATIVE_MENU_VERSION_1) return E_INVALIDARG;
