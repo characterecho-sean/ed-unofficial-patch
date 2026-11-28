@@ -1844,6 +1844,101 @@ HullHalo case17HullHalo(Gpu& g, Scope& sc, bool report) {
     return e;
 }
 
+// Case 18: EDVR_FG_MOTION (kTemporalMvFgFastBytecode) writes undilated physical motion to u1 (FGPhysicalMotion)
+// alongside SR's 3x3-dilated, disocclusion-invalidated MV at u3.
+void case18UndilatedFgMv(Gpu& g, Scope& sc) {
+    constexpr int W = 32, H = 32;
+    ComPtr<ID3D11ComputeShader> mvFg;
+    const HRESULT made = g.dev->CreateComputeShader(kTemporalMvFgFastBytecode, sizeof(kTemporalMvFgFastBytecode), nullptr, &mvFg);
+    sc.ok(SUCCEEDED(made) && mvFg, "case 18: kTemporalMvFgFastBytecode creates on WARP");
+    if (FAILED(made) || !mvFg) return;
+    struct TemporalCb {
+        int region[4]; int size[2]; int texSize[2];
+        float tanNow[4], tanPrev[4], jit[4];
+        float dR0[4], dR1[4], dR2[4];
+        float c0R0[4], c0R1[4], c0R2[4];
+        float c1R0[4], c1R1[4], c1R2[4];
+        float c2R0[4], c2R1[4], c2R2[4];
+        float c3R0[4], c3R1[4], c3R2[4];
+        float blend, gamma; int haveHistory, candMask;
+        float knobs[4], tvUsed[4], tvCand[4], tvCam[4], split[4], probe[4], holoJitter[4];
+    };
+    static_assert(sizeof(TemporalCb) == 448, "cbuffer P size");
+    TemporalCb cb{};
+    cb.region[0] = 0; cb.region[1] = 0; cb.region[2] = W; cb.region[3] = H;
+    cb.size[0] = W; cb.size[1] = H; cb.texSize[0] = W; cb.texSize[1] = H;
+    const float tan[4] = {-1.0f, 1.0f, 1.0f, -1.0f};
+    std::memcpy(cb.tanNow, tan, sizeof(tan));
+    std::memcpy(cb.tanPrev, tan, sizeof(tan));
+    cb.dR0[0] = 1.0f; cb.dR1[1] = 1.0f; cb.dR2[2] = 1.0f;
+    float rWorld[9]; rotY(8.0f, rWorld);
+    cb.c2R0[0] = rWorld[0]; cb.c2R0[1] = rWorld[1]; cb.c2R0[2] = rWorld[2];
+    cb.c2R1[0] = rWorld[3]; cb.c2R1[1] = rWorld[4]; cb.c2R1[2] = rWorld[5];
+    cb.c2R2[0] = rWorld[6]; cb.c2R2[1] = rWorld[7]; cb.c2R2[2] = rWorld[8];
+    cb.knobs[0] = 0.0f; cb.knobs[1] = 1.0f; cb.knobs[2] = kDepthB; cb.knobs[3] = 0.0f;
+    cb.tvCam[3] = 1.0f; cb.split[0] = 10.0f;
+    cb.probe[3] = 64.0f + 256.0f;
+    cb.holoJitter[2] = 1.0f; cb.holoJitter[3] = 1.0f;
+    D3D11_BUFFER_DESC bd{};
+    bd.ByteWidth = sizeof(TemporalCb); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA csd{&cb, 0, 0};
+    ComPtr<ID3D11Buffer> cbuf;
+    if (FAILED(g.dev->CreateBuffer(&bd, &csd, &cbuf))) { sc.ok(false, "case 18: cb create"); return; }
+    const float zNear = kDepthB / 2.0f, zWorld = kDepthB / 50.0f;
+    std::vector<float> col(W * H * 4, 0.2f), zNow(W * H, zWorld), zPrev(W * H, zWorld);
+    for (int y = 8; y <= 23; ++y) for (int x = 8; x <= 15; ++x) zNow[y * W + x] = zNear;
+    for (int y = 14; y <= 18; ++y) for (int x = 18; x <= 28; ++x) zPrev[y * W + x] = zNear;
+    Tex tS, tZ, tZP, tFgMv, tMv, tZc, tMk;
+    const bool okTex = g.makeTex(W, H, DXGI_FORMAT_R32G32B32A32_FLOAT, col.data(), W * 16, tS, false) &&
+                       g.makeTex(W, H, DXGI_FORMAT_R32_FLOAT, zNow.data(), W * 4, tZ, false) &&
+                       g.makeTex(W, H, DXGI_FORMAT_R32_FLOAT, zPrev.data(), W * 4, tZP, false) &&
+                       g.makeTex(W, H, DXGI_FORMAT_R32G32_FLOAT, nullptr, 0, tFgMv, true) &&
+                       g.makeTex(W, H, DXGI_FORMAT_R32G32_FLOAT, nullptr, 0, tMv, true) &&
+                       g.makeTex(W, H, DXGI_FORMAT_R32_FLOAT, nullptr, 0, tZc, true) &&
+                       g.makeTex(W, H, DXGI_FORMAT_R32_FLOAT, nullptr, 0, tMk, true);
+    sc.ok(okTex, "case 18: textures created");
+    if (!okTex) return;
+    ID3D11ShaderResourceView* srvs[4] = {tS.srv.Get(), nullptr, tZ.srv.Get(), tZP.srv.Get()};
+    ID3D11UnorderedAccessView* uavs[6] = {nullptr, tFgMv.uav.Get(), nullptr, tMv.uav.Get(), tZc.uav.Get(), tMk.uav.Get()};
+    ID3D11Buffer* cbs[1] = {cbuf.Get()};
+    g.ctx->CSSetShader(mvFg.Get(), nullptr, 0);
+    g.ctx->CSSetConstantBuffers(0, 1, cbs);
+    g.ctx->CSSetShaderResources(0, 4, srvs);
+    g.ctx->CSSetUnorderedAccessViews(0, 6, uavs, nullptr);
+    g.ctx->Dispatch((W + 7) / 8, (H + 7) / 8, 1);
+    ID3D11UnorderedAccessView* nullUavs[6] = {};
+    ID3D11ShaderResourceView* nullSrvs[4] = {};
+    g.ctx->CSSetUnorderedAccessViews(0, 6, nullUavs, nullptr);
+    g.ctx->CSSetShaderResources(0, 4, nullSrvs);
+    g.ctx->CSSetShader(nullptr, nullptr, 0);
+    struct Vec2 { float x, y; };
+    const auto srMv = g.readTex<Vec2>(tMv.t.Get(), W, H);
+    const auto fgMv = g.readTex<Vec2>(tFgMv.t.Get(), W, H);
+    auto expectedWorld = [&](int ix, int iy) -> Vec2 {
+        const float px = ix + 0.5f, py = iy + 0.5f;
+        const float u = px / W, v = py / H;
+        const float dx = tan[0] + u * (tan[1] - tan[0]);
+        const float dy = tan[2] + v * (tan[3] - tan[2]);
+        const float dz = -1.0f;
+        const float rx = rWorld[0] * dx + rWorld[1] * dy + rWorld[2] * dz;
+        const float ry = rWorld[3] * dx + rWorld[4] * dy + rWorld[5] * dz;
+        const float rz = rWorld[6] * dx + rWorld[7] * dy + rWorld[8] * dz;
+        const float ppx = ((rx / (-rz)) - tan[0]) / (tan[1] - tan[0]) * W;
+        const float ppy = ((ry / (-rz)) - tan[2]) / (tan[3] - tan[2]) * H;
+        return {ppx - px, ppy - py};
+    };
+    const Vec2 inSr = srMv[16 * W + 12], inFg = fgMv[16 * W + 12];
+    sc.ok(std::fabs(inSr.x) < 0.02f && std::fabs(inSr.y) < 0.02f && std::fabs(inFg.x) < 0.02f && std::fabs(inFg.y) < 0.02f,
+          "case 18: interior cockpit pixel has zero motion in both SR MV and FGPhysicalMotion");
+    const Vec2 edgeSr = srMv[16 * W + 16], edgeFg = fgMv[16 * W + 16], edgeExp = expectedWorld(16, 16);
+    sc.ok(std::fabs(edgeExp.x) > 1.5f && std::fabs(edgeSr.x) < 0.02f && std::fabs(edgeFg.x - edgeExp.x) < 0.02f && std::fabs(edgeFg.y - edgeExp.y) < 0.02f,
+          "case 18: 1 px outside silhouette SR MV dilates foreground (0) while FGPhysicalMotion keeps undilated world motion");
+    const Vec2 disSr = srMv[16 * W + 22], disFg = fgMv[16 * W + 22], disExp = expectedWorld(22, 16);
+    sc.ok(std::fabs(disSr.x - 64.0f) < 0.01f && std::fabs(disSr.y - 64.0f) < 0.01f &&
+          std::fabs(disFg.x - disExp.x) < 0.02f && std::fabs(disFg.y - disExp.y) < 0.02f,
+          "case 18: disoccluded world pixel gets size*2 sentinel in SR MV but finite physical motion in FGPhysicalMotion");
+}
+
 int run() {
     Gpu g;
     if (!g.init()) {
@@ -1867,7 +1962,8 @@ int run() {
     case15Uncover(g, sc, true);
     case16Orphan(g, sc, true);
     case17HullHalo(g, sc, true);
-    if (!alive("cases 1 to 5 and 13 to 17")) return 1;
+    case18UndilatedFgMv(g, sc);
+    if (!alive("cases 1 to 5 and 13 to 18")) return 1;
     case6Module(g, sc);
     if (!alive("case 6")) return 1;
     case7Check(g, sc);

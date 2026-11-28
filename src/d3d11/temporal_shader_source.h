@@ -24,6 +24,13 @@ Texture2D<float> Z : register(t2);       // the scene's depth, the game's own, w
 SamplerState L : register(s0);           // bilinear, clamp
 RWTexture2D<float4> O : register(u0);    // the output: region-sized in the game's format (main)
 RWTexture2D<float4> N : register(u1);    // the new history
+#ifndef EDVR_FG_MOTION
+#define EDVR_FG_MOTION 0
+#endif
+#if EDVR_FG_MOTION
+// Only mv uses this alias; main history N is eliminated from that entry.
+RWTexture2D<float2> FGPhysicalMotion : register(u1);
+#endif
 RWStructuredBuffer<uint> Stats : register(u2);   // 0 rejected, 1 clipped, 2 the clips' size (luma/255, summed); then the same three per candidate, four of them; 15 pixels on the world path, 16 bright pixels, 17 bright pixels with no depth; 18-20 the registration probes on the world path (sum dx*100, sum dy*100, count) and 21-23 on the ship; 24-27 world pixels, world clipped, ship pixels, ship clipped; 28 unused (the mover mask's, retired); 29 unused (the body path's, retired 2026-09-23); 30-32 the registration probes on the sky (the far plane: sum dx*100, sum dy*100, count); 33-34 the probes' sum resid.mv*100 and sum mv.mv*100 on the sky, 35-36 on the world with a depth, 37-38 on the ship; 39 the pixels that took the celestial path (decision 12; mv only), 40-49 unused (the estimated ship, second-body and stepped-part paths' counters, retired 2026-09-23); 50-55 the engine path's pixel kinds (mv only, gCount 48-53)
 RWTexture2D<float2> MV : register(u3);   // for a trained pass: motion vectors, pixels, current -> previous
 RWTexture2D<float>  ZC : register(u4);   // and the depth, copied as it is (the mv entry)
@@ -1084,6 +1091,45 @@ R"HLSL(
         // history lookup is invalidated, as with new source-screen pixels.
         float2 written = hidden ? float2(size)*2 : motion;
         MV[id.xy] = written;
+#if EDVR_FG_MOTION
+        // Undilated physical motion for VR frame generation: center-texel depth
+        // (no 3x3 dilation from SR) and no SR reactive/disocclusion sentinel on
+        // valid geometry. Invalid or engine-masked pixels carry size*2 so
+        // framegen_synth FG_SENTINEL handles them identically.
+        float2 fgMotion = motion;
+        bool fgValid = projectionValid;
+        if (!trackedForeground && !engineMasked) {
+            float3 fgDp = float3(dot(dR0.xyz, d), dot(dR1.xyz, d), dot(dR2.xyz, d));
+            if (knobs.y != 0.0) {
+                bool fgFar;
+                float fgZ = temporalDepthMetres(sceneZraw, knobs.x, knobs.z, fgFar);
+                bool fgScannerUi = (uint(probe.w + 0.5) & 128u) != 0u && uiCovered(region.xy + int2(p));
+                if (temporalWorldPath(worldAvailable, fgFar, fgZ, split.x, fgScannerUi)) {
+                    fgDp = temporalCarry(d, fgZ, fgFar, c2R0.xyz, c2R1.xyz, c2R2.xyz, tvCam.xyz);
+#if EDVR_CELESTIAL
+                    if (!fgFar) {
+                        float3 fgCelDp;
+                        if (celestialPixel(p, d, fgZ, fgCelDp)) fgDp = fgCelDp;
+                    }
+#endif
+                } else if (!fgFar) {
+                    const float3 fgHeadTv = tvUsed.xyz;
+                    fgDp = temporalCarry(d, fgZ, fgFar, dR0.xyz, dR1.xyz, dR2.xyz, fgHeadTv);
+                }
+            }
+            float2 fgPp;
+            fgValid = temporalProjectPixel(fgDp, tanPrev, size, fgPp);
+            if (fgValid) {
+                fgMotion = fgPp - p;
+                if (!projectionValid) {
+                    float2 holoP; float holoZ;
+                    if (holoPixel(p, 0, holoP, holoZ)) fgMotion = holoP - p;
+                }
+            }
+        }
+        fgValid = fgValid && !engineMasked && all(isfinite(fgMotion));
+        FGPhysicalMotion[id.xy] = fgValid ? fgMotion : float2(size) * 2;
+#endif
 #if EDVR_TEMPORAL_TRACE
         // depthValid is a usable non-screen sample on the final route. Screen
         // z uses its source projection's private encoding, so bit 256 stays

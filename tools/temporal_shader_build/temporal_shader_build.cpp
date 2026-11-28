@@ -474,6 +474,8 @@ static int generateTemporal(const Options& o) {
     static const D3D_SHADER_MACRO fast[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "0"}, {nullptr, nullptr}};
     static const D3D_SHADER_MACRO diagnostic[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {nullptr, nullptr}};
     static const D3D_SHADER_MACRO trace[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {"EDVR_TEMPORAL_TRACE", "1"}, {nullptr, nullptr}};
+    static const D3D_SHADER_MACRO fgFast[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "0"}, {"EDVR_FG_MOTION", "1"}, {nullptr, nullptr}};
+    static const D3D_SHADER_MACRO fgDiag[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {"EDVR_FG_MOTION", "1"}, {nullptr, nullptr}};
     const std::string mapEasu = mapEasuSource();   // outlives the variants below, which keep its text
     const std::string mapSmaaEdges = mapSmaaSource(edvr::kMapSmaaEdgesHlsl);
     const std::string mapSmaaWeights = mapSmaaSource(edvr::kMapSmaaWeightsHlsl);
@@ -509,6 +511,8 @@ static int generateTemporal(const Options& o) {
         {"kTemporalMvFastBytecode", "temporal_mv_fast_cs", "mv", fast, {}},
         {"kTemporalMvBytecode", "temporal_mv_cs", "mv", diagnostic, {}},
         {"kTemporalMvTraceBytecode", "temporal_mv_trace_cs", "mv", trace, {}},
+        {"kTemporalMvFgFastBytecode", "temporal_mv_fg_fast_cs", "mv", fgFast, {}},
+        {"kTemporalMvFgBytecode", "temporal_mv_fg_cs", "mv", fgDiag, {}},
         {"kTemporalAaBytecode", "temporal_aa_cs", "main", diagnostic, {}},
         {"kTemporalAaFastBytecode", "temporal_aa_fast_cs", "main", fast, {}},
         {"kFlatMonoPrepBytecode", "flat_mono_prep_cs", "prep", nullptr, {}, true},
@@ -1648,6 +1652,32 @@ static void selfTest() {
         for (const char* entry : {"mapCompress", "mapEasu"}) {
             Variant mono{"kMapEasuSelfTest", "flat_map_easu_self_test", entry, nullptr, {}, false, easu.c_str()};
             check(compile(compiler.fn, easu.c_str(), mono), "production map EASU shader compilation");
+        }
+    }
+    // Undilated physical FG motion vector mv variants (EDVR_FG_MOTION=1): FGPhysicalMotion at u1 alongside MV at u3, absent from non-FG mv.
+    {
+        static const D3D_SHADER_MACRO mvPlain[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "0"}, {nullptr, nullptr}};
+        static const D3D_SHADER_MACRO mvFgFast[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "0"}, {"EDVR_FG_MOTION", "1"}, {nullptr, nullptr}};
+        static const D3D_SHADER_MACRO mvFgDiag[] = {{"EDVR_TEMPORAL_DIAGNOSTICS", "1"}, {"EDVR_FG_MOTION", "1"}, {nullptr, nullptr}};
+        Variant plain{"kTemporalMvFastSelfTest", "temporal_mv_fast_cs", "mv", mvPlain, {}};
+        Variant fgFast{"kTemporalMvFgFastSelfTest", "temporal_mv_fg_fast_cs", "mv", mvFgFast, {}};
+        Variant fgDiag{"kTemporalMvFgSelfTest", "temporal_mv_fg_cs", "mv", mvFgDiag, {}};
+        check(compile(compiler.fn, edvr::kTemporalCsHlsl, plain) && compile(compiler.fn, edvr::kTemporalCsHlsl, fgFast) &&
+              compile(compiler.fn, edvr::kTemporalCsHlsl, fgDiag), "EDVR_FG_MOTION mv variants compile cleanly");
+        if (reflect) {
+            auto checkFg = [&](const Variant& var, bool wantFg) {
+                ComPtr<ID3D11ShaderReflection> r;
+                if (FAILED(reflect(var.bytes.data(), var.bytes.size(), __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(r.GetAddressOf()))) || !r) return false;
+                D3D11_SHADER_INPUT_BIND_DESC fg{}, mv{}, zc{}, mk{};
+                const bool hasFg = SUCCEEDED(r->GetResourceBindingDescByName("FGPhysicalMotion", &fg));
+                const bool coreOk = SUCCEEDED(r->GetResourceBindingDescByName("MV", &mv)) && mv.Type == D3D_SIT_UAV_RWTYPED && mv.BindPoint == 3 &&
+                                    SUCCEEDED(r->GetResourceBindingDescByName("ZC", &zc)) && zc.Type == D3D_SIT_UAV_RWTYPED && zc.BindPoint == 4 &&
+                                    SUCCEEDED(r->GetResourceBindingDescByName("MK", &mk)) && mk.Type == D3D_SIT_UAV_RWTYPED && mk.BindPoint == 5;
+                if (!wantFg) return coreOk && !hasFg;
+                return coreOk && hasFg && fg.Type == D3D_SIT_UAV_RWTYPED && fg.BindPoint == 1 && fg.BindCount == 1;
+            };
+            check(checkFg(plain, false) && checkFg(fgFast, true) && checkFg(fgDiag, true),
+                  "EDVR_FG_MOTION mv shaders bind FGPhysicalMotion at u1 alongside MV/ZC/MK at u3..u5, and plain mv omits it");
         }
     }
     // The map temporal-off frames' SMAA 1x entries (map_smaa_shader.h over the vendored SMAA.hlsl), each compiled as the build compiles them.

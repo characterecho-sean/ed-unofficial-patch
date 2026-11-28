@@ -196,6 +196,9 @@ struct EyeState {
     ID3D11Texture2D*           dlMv = nullptr;
     ID3D11UnorderedAccessView* dlMvUav = nullptr;
     ID3D11ShaderResourceView*  dlMvSrv = nullptr;
+    ID3D11Texture2D*           dlFgMv = nullptr;   // undilated non-reactive physical MV for frame generation (u1)
+    ID3D11UnorderedAccessView* dlFgMvUav = nullptr;
+    ID3D11ShaderResourceView*  dlFgMvSrv = nullptr;
     // Exists only while an explicit eye run asks for the capture-only mv
     // variant (its u7 decision texture).
     ID3D11Texture2D*           dlDecision = nullptr;
@@ -299,6 +302,9 @@ void releaseDl(EyeState& e) {
     if (e.uiMaskSrv) { e.uiMaskSrv->Release(); e.uiMaskSrv = nullptr; }
     e.uiMaskRes = nullptr;
     if (e.dlColourSrv) { e.dlColourSrv->Release(); e.dlColourSrv = nullptr; }
+    if (e.dlFgMvSrv) { e.dlFgMvSrv->Release(); e.dlFgMvSrv = nullptr; }
+    if (e.dlFgMvUav) { e.dlFgMvUav->Release(); e.dlFgMvUav = nullptr; }
+    if (e.dlFgMv) { e.dlFgMv->Release(); e.dlFgMv = nullptr; }
     if (e.dlMvSrv) { e.dlMvSrv->Release(); e.dlMvSrv = nullptr; }
     if (e.dlDepthSrv) { e.dlDepthSrv->Release(); e.dlDepthSrv = nullptr; }
     if (e.dlMvUav) { e.dlMvUav->Release(); e.dlMvUav = nullptr; }
@@ -1097,11 +1103,27 @@ ID3D11ComputeShader*       g_csMv = nullptr;     // the motion-vector entry, for
 bool                       g_csMvTried = false;
 ID3D11ComputeShader*       g_csMvFast = nullptr;
 bool                       g_csMvFastTried = false;
+ID3D11ComputeShader*       g_csMvFg = nullptr;
+bool                       g_csMvFgTried = false;
+ID3D11ComputeShader*       g_csMvFgFast = nullptr;
+bool                       g_csMvFgFastTried = false;
 ID3D11ComputeShader*       g_csMvTrace = nullptr;
 bool                       g_csMvTraceTried = false;
 ID3D11ComputeShader*       g_csEyeJumpLattice = nullptr;
 bool                       g_csEyeJumpLatticeTried = false;
 
+ID3D11ComputeShader* motionShaderFg(ID3D11DeviceContext* ctx, bool diagnostics) {
+    auto*& shader = diagnostics ? g_csMvFg : g_csMvFgFast;
+    auto& tried = diagnostics ? g_csMvFgTried : g_csMvFgFastTried;
+    if (!shader && !tried) {
+        tried = true;
+        shader = shaderSwapCreateCs(ctx,
+            diagnostics ? kTemporalMvFgBytecode : kTemporalMvFgFastBytecode,
+            diagnostics ? sizeof(kTemporalMvFgBytecode) : sizeof(kTemporalMvFgFastBytecode),
+            diagnostics ? "temporal_mv_fg_cs" : "temporal_mv_fg_fast_cs", "temporal aa");
+    }
+    return shader;
+}
 ID3D11ComputeShader* motionShader(ID3D11DeviceContext* ctx, bool diagnostics) {
     auto*& shader = diagnostics ? g_csMv : g_csMvFast;
     auto& tried = diagnostics ? g_csMvTried : g_csMvFastTried;
@@ -3523,6 +3545,11 @@ bool ensureUiHistory(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
                     w,h,static_cast<double>(w)*h*8.0/1048576.0);
     return true;
 }
+bool ensureFgMotion(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
+    if (e.dlFgMv) return true;
+    return makeTex(dev, w, h, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+        D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, &e.dlFgMv, &e.dlFgMvSrv, &e.dlFgMvUav);
+}
 bool ensureBiasMask(ID3D11Device* dev, EyeState& e, uint32_t w, uint32_t h) {
     if (e.dlMask) return true;
     return maskFormatOk(dev) && makeTex(dev,w,h,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_R8_UNORM,
@@ -4879,6 +4906,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                 }
             } else {
                 ID3D11ComputeShader* mvCs = motionShader(ctx, diagnostics);
+                bool fgMvActive = false;
                 const bool eyeRunTrace = eye == 0 && g_eyeRunLeft > 0 &&
                                          g_eyeRunTaken < kEyeRun && !amdEngine && !intelEngine && !dittoEngine && !fsr4Engine;
                 // TEMPORARY, the blend probe (blend_probe.h): a collecting capture wants eye 0's per-pixel decisions too. The same
@@ -4954,6 +4982,14 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     g_eyeDecisions[g_eyeRunTaken].error = "non_nvidia_trace_unsupported";
                 } else if (probeTrace && !made) {
                     blendProbeGridRefuse("the pass's own textures were not made this frame");
+                }
+                fgMvActive = false;
+                if (!traceReady && made && frameGenLockSynth() && ensureFgMotion(dev, e, w, h)) {
+                    if (ID3D11ComputeShader* fgCs = motionShaderFg(ctx, diagnostics)) { mvCs = fgCs; fgMvActive = true; }
+                } else if (!frameGenLockSynth() && e.dlFgMv) {
+                    if (e.dlFgMvSrv) { e.dlFgMvSrv->Release(); e.dlFgMvSrv = nullptr; }
+                    if (e.dlFgMvUav) { e.dlFgMvUav->Release(); e.dlFgMvUav = nullptr; }
+                    e.dlFgMv->Release(); e.dlFgMv = nullptr;
                 }
                 if (made && setParams(ctx, p)) {
                     if(uiTrack && e.dlSubmitUav && !g_csUiResolveTried) {
@@ -5070,7 +5106,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                     ++g_mvDepthLayers[(layersAbsentM & 64u ? 2u : 0u) | (layersAbsentM & 256u ? 1u : 0u)];
                     setParams(ctx, p);
                     ID3D11UnorderedAccessView* uavsM[8] = {nullptr,
-                                                           nullptr, g_statsUav, e.dlMvUav,
+                                                           fgMvActive ? e.dlFgMvUav : nullptr, g_statsUav, e.dlMvUav,
                                                            e.dlDepthUav, e.dlMaskUav,
                                                             uiTrack && !uiResolve ? e.uiHistoryUav[1-e.uiHistoryRead] : nullptr,
                                                             traceReady ? e.dlDecisionUav : nullptr};
@@ -5444,7 +5480,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                                 sy.dumpIndex = dumpFrame ? g_eyeRunTaken : -1;
                             }
                             sy.depthSrv = e.dlDepthSrv;
-                            sy.mvSrv = e.dlMvSrv;
+                            sy.mvSrv = (fgMvActive && e.dlFgMvSrv) ? e.dlFgMvSrv : e.dlMvSrv;
                             sy.tanNow = tanNow;
                             sy.depthA = p.knobs[0];
                             sy.depthB = p.knobs[2];
@@ -7348,6 +7384,9 @@ void temporalPassShutdown() {
     // The same for fsr4Shutdown, whose bridge is the same kind of D3D12 device and GPU wait.
     if (g_csMv) { g_csMv->Release(); g_csMv = nullptr; }
     if (g_csMvFast) { g_csMvFast->Release(); g_csMvFast = nullptr; }
+    if (g_csMvFg) { g_csMvFg->Release(); g_csMvFg = nullptr; }
+    if (g_csMvFgFast) { g_csMvFgFast->Release(); g_csMvFgFast = nullptr; }
+    g_csMvFgTried = g_csMvFgFastTried = false;
     if (g_csMvTrace) { g_csMvTrace->Release(); g_csMvTrace = nullptr; }
     g_csMvTraceTried = false;
     if (g_passDevice) { g_passDevice->Release(); g_passDevice = nullptr; }
