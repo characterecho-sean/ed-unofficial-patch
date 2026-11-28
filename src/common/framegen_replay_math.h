@@ -1,5 +1,5 @@
 #pragma once
-// Frame generation replay capture, the pure half (fix.frame_generation_shadow, TEMPORARY; .agents\framegen-replay-format.md): SHA-256, the DXGI formats the capture
+// Frame generation replay capture, the pure half (fix.frame_generation, TEMPORARY): fgreplay_<stamp> folder (meta.json + per-frame raw colour/depth/MV + SHA-256); DXGI formats the capture
 // knows (name and bytes per texel), and the two JSON documents (one per captured frame, and the manifest). The writer is src\d3d11\framegen_synth.cpp; the reader is
 // tools\framegen_synth_bench. Nothing here touches D3D or the disk.
 #include <cstdint>

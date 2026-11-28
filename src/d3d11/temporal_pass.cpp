@@ -5490,7 +5490,7 @@ void* temporalInner(void* srcTex, int eye, const float* bounds,
                             sy.depthWritten = zcWritten;
                             sy.cameraJump = gateJump || jumpedNow;
                             sy.wantShown = dumpFrame;
-                            // Replay capture (.agents/framegen-replay-format.md): the dump's first six left-eye frames, with what the constant block and the bench need beside the Hd and th above.
+                            // Replay capture (format in framegen_replay_math.h): the dump's first six left-eye frames, with what the constant block and the bench need beside the Hd and th above.
                             if (worldOn) memcpy(sy.deltas.W, cand[2], sizeof(sy.deltas.W));
                             for (int i = 0; i < 3; ++i) sy.deltas.tv[i] = p.tvCam[i];
                             sy.worldValid = worldOn;

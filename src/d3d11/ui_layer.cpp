@@ -1969,6 +1969,9 @@ bool releaseLayers() {
               e.hdrTex || e.hdrDs.tex || e.wTex || e.gTex || e.gDs.tex || e.smaa.ready() || e.fxaa.ready();
         e.smaa.releaseTargets();
         e.fxaa.releaseTargets();
+        e.fgLayer = nullptr;
+        e.fgMult = nullptr;
+        e.fgCompSeq = 0;
         e.coverage.reset();
         e.tex.Reset();
         e.rtv.Reset();
@@ -2103,6 +2106,9 @@ bool releaseQualityOnlyLayers() {
         e.mSrv.Reset();
         e.mW = e.mH = 0;
         e.mSeq = 0;
+        e.fgLayer = nullptr;
+        e.fgMult = nullptr;
+        e.fgCompSeq = 0;
         releaseLayerDs(e.ds);
     }
     return any;
@@ -3752,6 +3758,9 @@ ID3D11Texture2D* compositeInner(Eye& e, uint32_t eye, ID3D11Texture2D* frame,
     }
     // The HUD layer's edge smoothing (fix.hud_antialiasing; both profiles since 2026-11-03): the FXAA or SMAA resources for the layer's size are made here (per eye)
     // and run inside the timed span below, so VR's "ui quality: layer" price line includes their cost. Inactive pass resources are released promptly.
+    e.fgLayer = nullptr;
+    e.fgMult = nullptr;
+    e.fgCompSeq = 0;
     UiLayerSmaa* smaa = nullptr;
     UiLayerFxaa* fxaa = nullptr;
     if (aaMode == HudAaMode::kSmaa) {

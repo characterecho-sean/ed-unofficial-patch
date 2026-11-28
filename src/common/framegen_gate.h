@@ -231,7 +231,7 @@ public:
             else if (in.cut != FrameGenGateCut::None) reason = FrameGenGateReason::Cut;
             else if (t.tooSlow) reason = FrameGenGateReason::TooSlow;
             else if (t.fitsFull) {
-                if (!fitting_) { fitting_ = true; fitsSinceMs_ = nowMs; }
+                if (!fitting_ || nowMs < fitsSinceMs_) { fitting_ = true; fitsSinceMs_ = nowMs; }
                 if (nowMs >= fitsSinceMs_ && nowMs - fitsSinceMs_ >= kFrameGenGateFitsMs) reason = FrameGenGateReason::FitsFullRate;
             } else {
                 fitting_ = false;
@@ -248,7 +248,7 @@ public:
             if (reason != FrameGenGateReason::None) {
                 holding_ = false;
             } else {
-                if (!holding_) { holding_ = true; holdSinceMs_ = nowMs; }
+                if (!holding_ || nowMs < holdSinceMs_) { holding_ = true; holdSinceMs_ = nowMs; }
                 const bool held = nowMs >= holdSinceMs_ && nowMs - holdSinceMs_ >= kFrameGenGateEngageMs;
                 const bool rearmed = !everLetGo_ || (nowMs >= disengagedAtMs_ && nowMs - disengagedAtMs_ >= kFrameGenGateRearmMs);
                 if (held && rearmed) {

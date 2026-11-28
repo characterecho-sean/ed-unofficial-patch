@@ -8,7 +8,7 @@
 //       timestamp queries inside one disjoint query. Defaults: render 2817x2448, output 3756x3264, RGBA16F output, 300 iterations after 30 warm-up. Median and p95 ms per eye,
 //       and the VRAM the synth allocates.
 //   --replay FOLDER [--png-dir DIR] [--no-png] [--adapter N] [--json FILE] [--dry-run]
-//       FOLDER is an fgreplay_<stamp> capture (.agents/framegen-replay-format.md). For each consecutive pair (B = k, C = k + 1): the f = 1 S is built from B, kept, and scored against C's
+//       FOLDER is an fgreplay_<stamp> capture (format in framegen_replay_math.h). For each consecutive pair (B = k, C = k + 1): the f = 1 S is built from B, kept, and scored against C's
 //       output exactly as the DLL scores it (raw, and turned by the residual head rotation, per class; the |id: fields of the line are the no-warp baseline); the f = 0.5 S is built
 //       from B too. B, S(f = 0.5) and S(f = 1) are written as PNGs (8-bit, clamped to 0..1, sRGB encoded) into DIR, its missing parents made (default %TEMP%\edvr_bench_out\<FOLDER's
 //       name>, else .\bench_out\<that name>, never inside FOLDER: a capture sits in the game's folder); --dry-run writes nothing.

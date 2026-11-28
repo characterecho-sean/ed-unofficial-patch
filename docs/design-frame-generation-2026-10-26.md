@@ -52,9 +52,9 @@
 - **Next:** fly `auto` in a ship below headset rate and at full rate: the
   `frame generation gate:` line is H1 (budget, margin) and says each
   second why Lock is or is not allowed (2026-11-08 gate and cost entries).
-- **Temporary keys:** `fix.frame_generation_shadow` (off | on, hidden), and
-  `fix.frame_generation`'s `on` (forces Lock, for A/B flights; `auto` is
-  the value meant to stay).
+- **Temporary keys/tooling:** `fix.frame_generation`'s `on` (forces Lock for
+  A/B; `auto` is meant to stay), `hotkey.frame_generation` (developer A/B
+  toggle), and replay capture (`framegen_replay_math.h`).
 - **Declined in design (re-open on new evidence):** ## Declined, including AFW
   as a replacement. Flat XeSS-FG (declined 10-27) was re-opened 2026-11-12 as
   a present bridge: `docs/xess-frame-generation-2026-11-12.md`. Open: ## Open questions.
@@ -1461,8 +1461,8 @@ further into its source; each row picked a different neighbour.
   Case 13 also checks the hole count, since the sentinel mutation's holes are
   now filled right. Case 5's guard counter flips 0/1 in about 1 run in 8 on
   WARP before and after this change (a tie in `fgSynSrc`), not this fill.
-- **Crops:** before and after S (f = 0.5, frame 24124 = dump k02) of the
-  pilot's region in the agent's scratchpad; the after shows the terrain
+- **Crops:** before and after S (f = 0.5, frame 24124 = dump k02) over the
+  pilot's view; the after shows the terrain
   continuing behind the strake, a faint seam left at the strip's top.
 - **Flight signature:** the eye dumps' S beside the hull's trailing edge in a
   ship turn continues the terrain, the same in every S; the synth line's
@@ -1718,8 +1718,8 @@ Environment: OpenXR (EDVR's runtime), left eye, render 2817x2448, output
   that zero. Flight signature: the registration line's "nothing followed
   last frame's on N" and "dropped ... as another camera's" in a window with
   no dump; every window in this log that printed them held a dump.
-- Crops: scratchpad `gap_P_grid.png`, `gap_C_grid.png`,
-  `gap_flags_grid.png`, `path_132100543006_08.png` (white = hidden).
+- Visual inspection of dump 132100543006 frame 08 (decision trace crops):
+  the wing-gap band matches DLSS's history-hidden pixels.
 - ruled out: vendor smoothing (H4), because SteamVR's is off for Elite and
   the pilot's Pimax setup (SBoys3 on SteamVR) has no smoothing of its own.
 - **Pilot's A/B of the DLSS preset (K, L, M, live):** K gives the best

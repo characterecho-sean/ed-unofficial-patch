@@ -1063,7 +1063,7 @@ void case8Offsets(Scope& sc) {
           label);
 }
 
-// ---- case 9: the replay capture's writer (.agents/framegen-replay-format.md) ----------------------------------------------------------------------------------
+// ---- case 9: the replay capture's writer (framegen_replay_math.h) ------------------------------------------------------------------------------------------
 
 std::string readWholeFile(const std::wstring& path) {
     std::string out;

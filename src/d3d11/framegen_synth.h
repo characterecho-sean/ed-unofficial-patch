@@ -36,7 +36,7 @@ struct FrameGenSynthFrame {
     bool depthWritten = false;                      // this frame wrote a depth copy (zcWritten)
     bool cameraJump = false;                        // the camera gate dropped or carried this frame's rows, or the origin jumped: built, not scored
     bool wantShown = false;                         // the eye dump is open: build the f = 0.5 S on this frame whatever the alternation says
-    // Replay capture (.agents/framegen-replay-format.md): the eye dump is open on the left eye and this is its frame replayIndex (0..5). The module copies B's output, depth and
+    // Replay capture (format in framegen_replay_math.h): the eye dump is open on the left eye and this is its frame replayIndex (0..5). The module copies B's output, depth and
     // vectors into staging textures and keeps what the constant block was built from; nothing is written until frameGenReplayFinish. Needs wantShown (the f = 0.5 variant).
     bool replay = false;
     uint32_t replayIndex = 0;

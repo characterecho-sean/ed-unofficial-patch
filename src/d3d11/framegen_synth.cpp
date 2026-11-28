@@ -100,7 +100,7 @@ struct TimerSlot {
 };
 
 struct State {
-    ID3D11Device* dev = nullptr;   // identity only
+    ID3D11Device* dev = nullptr;   // owned ref so a replaced device cannot reuse this address while resources live
     bool failed = false;           // creation failed on this device: stand down until it changes or the key is toggled
     ID3D11ComputeShader* cs[kEntries] = {};
     ID3D11ComputeShader* csFinish = nullptr;   // Phase 2.3b: fgSynFinish, outside the pass sequence
@@ -141,6 +141,8 @@ void releaseTex(Tex& t) {
 
 // The producer texture and its handle. Nothing waits: a handoff the runtime has not consumed is simply let go (its opened copy stays valid on its side).
 void releaseShared(EyeRes& r) {
+    if (r.finHeld && r.mutex) r.mutex->ReleaseSync(0);
+    r.finHeld = false;
     releaseCom(r.mutex);
     releaseTex(r.shared);
     if (r.handle) { CloseHandle(r.handle); r.handle = nullptr; }
@@ -191,7 +193,7 @@ void fillRotation(FrameGenSynthWindow& w) {
     w.rotMedian = frameGenMedian(g.rotRes.data(), g.rotRes.size());
 }
 
-// ---- Replay capture (.agents/framegen-replay-format.md) ----
+// ---- Replay capture (format in framegen_replay_math.h) ----
 // The eye dump's left-eye run asks for the synthesizer's inputs of its first six frames. Each is copied (CopyResource, GPU side, no wait) into three staging textures; nothing is
 // mapped on the frame it was copied. When the dump writes its files frameGenReplayFinish hands the set to the pump, which maps one copy per turn with DO_NOT_WAIT (a copy still in
 // flight is tried again next frame) and lets a worker thread hash and write it straight from the mapping; the render thread only maps, unmaps and joins.
@@ -370,7 +372,7 @@ void releaseAll() {
     g.finTimer[0] = g.finTimer[1] = nullptr;   // a timer slot in flight is polled on as before (pollTimers); only the eye's claim on it goes
     releaseCom(g.cb);
     releaseCom(g.linear);
-    g.dev = nullptr;
+    releaseCom(g.dev);
     g.failed = false;
     g.slotSeen = g.slotAbsenceSaid = g.sharedRefused = g.remakeSaid = false;
     g.pathSaid = 0;
@@ -426,8 +428,12 @@ bool makeTex(ID3D11Device* dev, uint32_t w, uint32_t h, DXGI_FORMAT fmt, Tex& ou
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(dev->CreateTexture2D(&td, nullptr, &out.tex))) return false;
-    if (FAILED(dev->CreateShaderResourceView(out.tex, nullptr, &out.srv))) return false;
-    return SUCCEEDED(dev->CreateUnorderedAccessView(out.tex, nullptr, &out.uav));
+    if (FAILED(dev->CreateShaderResourceView(out.tex, nullptr, &out.srv)) ||
+        FAILED(dev->CreateUnorderedAccessView(out.tex, nullptr, &out.uav))) {
+        releaseTex(out);
+        return false;
+    }
+    return true;
 }
 
 // The format the upscaler's output is read in (the SRV's, else the texture's).
@@ -779,6 +785,7 @@ void frameGenSynthEyeFrame(ID3D11Device* dev, ID3D11DeviceContext* ctx, uint32_t
     if (g.failed) return;
     if (!g.dev) {
         g.dev = dev;
+        g.dev->AddRef();
         if (!createCommon(dev, ctx)) {
             g.failed = true;
             Log::get().note("frame generation (synth): the synthesizer's shaders, constant buffer or texture formats could not be created; it stands down.");
@@ -903,7 +910,10 @@ void frameGenSynthEyeFrame(ID3D11Device* dev, ID3D11DeviceContext* ctx, uint32_t
     if (FAILED(ctx->Map(g.cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
         ++g.win.skipped;
         r.havePending = false;
-        if (held) r.mutex->ReleaseSync(0);
+        if (held) {
+            const HRESULT rel = r.mutex->ReleaseSync(0);
+            if (rel != S_OK) sharedFault(r, eye, rel);
+        }
         storeAnswer();
         return;
     }
@@ -1030,7 +1040,11 @@ ID3D11Texture2D* frameGenSynthFinishSource(ID3D11Device* dev, ID3D11DeviceContex
 }
 
 ID3D11Texture2D* frameGenSynthFinish(ID3D11DeviceContext* ctx, uint32_t eye, const FrameGenSynthFinishInputs& in) {
-    if (!g_on.load() || eye > 1 || !ctx) return nullptr;
+    if (eye > 1 || !ctx) return nullptr;
+    if (!g_on.load()) {
+        abandonFinish(ctx, g.eye[eye], eye);
+        return nullptr;
+    }
     EyeRes& r = g.eye[eye];
     if (!r.finPending) return nullptr;
     r.finPending = false;
