@@ -11,7 +11,7 @@ the native pair, `openxr_loader.dll`, the notices, `edvr.ini`, `edvr-flat.ini`
 and the DLSS and XeSS runtimes embedded in it as resources. It was dropped on
 2026-11-16. The release assets are now the launcher, `ed-up-<version>.zip` (the
 files for a manual install), the split assets the launcher updates from, and
-the Linux launcher package. Below, "the installer" means this engine as the
+the Linux launcher installers and portable ZIP. Below, "the installer" means this engine as the
 launcher runs it. The dated evidence further down names the standalone
 installer where it was the program under test.
 
@@ -54,14 +54,15 @@ This file is why the engine does what it does. Using it is the player guide:
   (see "Receipts from the tool"). `installer_test` pins it over real files.
 - **Linux Steam wrapper:** `tools/install_proton.py` ships in
   `ed-up-launcher-linux-<version>.zip` as `ed-up-launcher-linux.py`, run by
-  `ed-up-launcher.sh`, and runs only the launcher. It uses Steam's existing
-  Elite prefix, recorded Proton runner, and required runtime; Flatpak Steam
+  **ED-UP Launcher** or `ed-up-launcher.sh`, and runs only the launcher. It
+  uses Steam's existing Elite prefix, recorded Proton runner, and required
+  runtime; Flatpak Steam
   uses its selected sandbox, including installed compatibility-tool extensions.
   Steam identity is passed explicitly, and unrelated shortcut prefixes are
   ignored. Protontricks is no longer needed. On 2026-10-16, the direct route
   reached the Odyssey folder with the standalone installer of that day. The
-  launcher through this wrapper has not been flown on Linux, and the game
-  session logs do not establish VR rendering behavior.
+  launcher headset check has been verified on GE-Proton with WiVRn. In-game
+  VR rendering still needs testing.
 - **Windows validation:** Run the full `build.bat --wait-lock` on native
   Windows; local Wine cannot pass the process-monitor self-tests. A build
   result and an installer test are separate evidence.
@@ -666,8 +667,9 @@ the interleaved prompt bothers you.
 
 `tools/install_proton.py` runs the launcher inside Elite's Proton prefix. It
 ships as `ed-up-launcher-linux.py` in `ed-up-launcher-linux-<version>.zip`,
-beside `ed-up-launcher.exe`, `ed-up-launcher.sh`, `epic_library.py` and
-`README-launcher-linux.txt`. The wrapper used to run the standalone installer
+beside **ED-UP Launcher**, the native x86-64 program for opening it from a
+file manager. The Debian package and Flatpak bundle run the same wrapper
+from an app menu entry. The wrapper used to run the standalone installer
 too. That mode is deleted (2026-11-16) with its `--install`, `--repair`,
 `--uninstall`, `--collect-logs`, `--preview`, `--scope`, `--replace-settings`,
 `--remove-settings` and `--installer` options: argparse now refuses them, and the
@@ -676,8 +678,9 @@ accepted and ignored, because `ed-up-launcher.sh` passes it.
 
 The launcher needs Python 3 and Steam's existing Proton installation, with no
 Protontricks or system Wine dependency. Run Elite once from Steam, close it,
-then run `./ed-up-launcher.sh` as your normal user. On Steam Deck, use Desktop
-Mode. The launcher window opens on the Odyssey product folder. Options for the
+then extract the Linux ZIP and double-click **ED-UP Launcher**. On Steam Deck,
+use Desktop Mode. The launcher window opens on the Odyssey product folder.
+Use `./ed-up-launcher.sh` for command-line options. Options for the
 launcher itself go after a lone `--`, and the wrapper refuses a `--dir` or
 `--store` there, since it sets both. The window installs, updates, repairs and
 uninstalls from the release the launcher has downloaded, and its Save logs

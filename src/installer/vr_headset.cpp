@@ -693,6 +693,9 @@ std::vector<std::wstring> linuxOpenXrManifestCandidates(const std::wstring& xdgC
         }
     }
     if (!yieldedAny) {
+        // Pressure Vessel puts the imported runtime in this XDG directory.
+        // Proton can expose the file to Win32 while omitting XDG_CONFIG_DIRS.
+        pushUnique(L"/usr/lib/pressure-vessel/overrides/etc/xdg", L"openxr\\1\\active_runtime.json");
         pushUnique(L"/etc/xdg", L"openxr\\1\\active_runtime.json");
     }
     return out;
@@ -1465,10 +1468,10 @@ VrHeadsetReport resolveVrHeadsetStatus(const VrProbeInputs& in) {
                                                                                    : stemOfPath(in.activeRuntimePath));
     report.activePlatform = classifyVrPlatform(
         in.activeRuntimePath + L" " + in.activeManifest.runtimeName, in.activeManifest.libraryPath);
-    if (in.underWine &&
+    const bool wineBridge = in.underWine &&
         isWineOpenXrBridgePath(in.activeRuntimePath + L" " + in.activeManifest.runtimeName,
-                               in.activeManifest.libraryPath) &&
-        !in.linuxHostRuntimeHint.empty()) {
+                              in.activeManifest.libraryPath);
+    if (wineBridge && !in.linuxHostRuntimeHint.empty()) {
         const VrPlatform hostPlat = classifyVrPlatform(in.linuxHostRuntimeHint);
         if (hostPlat != VrPlatform::Unknown && hostPlat != VrPlatform::Custom) {
             report.activePlatform = hostPlat;
@@ -1516,6 +1519,10 @@ VrHeadsetReport resolveVrHeadsetStatus(const VrProbeInputs& in) {
 
     // 2. Detect companion streaming bridges and runtime mismatches.
     const bool activeServiceUp = isPlatformServiceRunning(report.activePlatform, in.runningProcesses);
+    // Seeing a host service does not establish which runtime wineopenxr can reach from this prefix.
+    const bool wineBridgeUnverified = wineBridge && report.activePlatform == VrPlatform::Custom;
+    const VrStatusKind noHeadsetStatus = activeServiceUp ? VrStatusKind::Standby
+        : wineBridgeUnverified ? VrStatusKind::RuntimeUnverified : VrStatusKind::RuntimeInactive;
     report.runningBridge =
         detectStreamingBridge(report.activePlatform, in.runningProcesses, in.openVrDrivers, in.liveProbe.systemName);
     if (report.runningBridge != VrPlatform::Unknown && report.runningBridge != report.activePlatform) {
@@ -1524,7 +1531,7 @@ VrHeadsetReport resolveVrHeadsetStatus(const VrProbeInputs& in) {
 
     const VrPlatform otherRunning = findMismatchedRunningRuntime(report.activePlatform, in.runningProcesses);
     if (otherRunning != VrPlatform::Unknown && !activeServiceUp) {
-        report.runtimeMismatch = true;
+        report.runtimeMismatch = !wineBridgeUnverified;
         report.mismatchRuntimeName = vrPlatformDisplayName(otherRunning);
     }
 
@@ -1557,7 +1564,7 @@ VrHeadsetReport resolveVrHeadsetStatus(const VrProbeInputs& in) {
                        (in.underWine && in.liveProbe.resultCode == kXrErrorInstanceLost)) {
                 // Under Wine/Proton, WiVRn and Monado IPC return XR_ERROR_INSTANCE_LOST (-13) while
                 // waiting for a headset; on native Windows, -13 indicates a runtime fault (Error).
-                report.status = activeServiceUp ? VrStatusKind::Standby : VrStatusKind::RuntimeInactive;
+                report.status = noHeadsetStatus;
             } else {
                 report.status = VrStatusKind::Error;
             }
@@ -1570,7 +1577,7 @@ VrHeadsetReport resolveVrHeadsetStatus(const VrProbeInputs& in) {
         if (in.liveProbe.resultCode == kXrErrorRuntimeUnavailable ||
             in.liveProbe.resultCode == kXrErrorFormFactorUnavailable ||
             (in.underWine && in.liveProbe.resultCode == kXrErrorInstanceLost)) {
-            report.status = activeServiceUp ? VrStatusKind::Standby : VrStatusKind::RuntimeInactive;
+            report.status = noHeadsetStatus;
         } else {
             report.status = VrStatusKind::Error;
         }
@@ -1585,7 +1592,7 @@ VrHeadsetReport resolveVrHeadsetStatus(const VrProbeInputs& in) {
         report.headsetName = in.usbHeadset.name;
         report.headsetFromUsb = true;
     }
-    report.status = activeServiceUp ? VrStatusKind::Standby : VrStatusKind::RuntimeInactive;
+    report.status = noHeadsetStatus;
     return report;
 }
 
@@ -1762,6 +1769,7 @@ std::string formatVrEnvironmentSnapshot(const VrHeadsetReport& report) {
         switch (kind) {
             case VrStatusKind::Ready: return "ready";
             case VrStatusKind::Standby: return "standby";
+            case VrStatusKind::RuntimeUnverified: return "runtime_unverified";
             case VrStatusKind::RuntimeInactive: return "runtime_inactive";
             case VrStatusKind::NotConfigured: return "not_configured";
             case VrStatusKind::Error: return "error";

@@ -90,13 +90,9 @@ If a sign-in fails for another reason, the launcher says why and starts Frontier
 
 ## Linux
 
-Download `ed-up-launcher-linux-<version>.zip` from the [release](https://github.com/characterecho-sean/ed-unofficial-patch/releases/latest). Run Elite once from Steam, close it, then:
+Run Elite once from Steam and close it. [Install the Linux launcher](Install-on-Linux.md#installed-launcher), then open **ED-UP Launcher** from the app menu. The [portable ZIP](Install-on-Linux.md#steam) also includes a file-manager launcher.
 
-```sh
-./ed-up-launcher.sh
-```
-
-`--dry-run` prints what would run and writes nothing. Options for the launcher itself go after a lone `--`, for example `./ed-up-launcher.sh -- --channel rc`.
+For command-line troubleshooting from the ZIP, `./ed-up-launcher.sh --dry-run` prints what would run and writes nothing. Options for the launcher itself go after a lone `--`, for example `./ed-up-launcher.sh -- --channel rc`.
 
 It runs inside Elite's Proton prefix. Downloads and settings stay there, under `drive_c/users/steamuser/AppData/Local/EDVR` in `steamapps/compatdata/359320/pfx`.
 

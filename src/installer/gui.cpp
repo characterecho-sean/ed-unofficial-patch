@@ -18,6 +18,7 @@
 #include <shlobj.h>
 #include <uxtheme.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -69,6 +70,9 @@ enum : int {
     kIdDiscord = 1041,
 #ifdef EDUP_LAUNCHER
     kIdTabPlay = 1049,
+    kIdWindowMinimize = 1100,
+    kIdWindowMaximize = 1101,
+    kIdWindowClose = 1102,
 #endif
     kIdTabInstall = 1050,
     kIdTabSettings = 1051,
@@ -151,6 +155,8 @@ enum class Screen { Install, Settings };
 
 enum class Tone { Good, Warn, Bad, Muted };
 
+enum class Resize { Fixed, MoveRight, StretchWidth, StretchBoth };
+
 struct StatusRow {
     std::wstring label;
     std::wstring value;
@@ -162,6 +168,7 @@ struct Place {
     int  x = 0, y = 0, w = 0, h = 0;
     Screen screen = Screen::Install;
     bool bothScreens = false;
+    Resize resize = Resize::Fixed;
 };
 
 struct Gui {
@@ -198,6 +205,9 @@ struct Gui {
     edvr::ModeRead mode = edvr::readGameMode(nullptr);  // Elite's 3D mode, read when the folder is surveyed
     UINT dpi = 96;      // what the client area is laid out at: the real dpi, or less when the window would not fit
     UINT realDpi = 96;  // the window's own, which its frame and title bar are drawn at
+    int layoutWidth = kClientWidth;
+    int layoutHeight = kClientHeight;
+    bool resizable = false;
 
     std::vector<Place>      places;
     std::vector<StatusRow>  status;
@@ -217,6 +227,111 @@ struct Gui {
 Gui g;
 
 int dp(int v) { return ui::dp(v, g.dpi); }
+int layoutBottom(int y) { return y + g.layoutHeight - kClientHeight; }
+
+// The title bar scales less than the page on high-DPI displays so its
+// padding doesn't dominate even when the page is scaled to fit the monitor.
+UINT captionDpi(UINT dpi) {
+    constexpr UINT baseDpi = 96;
+    return dpi <= baseDpi ? dpi : baseDpi + (dpi - baseDpi) / 2;
+}
+
+// Wine's launcher draws its frame in the client area. Page coordinates start
+// inside that frame so that control placement, painting and scrolling can agree.
+POINT contentOrigin(UINT dpi) {
+    if (!g.resizable) return {};
+    const UINT scale = captionDpi(dpi);
+    const int border = ui::dp(1, scale);
+    return POINT{border, border + ui::dp(24, scale)};
+}
+
+void moveContentControl(HWND control, int x, int y, int width, int height, BOOL repaint) {
+    const POINT offset = contentOrigin(g.realDpi);
+    MoveWindow(control, x + offset.x, y + offset.y, width, height, repaint);
+}
+
+#ifdef EDUP_LAUNCHER
+constexpr int kCaptionButtonIds[] = {kIdWindowMinimize, kIdWindowMaximize, kIdWindowClose};
+
+int captionGrip() { return ui::dp(5, captionDpi(g.realDpi)); }
+int captionButtonWidth() { return ui::dp(30, captionDpi(g.realDpi)); }
+
+void syncCaptionMaximizeLabel() {
+    const HWND button = GetDlgItem(g.window, kIdWindowMaximize);
+    const wchar_t* label = IsZoomed(g.window) ? tr(L"Restore") : tr(L"Maximize");
+    wchar_t previous[64]{};
+    GetWindowTextW(button, previous, 64);
+    if (wcscmp(label, previous) != 0) {
+        SetWindowTextW(button, label);
+        InvalidateRect(button, nullptr, FALSE);
+    }
+}
+
+void setCaptionLabels() {
+    if (!g.resizable) return;
+    SetDlgItemTextW(g.window, kIdWindowMinimize, tr(L"Minimize"));
+    syncCaptionMaximizeLabel();
+    SetDlgItemTextW(g.window, kIdWindowClose, tr(L"Close"));
+}
+
+void createCaptionControls(HWND window) {
+    ui::makeButton(window, L"", kIdWindowMinimize, ui::ButtonStyle::WindowMinimize, nullptr);
+    ui::makeButton(window, L"", kIdWindowMaximize, ui::ButtonStyle::WindowMaximize, nullptr);
+    ui::makeButton(window, L"", kIdWindowClose, ui::ButtonStyle::WindowClose, nullptr);
+    setCaptionLabels();
+}
+
+void layoutCaptionControls() {
+    if (!g.resizable) return;
+    RECT client{};
+    if (!GetClientRect(g.window, &client)) return;
+    const int grip = captionGrip();
+    const int width = captionButtonWidth();
+    const int height = contentOrigin(g.realDpi).y - grip - ui::dp(2, captionDpi(g.realDpi));
+    int x = client.right - grip - 3 * width;
+    for (const int id : kCaptionButtonIds) {
+        MoveWindow(GetDlgItem(g.window, id), x, grip, width, height, TRUE);
+        x += width;
+    }
+}
+
+void paintCaption(HDC dc, const RECT& client, POINT origin) {
+    const ui::Theme& theme = ui::theme();
+    ui::fillRect(dc, client, theme.cardBorder);
+    const RECT bar{origin.x, origin.x, client.right - origin.x, origin.y - 1};
+    ui::fillRect(dc, bar, theme.cardBg);
+
+    const UINT scale = captionDpi(g.realDpi);
+    const int iconSize = ui::dp(14, scale);
+    const int iconX = ui::dp(8, scale);
+    const int iconY = (bar.top + bar.bottom - iconSize) / 2;
+    const HICON icon = reinterpret_cast<HICON>(GetClassLongPtrW(g.window, GCLP_HICONSM));
+    if (icon) DrawIconEx(dc, iconX, iconY, icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
+    const RECT title{iconX + iconSize + ui::dp(6, scale), bar.top,
+                     client.right - captionGrip() - 3 * captionButtonWidth(), bar.bottom};
+    ui::drawText(dc, kAppTitle, title, ui::fonts().caption, theme.text,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+}
+
+LRESULT captionHitTest(HWND window, LPARAM lparam) {
+    POINT mouse{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+    ScreenToClient(window, &mouse);
+    RECT client{};
+    if (!GetClientRect(window, &client) || !PtInRect(&client, mouse)) return HTNOWHERE;
+    if (!IsZoomed(window)) {
+        constexpr LRESULT edges[3][3] = {
+            {HTTOPLEFT, HTTOP, HTTOPRIGHT},
+            {HTLEFT, HTCLIENT, HTRIGHT},
+            {HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT},
+        };
+        const int grip = captionGrip();
+        const int row = mouse.y < grip ? 0 : mouse.y >= client.bottom - grip ? 2 : 1;
+        const int col = mouse.x < grip ? 0 : mouse.x >= client.right - grip ? 2 : 1;
+        if (edges[row][col] != HTCLIENT) return edges[row][col];
+    }
+    return mouse.y < contentOrigin(g.realDpi).y ? HTCAPTION : HTCLIENT;
+}
+#endif
 
 void setText(HWND control, const std::string& utf8) {
     SetWindowTextW(control, fromUtf8(utf8).c_str());
@@ -242,11 +357,8 @@ void loadSettings(const std::string& edition);
 // stock chrome the drawn look could not restyle); the parent paints the
 // same slim thumb the settings list uses, in the report card's right
 // gutter, and drives the EDIT by lines when it is dragged.
-const RECT kReportCard{kMargin, kReportTop, kClientWidth - kMargin, kReportBottom};
-
 RECT reportCardRect() {
-    return RECT{dp(kReportCard.left), dp(kReportCard.top), dp(kReportCard.right),
-                dp(kReportCard.bottom)};
+    return RECT{dp(kMargin), dp(kReportTop), dp(g.layoutWidth - kMargin), dp(layoutBottom(kReportBottom))};
 }
 
 int reportLineHeight() { return ui::textHeightPx(ui::fonts().body); }
@@ -263,7 +375,9 @@ void reportScrollState(int* content, int* page, int* pos) {
 
 void invalidateReportGutter() {
     const RECT card = reportCardRect();
-    const RECT gutter{card.right - dp(12), card.top, card.right, card.bottom};
+    RECT gutter{card.right - dp(12), card.top, card.right, card.bottom};
+    const POINT offset = contentOrigin(g.realDpi);
+    OffsetRect(&gutter, offset.x, offset.y);
     InvalidateRect(g.window, &gutter, FALSE);
 }
 
@@ -319,7 +433,8 @@ void setReport(const std::string& utf8) {
 // layout
 // ---------------------------------------------------------------------------
 
-void place(HWND hwnd, int x, int y, int w, int h, Screen screen, bool bothScreens = false) {
+void place(HWND hwnd, int x, int y, int w, int h, Screen screen, bool bothScreens = false,
+           Resize resize = Resize::Fixed) {
     Place p;
     p.hwnd = hwnd;
     p.x = x;
@@ -328,6 +443,7 @@ void place(HWND hwnd, int x, int y, int w, int h, Screen screen, bool bothScreen
     p.h = h;
     p.screen = screen;
     p.bothScreens = bothScreens;
+    p.resize = resize;
     g.places.push_back(p);
 }
 
@@ -379,10 +495,16 @@ void showScreen(Screen screen);
 // numbers, so the controls were laid out half as big again as the window meant
 // to hold them, and the right-hand third was off the edge.
 void applyLayout() {
+    const int extraWidth = g.layoutWidth - kClientWidth;
+    const int extraHeight = g.layoutHeight - kClientHeight;
     for (const Place& p : g.places) {
         const bool visible = p.bothScreens || p.screen == g.screen;
         ShowWindow(p.hwnd, visible ? SW_SHOW : SW_HIDE);
-        if (visible) MoveWindow(p.hwnd, dp(p.x), dp(p.y), dp(p.w), dp(p.h), TRUE);
+        if (!visible) continue;
+        const int x = p.x + (p.resize == Resize::MoveRight ? extraWidth : 0);
+        const int w = p.w + (p.resize == Resize::StretchWidth || p.resize == Resize::StretchBoth ? extraWidth : 0);
+        const int h = p.h + (p.resize == Resize::StretchBoth ? extraHeight : 0);
+        moveContentControl(p.hwnd, dp(x), dp(p.y), dp(w), dp(h), TRUE);
     }
 
     // Navigation tabs are measured to their localized labels so longer translations
@@ -405,7 +527,7 @@ void applyLayout() {
             GetWindowTextW(tab, label, 128);
             int w = ui::textWidth(dc, label, font) + dp(32);
             if (w < dp(84)) w = dp(84);
-            MoveWindow(tab, tx, ty, w, th, TRUE);
+            moveContentControl(tab, tx, ty, w, th, TRUE);
             tx += w + gap;
         }
         ReleaseDC(g.window, dc);
@@ -421,7 +543,7 @@ void applyLayout() {
         const int y = dp(kActionsBtnY);
         const int h = dp(34);
         const int gap = dp(8);
-        const int limit = dp(kClientWidth - kMargin - kCardPad);
+        const int limit = dp(g.layoutWidth - kMargin - kCardPad);
         for (HWND button : buttons) {
             if (!button) continue;
             wchar_t label[256]{};
@@ -430,24 +552,28 @@ void applyLayout() {
             if (width < dp(92)) width = dp(92);
             if (x + width > limit) width = limit - x;
             if (width < dp(48)) width = dp(48);
-            MoveWindow(button, x, y, width, h, TRUE);
+            moveContentControl(button, x, y, width, h, TRUE);
             x += width + gap;
         }
         // The two Wine buttons sit right after Save logs when shown, sized to fit cleanly inside the card.
         for (HWND hostButton : {g.copyPath, g.showFolder}) {
             if (!hostButton) continue;
-            const bool showHost = g.hostButtonsShown && g.screen == Screen::Install;
-            ShowWindow(hostButton, showHost ? SW_SHOW : SW_HIDE);
-            if (!showHost) continue;
+            if (!g.hostButtonsShown) {
+                ShowWindow(hostButton, SW_HIDE);
+                continue;
+            }
             wchar_t label[128]{};
             GetWindowTextW(hostButton, label, 128);
             int width = ui::textWidth(dc, label, font) + dp(20);
             if (width < dp(68)) width = dp(68);
             if (x + width > limit) width = limit - x;
-            if (width >= dp(40)) {
-                MoveWindow(hostButton, x, y, width, h, TRUE);
-                x += width + gap;
+            if (width < dp(40)) {
+                ShowWindow(hostButton, SW_HIDE);
+                continue;
             }
+            moveContentControl(hostButton, x, y, width, h, TRUE);
+            ShowWindow(hostButton, SW_SHOW);
+            x += width + gap;
         }
         ReleaseDC(g.window, dc);
     } else {
@@ -463,14 +589,14 @@ void applyLayout() {
         const wchar_t* prompt = tr(L"Install ED-UP for:");
         const int textW = ui::textWidth(dc, prompt, ui::fonts().body);
         ReleaseDC(g.window, dc);
-        const int right = dp(kClientWidth - kMargin - kCardPad);
+        const int right = dp(g.layoutWidth - kMargin - kCardPad);
         const int comboW = dp(218);
         const int comboLeft = right - comboW;
         int labelLeft = comboLeft - dp(10) - textW;
         const int minLabelLeft = dp(kMargin + kCardPad + 160);
         if (labelLeft < minLabelLeft) labelLeft = minLabelLeft;
         g_scopePromptPx = RECT{labelLeft, dp(kScopeY), comboLeft - dp(8), dp(kScopeY + 30)};
-        MoveWindow(g.scopeCombo, comboLeft, dp(kScopeY), comboW, dp(30), TRUE);
+        moveContentControl(g.scopeCombo, comboLeft, dp(kScopeY), comboW, dp(30), TRUE);
     }
 
     // The tip link finishes a sentence that is painted, not a control, so where
@@ -488,11 +614,12 @@ void applyLayout() {
         const int prefix = ui::textWidth(dc, kTipText, caption);
         const int space = ui::textWidth(dc, L" ", caption);
         const int tipWidth = ui::textWidth(dc, L"leave a tip", caption) + dp(2);
-        if (g.tip) MoveWindow(g.tip, dp(kMargin) + prefix + space, dp(kTipTop), tipWidth, dp(20), TRUE);
+        if (g.tip) moveContentControl(g.tip, dp(kMargin) + prefix + space, dp(kTipTop), tipWidth, dp(20), TRUE);
 #endif
         ReleaseDC(g.window, dc);
         if (g.discord)
-            MoveWindow(g.discord, dp(kClientWidth - kMargin) - discordWidth, dp(kTipTop), discordWidth, dp(20), TRUE);
+            moveContentControl(g.discord, dp(g.layoutWidth - kMargin) - discordWidth, dp(layoutBottom(kTipTop)),
+                       discordWidth, dp(20), TRUE);
     }
 
     // A combo's field height is its item height plus its own frame, not
@@ -502,7 +629,7 @@ void applyLayout() {
     // The scope prompt's combo is sized the same way.
 #ifdef EDUP_LAUNCHER
     if (g.languageCombo)
-        MoveWindow(g.languageCombo, dp(kClientWidth - kMargin - 168), dp(16), dp(168), dp(30), TRUE);
+        moveContentControl(g.languageCombo, dp(g.layoutWidth - kMargin - 168), dp(16), dp(168), dp(30), TRUE);
 #endif
     for (HWND combo : {g.combo, g.scopeCombo, g.languageCombo}) {
         if (!combo) continue;
@@ -527,15 +654,27 @@ void applyLayout() {
         const int frameTop = dp(230);
         const int frameH = dp(262) - frameTop;
         const int y = frameTop + (frameH > textH ? (frameH - textH) / 2 : 0);
-        MoveWindow(g.search, dp(kMargin + kCardPad), y, dp(320), textH, TRUE);
+        moveContentControl(g.search, dp(kMargin + kCardPad), y, dp(320), textH, TRUE);
     }
 
     // Shown or hidden by the scope, not by the screen alone, so it runs after the loop above.
     syncSettingsSelector();
 #ifdef EDUP_LAUNCHER
     layoutLauncherControls();
+    layoutCaptionControls();
 #endif
     InvalidateRect(g.window, nullptr, TRUE);
+}
+
+RECT windowRectForClient(HWND window, int width, int height, UINT frameDpi) {
+    if (g.resizable) {
+        const POINT offset = contentOrigin(frameDpi);
+        return RECT{0, 0, width + 2 * offset.x, height + offset.y + offset.x};
+    }
+    RECT rect{0, 0, width, height};
+    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+    AdjustWindowRectExForDpi(&rect, style, FALSE, 0, frameDpi);
+    return rect;
 }
 
 // The dpi to lay the client area out at. The installer's window always fits, and takes the window's dpi.
@@ -549,8 +688,7 @@ UINT fitLayoutDpi(HWND window, UINT realDpi, const RECT* onMonitor) {
     MONITORINFO info{};
     info.cbSize = sizeof(info);
     if (!monitor || !GetMonitorInfoW(monitor, &info)) return realDpi;
-    RECT frame{0, 0, 0, 0};
-    AdjustWindowRectExForDpi(&frame, static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE)), FALSE, 0, realDpi);
+    const RECT frame = windowRectForClient(window, 0, 0, realDpi);
     return edvr::installer::layoutDpiFor(realDpi, info.rcWork.bottom - info.rcWork.top, kClientHeight, frame.bottom - frame.top);
 #else
     (void)window;
@@ -560,10 +698,8 @@ UINT fitLayoutDpi(HWND window, UINT realDpi, const RECT* onMonitor) {
 }
 
 void sizeWindowToLayout() {
-    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(g.window, GWL_STYLE));
-    RECT wanted{0, 0, dp(kClientWidth), dp(kClientHeight)};
     // The frame and title bar are the system's size, whatever the client area was laid out at.
-    AdjustWindowRectExForDpi(&wanted, style, FALSE, 0, g.realDpi);
+    const RECT wanted = windowRectForClient(g.window, dp(kClientWidth), dp(kClientHeight), g.realDpi);
     SetWindowPos(g.window, nullptr, 0, 0, wanted.right - wanted.left, wanted.bottom - wanted.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 #ifdef EDUP_LAUNCHER
@@ -783,11 +919,11 @@ void paintInstallPicker(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
     if (!g.statusPath.empty()) {
-        RECT path{dp(kMargin), dp(114), dp(kClientWidth - kMargin), dp(132)};
+        RECT path{dp(kMargin), dp(114), dp(g.layoutWidth - kMargin), dp(132)};
         ui::drawText(dc, g.statusPath, path, f.caption, t.subtext,
                      DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS);
     }
-    RECT rule{dp(kMargin), dp(kTabRuleY), dp(kClientWidth - kMargin), dp(kTabRuleY) + 1};
+    RECT rule{dp(kMargin), dp(kTabRuleY), dp(g.layoutWidth - kMargin), dp(kTabRuleY) + 1};
     ui::fillRect(dc, rule, t.cardBorder);
 }
 
@@ -803,10 +939,10 @@ void paintStatusCard(HDC dc, int top, int maxBottom) {
     if (bottom < top + 96) bottom = top + 96;
     if (bottom > maxBottom) bottom = maxBottom;
 
-    RECT card{dp(kMargin), dp(top), dp(kClientWidth - kMargin), dp(bottom)};
+    RECT card{dp(kMargin), dp(top), dp(g.layoutWidth - kMargin), dp(bottom)};
     ui::paintCard(dc, card, g.dpi);
 
-    RECT statusHead{dp(kMargin + kCardPad), dp(top + 8), dp(kClientWidth - kMargin - kCardPad),
+    RECT statusHead{dp(kMargin + kCardPad), dp(top + 8), dp(g.layoutWidth - kMargin - kCardPad),
                     dp(top + 26)};
     ui::drawText(dc, tr(L"Status"), statusHead, f.heading, t.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -820,7 +956,7 @@ void paintStatusCard(HDC dc, int top, int maxBottom) {
         ui::drawText(dc, row.label, label, f.body, t.subtext,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        RECT value{dp(kMargin + kCardPad + 216), dp(y), dp(kClientWidth - kMargin - kCardPad),
+        RECT value{dp(kMargin + kCardPad + 216), dp(y), dp(g.layoutWidth - kMargin - kCardPad),
                    dp(y + rowH)};
         ui::drawText(dc, row.value, value, f.body, t.text,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -828,10 +964,10 @@ void paintStatusCard(HDC dc, int top, int maxBottom) {
     }
 
     if (!g.modeLine.empty() && y + 18 <= bottom - 4) {
-        RECT mode{dp(kMargin + kCardPad), dp(y + 4), dp(kClientWidth - kMargin - kCardPad), dp(y + 20)};
+        RECT mode{dp(kMargin + kCardPad), dp(y + 4), dp(g.layoutWidth - kMargin - kCardPad), dp(y + 20)};
         ui::drawText(dc, g.modeLine, mode, f.caption, t.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         if (!g.scopeLine.empty() && y + 36 <= bottom - 4) {
-            RECT scope{dp(kMargin + kCardPad), dp(y + 21), dp(kClientWidth - kMargin - kCardPad),
+            RECT scope{dp(kMargin + kCardPad), dp(y + 21), dp(g.layoutWidth - kMargin - kCardPad),
                        dp(y + 37)};
             ui::drawText(dc, g.scopeLine, scope, f.caption, colourFor(Tone::Warn),
                          DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -842,7 +978,7 @@ void paintStatusCard(HDC dc, int top, int maxBottom) {
 #ifdef EDUP_LAUNCHER
 void paintPlayScreen(HDC dc) {
     paintLauncherPlay(dc);
-    paintStatusCard(dc, launcherStatusTop(), kContentBottom);
+    paintStatusCard(dc, launcherStatusTop(), layoutBottom(kContentBottom));
 }
 #endif
 
@@ -856,7 +992,7 @@ void paintInstallScreen(HDC dc) {
     paintStatusCard(dc, kStatusTop, kStatusBottom);
 #endif
 
-    RECT actions{dp(kMargin), dp(kActionsTop), dp(kClientWidth - kMargin), dp(kActionsBottom)};
+    RECT actions{dp(kMargin), dp(kActionsTop), dp(g.layoutWidth - kMargin), dp(kActionsBottom)};
     ui::paintCard(dc, actions, g.dpi);
 
     RECT actionsHead{dp(kMargin + kCardPad), dp(kActionsTop + 10), dp(kMargin + kCardPad + 180),
@@ -870,7 +1006,7 @@ void paintInstallScreen(HDC dc) {
     ui::drawText(dc, tr(L"Install ED-UP for:"), scopeLabel, f.body, t.subtext,
                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    RECT reassure{dp(kMargin + kCardPad), dp(kActionsNoteY), dp(kClientWidth - kMargin - kCardPad),
+    RECT reassure{dp(kMargin + kCardPad), dp(kActionsNoteY), dp(g.layoutWidth - kMargin - kCardPad),
                   dp(kActionsNoteY + 20)};
     ui::drawText(dc,
                  tr(L"Nothing is changed until you confirm it, and every file replaced is copied "
@@ -880,7 +1016,7 @@ void paintInstallScreen(HDC dc) {
     const RECT report = reportCardRect();
     ui::paintCard(dc, report, g.dpi);
 
-    RECT reportHead{dp(kMargin + kCardPad), dp(kReportTop + 8), dp(kClientWidth - kMargin - kCardPad),
+    RECT reportHead{dp(kMargin + kCardPad), dp(kReportTop + 8), dp(g.layoutWidth - kMargin - kCardPad),
                     dp(kReportTop + 26)};
     ui::drawText(dc, tr(L"Log"), reportHead, f.heading, t.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -894,13 +1030,13 @@ void paintInstallScreen(HDC dc) {
 void paintSettingsScreen(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
-    RECT card{dp(kMargin), dp(kContentTop), dp(kClientWidth - kMargin), dp(kContentBottom)};
+    RECT card{dp(kMargin), dp(kContentTop), dp(g.layoutWidth - kMargin), dp(layoutBottom(kContentBottom))};
     ui::paintCard(dc, card, g.dpi);
 
     // No "Settings" heading inside the card: the active tab above already
     // says it, and a heading repeating a tab is the same redundancy the
     // Setup tab was renamed to avoid. The note carries the useful part.
-    RECT note{dp(kMargin + kCardPad), dp(198), dp(kClientWidth - kMargin - kCardPad), dp(218)};
+    RECT note{dp(kMargin + kCardPad), dp(198), dp(g.layoutWidth - kMargin - kCardPad), dp(218)};
     const std::wstring where =
         g.settings.loaded()
             ? std::wstring(tr(L"Written into the ")) + settingsLeafFor(g.settingsEdition) +
@@ -932,15 +1068,22 @@ void paintWindow(HWND window) {
 
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
-    ui::fillRect(dc, client, t.windowBg);
+    const POINT offset = contentOrigin(g.realDpi);
+#ifdef EDUP_LAUNCHER
+    if (g.resizable) paintCaption(dc, client, offset);
+#endif
+    SetViewportOrgEx(dc, offset.x, offset.y, nullptr);
+    const RECT content{0, 0, client.right - 2 * offset.x, client.bottom - offset.y - offset.x};
+    ui::fillRect(dc, content, t.windowBg);
 
-    RECT title{dp(kMargin), dp(18), dp(kClientWidth - kMargin), dp(50)};
+    RECT title{dp(kMargin), dp(18), dp(g.layoutWidth - kMargin), dp(50)};
 #ifdef EDUP_LAUNCHER
     RECT languageLabel{};
     if (g.languageCombo) {
         RECT comboRc{};
         GetWindowRect(g.languageCombo, &comboRc);
         MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&comboRc), 2);
+        OffsetRect(&comboRc, -offset.x, -offset.y);
         languageLabel = comboRc;
         languageLabel.right = comboRc.left - dp(8);
         languageLabel.left = languageLabel.right - dp(120);
@@ -960,7 +1103,7 @@ void paintWindow(HWND window) {
     const std::wstring subtitle = fromUtf8(payloadInfo().version) +
         L"  \x00b7  unofficial patch for Elite Dangerous in VR and flat";
 #endif
-    RECT sub{dp(kMargin), dp(52), dp(kClientWidth - kMargin), dp(70)};
+    RECT sub{dp(kMargin), dp(52), dp(g.layoutWidth - kMargin), dp(70)};
     ui::drawText(dc, subtitle, sub, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     paintInstallPicker(dc);
@@ -979,6 +1122,7 @@ void paintWindow(HWND window) {
     ui::drawText(dc, kTipText, tip, f.caption, t.subtext, DT_LEFT | DT_SINGLELINE);
 #endif
 
+    SetViewportOrgEx(dc, 0, 0, nullptr);
     BitBlt(screenDc, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
     SelectObject(dc, previous);
     DeleteObject(bitmap);
@@ -1620,11 +1764,11 @@ void createControls(HWND window) {
                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdCombo)), nullptr,
                               nullptr);
     SendMessageW(g.combo, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
-    place(g.combo, kMargin, 80, kClientWidth - 2 * kMargin - 118, 30, Screen::Install, true);
+    place(g.combo, kMargin, 80, kClientWidth - 2 * kMargin - 118, 30, Screen::Install, true, Resize::StretchWidth);
 
     HWND browse = ui::makeButton(window, L"Browse...", kIdBrowse, ui::ButtonStyle::Secondary,
                                  f.body);
-    place(browse, kClientWidth - kMargin - 110, 80, 110, 30, Screen::Install, true);
+    place(browse, kClientWidth - kMargin - 110, 80, 110, 30, Screen::Install, true, Resize::MoveRight);
 
     // Seeded from the command line, because the elevated relaunch carries
     // --replace-settings and this checkbox is what runAction reads. Defaulting
@@ -1667,7 +1811,7 @@ void createControls(HWND window) {
 
     g.settingsList = createSettingsList(window, kIdSettingsList, g.dpi);
     place(g.settingsList, kMargin + 2, 274, kClientWidth - 2 * kMargin - 4, kContentBottom - 278,
-          Screen::Settings);
+          Screen::Settings, false, Resize::StretchBoth);
 
     g.report = CreateWindowExW(0, L"EDIT", L"",
                                WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY, 0,
@@ -1677,7 +1821,7 @@ void createControls(HWND window) {
     SendMessageW(g.report, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
     SetWindowSubclass(g.report, reportProc, 1, 0);
     place(g.report, kMargin + kCardPad - 4, kReportEditY, kClientWidth - 2 * kMargin - 2 * kCardPad + 4,
-          kReportEditH, Screen::Install);
+          kReportEditH, Screen::Install, false, Resize::StretchBoth);
 
 #ifndef EDUP_LAUNCHER   // the launcher carries no tip link
     g.tip = ui::makeButton(window, L"leave a tip", kIdKofi, ui::ButtonStyle::Link, f.caption);
@@ -1709,6 +1853,7 @@ void createControls(HWND window) {
     if (ui::theme().dark) SetWindowTheme(g.languageCombo, L"DarkMode_CFD", nullptr);
     fillLanguageCombo();
     createLauncherControls(window);
+    if (g.resizable) createCaptionControls(window);
     {
         LauncherState state;
         state.load(joinPath(launcherRootsFor(g.args).launcherDir(), L"launcher.ini"), nullptr);
@@ -1728,29 +1873,97 @@ void createControls(HWND window) {
     sizeWindowToLayout();
 }
 
-void rescale(HWND window, UINT dpi, const RECT* suggested) {
-    g.realDpi = dpi;
-    g.dpi = fitLayoutDpi(window, dpi, suggested);
+void setLayoutDpi(UINT dpi) {
+    g.dpi = dpi;
     ui::buildFonts(g.dpi);
     const ui::Fonts& f = ui::fonts();
     for (const Place& p : g.places) {
         SendMessageW(p.hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
     }
     SendMessageW(g.report, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
+    if (g.languageCombo) SendMessageW(g.languageCombo, WM_SETFONT, reinterpret_cast<WPARAM>(f.body), TRUE);
     settingsListRescale(g.settingsList, g.dpi);
+}
+
+#ifdef EDUP_LAUNCHER
+void resizeLauncherLayout(HWND window) {
+    RECT client{};
+    if (!GetClientRect(window, &client)) return;
+    const POINT offset = contentOrigin(g.realDpi);
+    client.right -= 2 * offset.x;
+    client.bottom -= offset.y + offset.x;
+    if (IsRectEmpty(&client)) return;
+
+    // Use the monitor's font size where it fits. A smaller window uses the same
+    // reduced scale as the launcher's small-screen startup layout.
+    const UINT dpi = std::min(layoutDpiFor(g.realDpi, client.right, kClientWidth, 0),
+                              layoutDpiFor(g.realDpi, client.bottom, kClientHeight, 0));
+    const int width = std::max(kClientWidth, MulDiv(client.right, 96, dpi));
+    const int height = std::max(kClientHeight, MulDiv(client.bottom, 96, dpi));
+    if (width == g.layoutWidth && height == g.layoutHeight && dpi == g.dpi) return;
+
+    g.layoutWidth = width;
+    g.layoutHeight = height;
+    if (dpi != g.dpi) setLayoutDpi(dpi);
     applyLayout();
+}
+#endif
+
+void rescale(HWND window, UINT dpi, const RECT* suggested) {
+    g.realDpi = dpi;
+    if (!g.resizable) {
+        setLayoutDpi(fitLayoutDpi(window, dpi, suggested));
+        applyLayout();
+    }
     if (suggested) {
         SetWindowPos(window, nullptr, suggested->left, suggested->top,
                      suggested->right - suggested->left, suggested->bottom - suggested->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
+#ifdef EDUP_LAUNCHER
+    if (g.resizable) {
+        resizeLauncherLayout(window);
+        return;
+    }
+#endif
     sizeWindowToLayout();
 }
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
+#ifdef EDUP_LAUNCHER
+        case WM_NCCALCSIZE:
+        case WM_NCPAINT:
+            if (g.resizable) return 0;
+            break;
+
+        case WM_NCHITTEST:
+            if (g.resizable) return captionHitTest(window, lparam);
+            break;
+
+        case WM_NCRBUTTONDOWN:
+            if (g.resizable && wparam == HTCAPTION) return 0;
+            break;
+
+        case WM_NCRBUTTONUP:
+            if (g.resizable && wparam == HTCAPTION) {
+                TrackPopupMenuEx(GetSystemMenu(window, FALSE), TPM_LEFTBUTTON | TPM_RIGHTBUTTON,
+                                 GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), window, nullptr);
+                return 0;
+            }
+            break;
+#endif
+
         case WM_CREATE:
             g.window = window;
+#ifdef EDUP_LAUNCHER
+            if (g.resizable) {
+                // Keep the overlapped window's system menu and sizing style.
+                // Win32 adds WS_CAPTION when it creates an overlapped window.
+                const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+                SetWindowLongPtrW(window, GWL_STYLE, style & ~static_cast<LONG_PTR>(WS_CAPTION));
+            }
+#endif
             ui::applyWindowChrome(window);
             createControls(window);
             PostMessageW(window, kMsgFirstScan, 0, 0);
@@ -1842,6 +2055,11 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 case kIdCopyPath: copySavedPath(); return 0;
                 case kIdShowFolder: showSavedFolder(); return 0;
 #ifdef EDUP_LAUNCHER
+                case kIdWindowMinimize: SendMessageW(window, WM_SYSCOMMAND, SC_MINIMIZE, 0); return 0;
+                case kIdWindowMaximize:
+                    SendMessageW(window, WM_SYSCOMMAND, IsZoomed(window) ? SC_RESTORE : SC_MAXIMIZE, 0);
+                    return 0;
+                case kIdWindowClose: SendMessageW(window, WM_SYSCOMMAND, SC_CLOSE, 0); return 0;
                 case kIdTabPlay: showScreen(Screen::Play); return 0;
 #endif
                 case kIdTabInstall: showScreen(Screen::Install); return 0;
@@ -1867,8 +2085,9 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         // jumps the thumb, and the drag drives the EDIT by whole lines.
         case WM_LBUTTONDOWN: {
             if (g.screen != Screen::Install || !g.report) break;
-            const int x = GET_X_LPARAM(lparam);
-            const int y = GET_Y_LPARAM(lparam);
+            const POINT offset = contentOrigin(g.realDpi);
+            const int x = GET_X_LPARAM(lparam) - offset.x;
+            const int y = GET_Y_LPARAM(lparam) - offset.y;
             const RECT card = reportCardRect();
             if (x < card.right - dp(12) || x >= card.right || y < card.top || y >= card.bottom)
                 break;
@@ -1892,7 +2111,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             reportScrollState(&content, &page, &pos);
             const int wanted =
                 ui::slimPosFromThumbTop(reportCardRect(), content, page,
-                                        GET_Y_LPARAM(lparam) - g.reportDragOffset, g.dpi);
+                                        GET_Y_LPARAM(lparam) - contentOrigin(g.realDpi).y - g.reportDragOffset, g.dpi);
             const int lineHeight = reportLineHeight();
             const int delta = wanted / lineHeight - pos / lineHeight;
             if (delta != 0) SendMessageW(g.report, EM_LINESCROLL, 0, delta);
@@ -1917,6 +2136,9 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             if (g.screen != Screen::Install || !g.report) break;
             POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};  // screen coords
             ScreenToClient(window, &pt);
+            const POINT offset = contentOrigin(g.realDpi);
+            pt.x -= offset.x;
+            pt.y -= offset.y;
             const RECT card = reportCardRect();
             if (!PtInRect(&card, pt)) break;
             return SendMessageW(g.report, WM_MOUSEWHEEL, wparam, lparam);
@@ -1949,7 +2171,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             // The system switched between light and dark while we were open.
             if (lparam && wcscmp(reinterpret_cast<const wchar_t*>(lparam), L"ImmersiveColorSet") == 0) {
                 ui::refreshTheme();
-                ui::applyWindowChrome(window);
+                if (!g.resizable) ui::applyWindowChrome(window);
 #ifdef EDUP_LAUNCHER
                 applyNativeControlThemes();
                 syncThemeToggleLabel();
@@ -1964,6 +2186,33 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return 0;
 
 #ifdef EDUP_LAUNCHER
+        case WM_GETMINMAXINFO:
+            if (g.resizable) {
+                const UINT minDpi = std::min(g.realDpi, kMinLayoutDpi);
+                const RECT minimum = windowRectForClient(window, ui::dp(kClientWidth, minDpi),
+                                                         ui::dp(kClientHeight, minDpi), g.realDpi);
+                auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
+                limits->ptMinTrackSize = {minimum.right - minimum.left, minimum.bottom - minimum.top};
+                // Our visible border sits inside the client. Fit it inside the work area too.
+                MONITORINFO monitor{};
+                monitor.cbSize = sizeof(monitor);
+                if (GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) {
+                    const RECT& work = monitor.rcWork;
+                    limits->ptMaxPosition = {work.left, work.top};
+                    limits->ptMaxSize = {work.right - work.left, work.bottom - work.top};
+                }
+                return 0;
+            }
+            break;
+
+        case WM_SIZE:
+            if (g.resizable && g.settingsList && wparam != SIZE_MINIMIZED) {
+                syncCaptionMaximizeLabel();
+                resizeLauncherLayout(window);
+                return 0;
+            }
+            break;
+
         case kMsgLauncherJob:
             runLauncherJob(lparam);
             return 0;
@@ -2046,9 +2295,12 @@ int runGui(HINSTANCE instance, const AppArgs& args) {
     cls.hIconSm = cls.hIcon;
     RegisterClassExW(&cls);
 
-    HWND window = CreateWindowExW(0, cls.lpszClassName, kAppTitle,
-                                  (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)) |
-                                      WS_CLIPCHILDREN,
+    DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+#ifdef EDUP_LAUNCHER
+    g.resizable = runningUnderWine();
+#endif
+    if (!g.resizable) style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    HWND window = CreateWindowExW(0, cls.lpszClassName, kAppTitle, style,
                                   CW_USEDEFAULT, CW_USEDEFAULT, kClientWidth, kClientHeight,
                                   nullptr, nullptr, instance, nullptr);
     if (!window) return 1;

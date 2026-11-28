@@ -1,8 +1,14 @@
 # Install on Linux
 
-This page covers a desktop PC and a Steam Deck. ED-UP is a Windows program. On Linux its launcher runs inside the Proton prefix the game already uses. Python 3 is enough. The launcher uses the Proton already set up for Elite.
+The Linux launcher runs on x86-64 desktop PCs with Intel or AMD processors and on Steam Deck. It uses Python 3 on the host and the Proton or Wine already set up for Elite. [Ask for help](Ask-for-help.md).
 
-The Linux launcher is new and untested on Linux. The window, its updates and the Play button may not work yet. If one of them fails, send the log. [Ask for help](Ask-for-help.md).
+## Installed launcher
+
+Download `ed-up-launcher-linux-<version>.deb` for Debian or Ubuntu, or `ed-up-launcher-linux-<version>.flatpak` for a software center with Flatpak support, from the [release](https://github.com/characterecho-sean/ed-unofficial-patch/releases/latest). Release checksums for both installers are in `SHA256SUMS-linux`.
+
+Open the download with your software center and install it once. Then open **ED-UP Launcher** from your app menu. The menu entry uses the ED-UP icon and launches without a terminal. The Flatpak has permission to start the launcher on the host so it can use the existing game prefix and OpenXR runtime.
+
+Use the launcher's **Download & update** button when a signed release is available. If it includes a newer launcher, ED-UP updates your user copy and reopens automatically. If the patch also needs updating, ED-UP asks before changing the game files. This works with both the Debian package and the Flatpak bundle.
 
 ## Steam
 
@@ -10,16 +16,14 @@ This section is for a Steam copy. That includes Flatpak Steam, when Steam's file
 
 1. Install Odyssey in Steam, run it once, and close it. If you change Elite's Proton version, launch it once more and close it, so the prefix matches that Proton.
 2. On a Steam Deck, switch to Desktop Mode.
-3. Download `ed-up-launcher-linux-<version>.zip` from the [release](https://github.com/characterecho-sean/ed-unofficial-patch/releases/latest). Check it against `SHA256SUMS`.
-4. Unzip it. In that folder, run:
+3. Open **ED-UP Launcher** from the app menu after [installing it](#installed-launcher). For a portable copy, download `ed-up-launcher-linux-<version>.zip` from the [release](https://github.com/characterecho-sean/ed-unofficial-patch/releases/latest) and check it against `SHA256SUMS`.
+4. For the ZIP, extract it and double-click **ED-UP Launcher** in a host-installed file manager such as GNOME Files or your distribution's Dolphin. If Dolphin asks whether to run it, choose **Launch**. Keep the other files beside it. The ZIP's file-manager launcher needs glibc 2.34 or newer.
 
-```sh
-./ed-up-launcher.sh
-```
+If Flatpak Dolphin shows **Open With** or **No Apps available**, open the extracted folder in a host-installed file manager. That prompt appears before ED-UP starts.
 
 Run it as your normal user, without sudo. The launcher window opens on your Odyssey folder. Install, Update, Repair and Uninstall are buttons in that window. The launcher installs from a release it has downloaded: press **Download & install** when it says an update is available.
 
-To see what would run first:
+For troubleshooting, the shell script included in the ZIP can show what would run:
 
 ```sh
 ./ed-up-launcher.sh --dry-run
@@ -51,7 +55,7 @@ Repair and Uninstall are buttons in the launcher window.
 
 ## Epic on Linux
 
-`./ed-up-launcher.sh` also runs for an Epic copy of Elite. It is the same launcher, run under the Wine or Proton that the Epic copy already uses. This route is new and untested on Linux hardware, like the Steam launcher above. A Linux installer package used to do this job. The launcher package has replaced it.
+**ED-UP Launcher** also opens an Epic copy of Elite under the Wine or Proton that copy already uses. The Epic path still needs testing on Linux hardware.
 
 The script can find:
 
@@ -66,7 +70,7 @@ The script can find:
 The script requires `EliteDangerous64.exe` in the recorded folder. A journal folder without that executable is skipped. It then uses the Wine or Proton already recorded for that copy.
 
 1. Run Odyssey once from that program, then close it. After you change its runner, launch it once more before you run the launcher.
-2. When Steam is installed as well, name the store:
+2. Open **ED-UP Launcher** from the app menu after [installing it](#installed-launcher). If ED-UP finds both a Steam and an Epic copy, use the shell script from the portable ZIP to select Epic:
 
 ```sh
 ./ed-up-launcher.sh --store epic --dry-run

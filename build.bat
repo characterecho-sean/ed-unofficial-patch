@@ -264,6 +264,7 @@ python tools\run_jobs.py ^
     --gate "tools\fetch_fsr4.py --self-test" ^
     --gate "tools\gen_installer_rc.py --self-test" ^
     --gate "tools\package_native.py --self-test" ^
+    --gate "tools\package_linux_launcher.py --self-test" ^
     --gate "tools\gen_dittosr_shaders.py --self-test" ^
     --gate "tools\sign_manifest.py --self-test" ^
     --gate "tools\artifact_signing.py --self-test" ^

@@ -119,7 +119,10 @@ void paintAccentCard(HDC dc, RECT rect, UINT dpi);
 int  paintStatusPill(HDC dc, int left, int top, int height, COLORREF toneColour,
                      const std::wstring& text, HFONT font, UINT dpi);
 
-enum class ButtonStyle { Primary, Secondary, Tab, TabActive, Segment, SegmentActive, Link, ThemeToggle };
+enum class ButtonStyle {
+    Primary, Secondary, Tab, TabActive, Segment, SegmentActive, Link, ThemeToggle,
+    WindowMinimize, WindowMaximize, WindowClose,
+};
 
 // Owner-drawn button. `style` is remembered per control, and the pointer is
 // tracked so it can light up under the mouse.

@@ -26,6 +26,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
@@ -47,7 +48,10 @@ LINUX_EPIC_LIBRARY = "epic_library.py"
 LAUNCHER_LINUX_WRAPPER = "ed-up-launcher-linux.py"
 LAUNCHER_LINUX_SH = "ed-up-launcher.sh"
 LAUNCHER_LINUX_README = "README-launcher-linux.txt"
-UNIX_EXECUTABLE = (LAUNCHER_LINUX_WRAPPER, LAUNCHER_LINUX_SH)
+LAUNCHER_LINUX_PROTONTRICKS = "ed-up-protontricks.sh"
+LAUNCHER_LINUX_BINARY = "ed-up-launcher-linux"
+LAUNCHER_LINUX_DESKTOP = "ED-UP Launcher"
+UNIX_EXECUTABLE = (LAUNCHER_LINUX_WRAPPER, LAUNCHER_LINUX_SH, LAUNCHER_LINUX_PROTONTRICKS, LAUNCHER_LINUX_DESKTOP)
 STAMP_KEYS = ("FileVersion", "ProductVersion")
 
 # The split assets published beside the two archives (docs\design-launcher,
@@ -579,11 +583,21 @@ def sha256sums_bytes(entries):
 
 def _launcher_linux_members(root):
     """(source, archive name) of the launcher's Linux ZIP."""
-    return [(root / "build" / LAUNCHER_ASSET, LAUNCHER_ASSET),
+    return [(root / "build" / LAUNCHER_LINUX_BINARY, LAUNCHER_LINUX_DESKTOP),
+            (root / "build" / LAUNCHER_ASSET, LAUNCHER_ASSET),
             (root / "tools" / "install_proton.py", LAUNCHER_LINUX_WRAPPER),
             (root / "tools" / LINUX_EPIC_LIBRARY, LINUX_EPIC_LIBRARY),
             (root / LAUNCHER_LINUX_SH, LAUNCHER_LINUX_SH),
+            (root / "release" / LAUNCHER_LINUX_PROTONTRICKS, LAUNCHER_LINUX_PROTONTRICKS),
             (root / "release" / LAUNCHER_LINUX_README, LAUNCHER_LINUX_README)]
+
+
+def _validate_linux_launcher(path):
+    with path.open("rb") as handle:
+        header = handle.read(64)
+    if (len(header) != 64 or header[:7] != b"\x7fELF\x02\x01\x01" or
+            struct.unpack_from("<HH", header, 16) != (2, 62)):
+        raise ValueError("%s must be a Linux x86-64 ELF executable" % path)
 
 
 def _wrapper_missing_helpers(root, members):
@@ -621,6 +635,7 @@ def package(root, version, no_dlss=False, dry_run=False):
     missing = [str(src) for src, name in launcher_linux if name != LAUNCHER_ASSET and not src.is_file()]
     if missing:
         raise ValueError("missing release payload:\n  " + "\n  ".join(missing))
+    _validate_linux_launcher(root / "build" / LAUNCHER_LINUX_BINARY)
     wrapper = (root / "tools" / "install_proton.py").read_bytes()
     if not wrapper.startswith(b"#!/usr/bin/env python3\n") or b"\r" in wrapper:
         raise ValueError("Linux launcher wrapper needs a Python 3 shebang and LF line endings")
@@ -628,9 +643,11 @@ def package(root, version, no_dlss=False, dry_run=False):
     if helpers:
         raise ValueError("tools/install_proton.py imports %s, which the launcher's Linux ZIP does not carry: "
                          "add it to _launcher_linux_members" % ", ".join(helpers))
-    launcher_sh = (root / LAUNCHER_LINUX_SH).read_bytes()
-    if not launcher_sh.startswith(b"#!/bin/sh\n") or b"\r" in launcher_sh:
-        raise ValueError("launcher Linux shell script needs a /bin/sh shebang and LF line endings")
+    for source, name in launcher_linux:
+        if name.endswith(".sh"):
+            script = source.read_bytes()
+            if not script.startswith(b"#!/bin/sh\n") or b"\r" in script:
+                raise ValueError("launcher Linux shell script %s needs a /bin/sh shebang and LF line endings" % name)
     _check_version_stamps(version, files)
     try:
         import openxr_pe
@@ -796,8 +813,15 @@ def self_test():
         epic_library_source.write_bytes(b"# Epic discovery fixture\n")
         launcher_sh_source = root / LAUNCHER_LINUX_SH
         launcher_sh_source.write_bytes((ROOT / LAUNCHER_LINUX_SH).read_bytes())
+        launcher_protontricks_source = root / "release" / LAUNCHER_LINUX_PROTONTRICKS
+        launcher_protontricks_source.write_bytes((ROOT / "release" / LAUNCHER_LINUX_PROTONTRICKS).read_bytes())
         launcher_readme_source = root / "release" / LAUNCHER_LINUX_README
         launcher_readme_source.write_bytes(b"launcher readme")
+        linux_binary = root / "build" / LAUNCHER_LINUX_BINARY
+        linux_fixture = bytearray(64)
+        linux_fixture[:7] = b"\x7fELF\x02\x01\x01"
+        struct.pack_into("<HH", linux_fixture, 16, 2, 62)
+        linux_binary.write_bytes(linux_fixture)
         vr_descriptor = b"[install]\r\nschema = 2\r\nscope = both\r\n"
         (root / "build" / "edup_profile_vr.ini").write_bytes(vr_descriptor)
         # The launcher: an exe, its version header and the keys header. The release's own
@@ -885,18 +909,22 @@ def self_test():
             # executable in dist.
             assert not list((root / "dist").glob("ed-up-installer*")), "an installer archive was published"
             assert sorted(p.name for p in (root / "dist").glob("*.exe")) == [LAUNCHER_ASSET]
-            # The launcher's Linux ZIP: the launcher exe (the Windows asset's bytes), the wrapper's bytes, the
-            # shell script and the README, with Unix modes on the script and the wrapper only.
+            # The Linux ZIP carries the same exe as Windows and the assets for both Linux launch paths.
             with zipfile.ZipFile(root / "dist" / "ed-up-launcher-linux-1.2.3.zip") as launcher_archive:
                 assert set(launcher_archive.namelist()) == {LAUNCHER_ASSET, LAUNCHER_LINUX_WRAPPER,
-                                                           LINUX_EPIC_LIBRARY, LAUNCHER_LINUX_SH, LAUNCHER_LINUX_README}
+                                                           LINUX_EPIC_LIBRARY, LAUNCHER_LINUX_SH,
+                                                           LAUNCHER_LINUX_PROTONTRICKS, LAUNCHER_LINUX_README,
+                                                           LAUNCHER_LINUX_DESKTOP}
                 assert launcher_archive.read(LAUNCHER_ASSET) == b"launcher exe"
                 assert launcher_archive.read(LAUNCHER_ASSET) == (root / "dist" / LAUNCHER_ASSET).read_bytes()
                 assert launcher_archive.read(LAUNCHER_LINUX_WRAPPER) == wrapper_source.read_bytes()
                 assert launcher_archive.read(LINUX_EPIC_LIBRARY) == epic_library_source.read_bytes()
                 assert launcher_archive.read(LAUNCHER_LINUX_SH) == launcher_sh_source.read_bytes()
+                assert launcher_archive.read(LAUNCHER_LINUX_PROTONTRICKS) == launcher_protontricks_source.read_bytes()
                 assert launcher_archive.read(LAUNCHER_LINUX_README) == b"launcher readme"
-                for name in (LAUNCHER_LINUX_WRAPPER, LAUNCHER_LINUX_SH):
+                assert launcher_archive.read(LAUNCHER_LINUX_DESKTOP) == linux_fixture
+                for name in (LAUNCHER_LINUX_WRAPPER, LAUNCHER_LINUX_SH, LAUNCHER_LINUX_PROTONTRICKS,
+                             LAUNCHER_LINUX_DESKTOP):
                     assert launcher_archive.getinfo(name).create_system == 3
                     assert launcher_archive.getinfo(name).external_attr >> 16 == 0o100755
                 assert launcher_archive.getinfo(LAUNCHER_ASSET).external_attr >> 16 != 0o100755
@@ -904,6 +932,7 @@ def self_test():
                     launcher_extracted = root / "launcher release with spaces"
                     launcher_archive.extractall(launcher_extracted)
                     (launcher_extracted / LAUNCHER_LINUX_SH).chmod(0o755)
+                    (launcher_extracted / LAUNCHER_LINUX_PROTONTRICKS).chmod(0o755)
             if os.name != "nt":
                 fake_bin = root / "fake bin"
                 fake_bin.mkdir()
@@ -923,6 +952,29 @@ def self_test():
                     assert result.returncode == 37, result.stderr
                     assert args_file.read_bytes().splitlines() == [
                         str(launcher_wrapper).encode(), b"--launcher", *(arg.encode() for arg in args)]
+                built_linux_launcher = ROOT / "build" / LAUNCHER_LINUX_BINARY
+                if sys.platform == "linux" and built_linux_launcher.is_file():
+                    native_launcher = launcher_extracted / LAUNCHER_LINUX_DESKTOP
+                    shutil.copyfile(built_linux_launcher, native_launcher)
+                    native_launcher.chmod(0o755)
+                    result = subprocess.run([str(native_launcher)], cwd=elsewhere, env=env,
+                                            capture_output=True, check=False, timeout=10)
+                    assert result.returncode == 37, result.stderr
+                    assert args_file.read_bytes().splitlines() == [str(launcher_wrapper).encode(), b"--desktop"]
+                fake_protontricks = fake_bin / "protontricks-launch"
+                fake_protontricks.write_bytes(
+                    b"#!/bin/sh\nprintf '%s\\n' \"${XDG_CONFIG_DIRS-unset}\" \"$PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES\" "
+                    b"\"$@\" > \"$EDUP_ARGS_FILE\"\nexit 37\n")
+                fake_protontricks.chmod(0o755)
+                protontricks_script = launcher_extracted / LAUNCHER_LINUX_PROTONTRICKS
+                protontricks_env = dict(env, PATH=str(fake_bin) + os.pathsep + os.defpath,
+                                      XDG_CONFIG_DIRS="/host/xdg", PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES="0")
+                result = subprocess.run([str(protontricks_script), LAUNCHER_ASSET], cwd=launcher_extracted,
+                                        env=protontricks_env, capture_output=True, check=False)
+                assert result.returncode == 37, result.stderr
+                assert args_file.read_bytes().splitlines() == [
+                    b"unset", b"1", b"--no-term", b"--appid", b"359320",
+                    str(launcher_extracted / LAUNCHER_ASSET).encode()]
                 launcher_source_dir = root / "launcher source with spaces"
                 (launcher_source_dir / "tools").mkdir(parents=True)
                 source_sh = launcher_source_dir / LAUNCHER_LINUX_SH
@@ -943,7 +995,8 @@ def self_test():
             artifacts = [root / "dist" / (name + "-1.2.3.zip") for name in ("ed-up", "ed-up-launcher-linux")]
             artifacts.append(root / "dist" / SUMS_NAME)
             old_archives = {path: path.read_bytes() for path in artifacts}
-            for missing_file in (wrapper_source, epic_library_source, launcher_sh_source, launcher_readme_source):
+            for missing_file in (linux_binary, wrapper_source, epic_library_source, launcher_sh_source,
+                                 launcher_protontricks_source, launcher_readme_source):
                 saved = missing_file.read_bytes()
                 missing_file.unlink()
                 for dry_run in (True, False):
@@ -955,6 +1008,13 @@ def self_test():
                 assert all(path.read_bytes() == old_archives[path] for path in artifacts)
                 assert not (root / "dist" / ".edvr-stage-1.2.3").exists()
                 missing_file.write_bytes(saved)
+            linux_binary.write_bytes(b"MZ")
+            try:
+                package(root, "1.2.3", no_dlss=True, dry_run=True)
+                raise AssertionError("an invalid native Linux launcher was accepted")
+            except ValueError as error:
+                assert "Linux x86-64 ELF executable" in str(error), str(error)
+            linux_binary.write_bytes(linux_fixture)
             wrapper_source.write_bytes(b"#!/usr/bin/env python3\r\nprint('fixture')\r\n")
             for dry_run in (True, False):
                 try:
@@ -1180,7 +1240,8 @@ def self_test():
                 assert set(archive.namelist()) == core_names | dlss_names | xess_names | fsr4_names | {
                     "README.txt", "openvr/READ-ME-FIRST.txt"}
             assert members(dist / "ed-up-launcher-linux-4.0.0.zip") == {
-                LAUNCHER_ASSET, LAUNCHER_LINUX_WRAPPER, LINUX_EPIC_LIBRARY, LAUNCHER_LINUX_SH, LAUNCHER_LINUX_README}
+                LAUNCHER_ASSET, LAUNCHER_LINUX_WRAPPER, LINUX_EPIC_LIBRARY, LAUNCHER_LINUX_SH,
+                LAUNCHER_LINUX_PROTONTRICKS, LAUNCHER_LINUX_README, LAUNCHER_LINUX_DESKTOP}
             # The manifest: valid, ASCII, LF, the real hashes, and the launcher the release carries.
             manifest_bytes = (dist / MANIFEST).read_bytes()
             assert manifest_bytes.decode("ascii") and b"\r" not in manifest_bytes and manifest_bytes.endswith(b"\n")

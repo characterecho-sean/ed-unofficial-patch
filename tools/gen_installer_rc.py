@@ -28,6 +28,7 @@ import re
 import struct
 import subprocess
 import sys
+import zlib
 
 # Resource ids of an embedded payload, as src/installer/payload.cpp reads one: the schema-2 manifest is RCDATA 100 and
 # each file of its `files` list is RCDATA 101 + its index in that list (docs/design-manifest-schema2-2026-11-12.md,
@@ -410,6 +411,17 @@ def ico_bytes():
     for _size, data in images:
         out += data
     return bytes(out)
+
+
+def launcher_icon_png(size=128):
+    """Encode the Windows launcher artwork as a PNG for Linux desktop menus."""
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+
+    pixels = b''.join(b'\0' + bytes(channel for b, g, r, a in row for channel in (r, g, b, a))
+                      for row in draw_icon(size))
+    header = struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0)
+    return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', header) + chunk(b'IDAT', zlib.compress(pixels)) + chunk(b'IEND', b'')
 
 
 def write_release_files(build, dry_run):

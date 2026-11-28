@@ -671,6 +671,45 @@ void toggleCheckbox(HWND box) {
     }
 }
 
+static void drawWindowButton(const DRAWITEMSTRUCT* item, const Owned& button, UINT dpi, bool showFocus) {
+    const Theme& t = theme();
+    const RECT rect = item->rcItem;
+    const HDC dc = item->hDC;
+    const bool hot = button.hot || button.pressed;
+    const COLORREF face = button.pressed ? t.control : hot ? t.controlHover : t.cardBg;
+    fillRect(dc, rect, t.cardBg);
+    if (hot) fillRounded(dc, rect, dp(4, dpi), face);
+    if (showFocus) strokeRounded(dc, rect, dp(4, dpi), t.accent, dp(1, dpi));
+
+    const int size = dp(10, dpi);
+    const int x = (rect.left + rect.right - size) / 2;
+    const int y = (rect.top + rect.bottom - size) / 2;
+    const bool closing = button.style == ButtonStyle::WindowClose;
+    HPEN pen = CreatePen(PS_SOLID, dp(1, dpi), closing && hot ? t.bad : t.text);
+    const HGDIOBJ oldPen = SelectObject(dc, pen);
+    const HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    if (closing) {
+        MoveToEx(dc, x, y, nullptr);
+        LineTo(dc, x + size, y + size);
+        MoveToEx(dc, x + size - 1, y, nullptr);
+        LineTo(dc, x - 1, y + size);
+    } else if (button.style == ButtonStyle::WindowMinimize) {
+        MoveToEx(dc, x, y + size / 2, nullptr);
+        LineTo(dc, x + size, y + size / 2);
+    } else if (IsZoomed(GetParent(item->hwndItem))) {
+        const int step = dp(3, dpi);
+        Rectangle(dc, x + step, y, x + size, y + size - step);
+        const RECT front{x, y + step, x + size - step, y + size};
+        fillRect(dc, front, face);
+        Rectangle(dc, front.left, front.top, front.right, front.bottom);
+    } else {
+        Rectangle(dc, x, y, x + size, y + size);
+    }
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(pen);
+}
+
 void drawButton(const DRAWITEMSTRUCT* item, UINT dpi) {
     const Owned* owned = find(item->hwndItem);
     if (!owned) return;
@@ -832,6 +871,11 @@ void drawButton(const DRAWITEMSTRUCT* item, UINT dpi) {
             border = face;
             ink = owned->hot ? t.text : t.accent;
             break;
+        case ButtonStyle::WindowMinimize:
+        case ButtonStyle::WindowMaximize:
+        case ButtonStyle::WindowClose:
+            drawWindowButton(item, *owned, dpi, showFocus);
+            return;
         case ButtonStyle::ThemeToggle:
             break;
     }

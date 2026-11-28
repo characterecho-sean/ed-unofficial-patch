@@ -9,16 +9,17 @@
 
 namespace edvr::installer {
 
+inline constexpr unsigned kMinLayoutDpi = 72;
+
 // `workAreaHeightPx`: the monitor's work area. `clientHeightUnits`: the client area in 96 dpi units.
 // `chromeHeightPx`: the frame and title bar at the real dpi, which the client area has to leave room for.
 inline unsigned layoutDpiFor(unsigned systemDpi, int workAreaHeightPx, int clientHeightUnits, int chromeHeightPx) {
-    constexpr unsigned kFloor = 72;
     if (clientHeightUnits <= 0 || workAreaHeightPx <= chromeHeightPx) return systemDpi;
     const long long room = static_cast<long long>(workAreaHeightPx) - chromeHeightPx;
     // The largest dpi at which clientHeightUnits * dpi / 96 still fits in `room`, rounded down.
     const long long fits = room * 96 / clientHeightUnits;
     unsigned dpi = fits < static_cast<long long>(systemDpi) ? static_cast<unsigned>(fits) : systemDpi;
-    if (dpi < kFloor) dpi = kFloor;
+    if (dpi < kMinLayoutDpi) dpi = kMinLayoutDpi;
     // A system dpi that is already below the floor is left alone: it is the user's own choice.
     return dpi < systemDpi ? dpi : systemDpi;
 }

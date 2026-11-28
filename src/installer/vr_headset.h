@@ -34,6 +34,7 @@ enum class VrStatusKind {
     Checking,
     Ready,
     Standby,
+    RuntimeUnverified,
     RuntimeInactive,
     NotConfigured,
     Error,
@@ -145,7 +146,7 @@ struct VrHeadsetReport {
     std::wstring runtimeDisplayName;   // e.g. "Virtual Desktop (VDXR)", "SteamVR", empty when none
     std::wstring runtimeVersion;       // e.g. "2.8.4" when live OpenXR reported one
     std::wstring transportName;        // e.g. "Virtual Desktop", "ALVR", "Steam Link"
-    std::wstring mismatchRuntimeName;  // other running runtime when runtimeMismatch is true
+    std::wstring mismatchRuntimeName;  // other running runtime that can inform guidance
     std::wstring activeRuntimePath;
     std::wstring activeLibraryPath;
     std::wstring linuxHostRuntimeName;  // host Linux OpenXR runtime detected via XDG when Wine has no active runtime

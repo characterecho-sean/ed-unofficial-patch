@@ -226,6 +226,11 @@ UpdateCheck Updater::check() {
     const ReleaseAsset& manifestAsset = *manifestAssetPtr;
     const ReleaseAsset& signatureAsset = *signatureAssetPtr;
 
+    const auto launcherNeedsUpdate = [&](const Manifest& manifest) {
+        return manifest.hasLauncher && manifest.launcher.sha256 != settings_.launcherSha256 &&
+               compareVersions(manifest.launcher.version, settings_.launcherVersion) >= 0;
+    };
+    bool cachedLauncherNeedsUpdate = false;
     auto currentManifestCacheComplete = [&]() -> bool {
         if (state.currentManifest().empty()) return true;
         const std::wstring base =
@@ -237,6 +242,7 @@ UpdateCheck Updater::check() {
         if (sha256Bytes(mBytes.data(), mBytes.size()) != state.currentManifest()) return false;
         Manifest curManifest;
         if (!loadVerifiedManifest(mBytes, sText, keys(), &curManifest, nullptr)) return false;
+        cachedLauncherNeedsUpdate = !settings_.launcherSha256.empty() && launcherNeedsUpdate(curManifest);
         PayloadCache cache(settings_.cacheDir);
         const bool wantOptIn = state.edhm2dMigoto();
         const bool skipFailedOptIn =
@@ -254,8 +260,9 @@ UpdateCheck Updater::check() {
     };
     const bool cacheComplete = currentManifestCacheComplete();
 
-    // Same manifest as the one already adopted: nothing to download (unless cached payload files are missing).
-    if (!manifestAsset.digest.empty() && manifestAsset.digest == state.currentManifest() && cacheComplete)
+    // A packaged launcher can be older than the patch already adopted in its prefix.
+    if (!manifestAsset.digest.empty() && manifestAsset.digest == state.currentManifest() &&
+        cacheComplete && !cachedLauncherNeedsUpdate)
         return outcomeOnly(UpdateOutcome::UpToDate, "ED-UP is up to date");
 
     auto fetchSmall = [&](const ReleaseAsset& asset, std::string* bytes, UpdateCheck* failure) {
@@ -306,12 +313,12 @@ UpdateCheck Updater::check() {
     if (manifest.tag != tag)
         return outcomeOnly(UpdateOutcome::Refused, "the release " + tag + " was refused: its manifest is for another tag");
     // A re-offered release whose digest GitHub did not report is caught here.
-    if (manifestSha == state.currentManifest() && cacheComplete)
+    const bool updateLauncher = launcherNeedsUpdate(manifest);
+    if (manifestSha == state.currentManifest() && cacheComplete &&
+        (settings_.launcherSha256.empty() || !updateLauncher))
         return outcomeOnly(UpdateOutcome::UpToDate, "ED-UP is up to date");
     if (manifest.issued < state.highestIssued())
         return outcomeOnly(UpdateOutcome::UpToDate, "the release " + tag + " is older than one already accepted and was ignored");
-
-    const std::string& ours = settings_.launcherVersion;
 
     result = UpdateCheck();
     result.outcome = UpdateOutcome::Available;
@@ -321,8 +328,7 @@ UpdateCheck Updater::check() {
     result.manifestBytes = std::move(manifestBytes);
     result.signatureText = std::move(signatureText);
     result.signatureVerified = true;
-    result.launcherNeedsUpdate = manifest.hasLauncher && manifest.launcher.sha256 != settings_.launcherSha256 &&
-                                 compareVersions(manifest.launcher.version, ours) >= 0;
+    result.launcherNeedsUpdate = updateLauncher;
     result.manifest = std::move(manifest);
     result.assets = std::move(assets);
     return result;

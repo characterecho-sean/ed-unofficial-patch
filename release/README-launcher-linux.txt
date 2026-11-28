@@ -1,8 +1,14 @@
 ED-UP launcher on Linux (Steam and Epic copies)
 
-This is new and untested on Linux. The launcher window, its updates and the
-Play button may not work yet. The Epic route has not been run on Linux
-hardware at all. Logs and reports are welcome.
+Extract the Linux ZIP and double-click ED-UP Launcher in a host-installed
+file manager, such as GNOME Files or your distribution's Dolphin. If Dolphin
+asks whether to run it, choose Launch. Keep the other files beside it. On
+Steam Deck, use Desktop Mode.
+The file-manager launcher is for x86-64 Linux with glibc 2.34 or newer.
+
+If Flatpak Dolphin shows Open With or No Apps available, open the extracted
+folder in a host-installed file manager. That prompt appears before ED-UP
+starts.
 
 What it is: the ED-UP launcher, the same Windows program people run on
 Windows. For a Steam copy it runs inside Elite's own Proton setup, so there is
@@ -12,8 +18,10 @@ copy it runs under the Wine or Proton that copy already uses (see "Epic
 copies" below).
 
 Run Elite once from Steam, then close it. If you change Elite's Proton version
-in Steam, launch Elite once again first. On Steam Deck, use Desktop Mode. Run
-as your normal user, without sudo:
+in Steam, launch Elite once again first. ED-UP Launcher opens in that existing
+prefix and enables OpenXR import when it starts Steam Linux Runtime.
+
+For command-line options or troubleshooting, use the included shell script:
 
     ./ed-up-launcher.sh
 
@@ -41,6 +49,21 @@ the sandbox.
 For Steam, additional named system Flatpak installations require that host
 override.
 
+When the launcher uses Steam Linux Runtime, it enables OpenXR runtime import
+for the headset check. An explicit PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES
+setting takes precedence.
+
+Run through Protontricks from GNOME Files (Steam)
+
+If you use the native Protontricks package, copy ed-up-protontricks.sh from
+this download into .local/share/nautilus/scripts in your Home folder. Turn on
+Show Hidden Files to see .local, then create the scripts folder if needed.
+In the copied file's Properties, make sure Executable as Program is on.
+Then right-click ed-up-launcher.exe and choose Scripts > ed-up-protontricks.sh.
+The script uses Elite's existing Steam prefix and sets up OpenXR import for
+that launch. Protontricks' standard Open With action uses the environment
+from the desktop session.
+
 The launcher keeps its downloads and settings inside Elite's Proton prefix, in
 drive_c/users/steamuser/AppData/Local/EDVR under
 steamapps/compatdata/359320/pfx. For an Epic copy it keeps them in the prefix
@@ -64,8 +87,10 @@ EliteDangerous64.exe in the recorded folder, and it does not create a prefix or
 choose a replacement runner. Missing or conflicting records are reported, not
 guessed.
 
-Run Elite once through its usual manager, then close it. After you change the
-manager's runner, launch Elite once again first. Then:
+Run Elite once through its usual manager, then close it and open ED-UP
+Launcher. After you change the manager's runner, launch Elite once again
+first. If you have both a Steam and an Epic copy, you can select Epic with
+the shell script:
 
     ./ed-up-launcher.sh --store epic --dry-run
     ./ed-up-launcher.sh --store epic

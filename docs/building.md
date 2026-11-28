@@ -92,7 +92,15 @@ the full `build.bat --wait-lock --jobs 4`, including every test rig (one of
 them builds the launcher), then calls `package.bat`. The packages contain the
 exact version stamp checked by `package_native.py`. Each successful run uploads
 the full build receipt, launcher, native DLLs, the release ZIPs, and
-`SHA256SUMS`. Build logs, phase timings, and failed flat pixel fixtures are
+`SHA256SUMS`. The Linux installer job builds the x86-64 Debian package and
+Flatpak bundle from that validated launcher at the same package version.
+It uploads them with `SHA256SUMS-linux` as
+`edvr-linux-installers-<run-id>-<run-attempt>`.
+Both installers start a writable launcher copy under
+`${XDG_DATA_HOME:-$HOME/.local/share}/ed-up-launcher/`, keyed by the bundled
+launcher hash. The launcher's signed updater replaces that copy, and the
+Linux wrapper starts the replacement after the Wine or Proton process exits.
+Build logs, phase timings, and failed flat pixel fixtures are
 uploaded separately even when a gate fails. The workflow does not create a
 GitHub release or use signing secrets.
 
@@ -238,7 +246,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Cannot push version tag' }
 gh run list --workflow release.yml --limit 10
 $runId = 'TAG_RUN_ID'
 gh run watch $runId --exit-status
-if ($LASTEXITCODE -ne 0) { throw 'Tagged Windows build failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Tagged build or packaging failed' }
 $repoName = gh repo view --json nameWithOwner --jq .nameWithOwner
 if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve repository name' }
 $runAttempt = gh api "repos/$repoName/actions/runs/$runId" --jq .run_attempt
@@ -252,6 +260,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Package checksum verification failed' }
 } finally { Pop-Location }
 ```
+
+From the same tagged run's **Artifacts** section, download the
+`edvr-linux-installers-<run-id>-<run-attempt>` artifact. Extract its files
+into the same release folder and verify them there with
+`sha256sum -c SHA256SUMS-linux`.
 
 Write and review release notes before creating the draft. Generate the Thanks
 section from the previous tag, then write each contributor's sentence by hand.
@@ -292,11 +305,11 @@ python tools/sign_manifest.py verify "edvr-artifacts/$runId"
 if ($LASTEXITCODE -ne 0) { throw 'The signed release folder did not verify' }
 ```
 
-Then attach the two verified ZIPs (`ed-up-<version>.zip`, the files for a manual install,
-and `ed-up-launcher-linux-<version>.zip`, a convenience package outside the signed
-manifest), the split assets, all manifests with
-their `.sig` files, and `SHA256SUMS` to a draft release. A release missing a `.sig` is simply
-not offered to the launcher as an update:
+Attach the verified ZIPs, Linux installers, split assets, signed manifests,
+and both checksum files to a draft release. The portable Linux ZIP and the
+two Linux installers are standalone downloads outside the launcher's signed
+update manifests. A release missing a `.sig` is unavailable as a launcher
+update.
 
 ```powershell
 python tools/release_credits.py --from vPREVIOUS --to "v$version" --thanks --out thanks.md
@@ -308,6 +321,8 @@ $folder = "edvr-artifacts/$runId"
 $assets = @(
     "$folder/ed-up-$version.zip"
     "$folder/ed-up-launcher-linux-$version.zip"
+    "$folder/ed-up-launcher-linux-$version.deb"
+    "$folder/ed-up-launcher-linux-$version.flatpak"
     "$folder/ed-up-manifest-v3.json"
     "$folder/ed-up-manifest-v3.json.sig"
     "$folder/ed-up-manifest-v2.json"
@@ -315,6 +330,7 @@ $assets = @(
     "$folder/ed-up-manifest.json"
     "$folder/ed-up-manifest.json.sig"
     "$folder/SHA256SUMS"
+    "$folder/SHA256SUMS-linux"
 )
 $assets += Get-ChildItem "$folder/ed-up-core-$version.zip", "$folder/ed-up-dlss-*.zip", "$folder/ed-up-xess-*.zip", "$folder/ed-up-fsr4-*.zip", "$folder/ed-up-edhm-*.zip", "$folder/ed-up-edhm-source-*.tar.gz", "$folder/ed-up-launcher.exe" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
 gh release create "v$version" @assets --draft --verify-tag --title "ED Unofficial Patch $version" --notes-file release-notes.md
@@ -324,16 +340,49 @@ if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }
 For a prerelease tag, add `--prerelease` to `gh release create` as well.
 
 On native Windows, where `package.bat <version>` packages the release without
-Actions, the same assets land in `dist\`, `SHA256SUMS` included:
-`package_native.py` writes it, and the workflow only checks that it lists the
-files above with their hashes. `package.bat` prints the signing command when
+Actions, build the Linux file-manager entry point on an x86-64 Linux host or
+in x86-64 WSL from the same commit before packaging. From the repo root:
+
+```sh
+mkdir -p build
+cc -std=c17 -O2 -Wall -Wextra -Werror -no-pie -fno-pie src/installer/linux_launcher.c -o build/ed-up-launcher-linux
+```
+
+Place that binary at `build\ed-up-launcher-linux` in the Windows checkout.
+The workflow builds and supplies it automatically. The package assets land
+in `dist\`, including `SHA256SUMS`, which `package_native.py` writes.
+`package.bat` prints the signing command when
 it finishes. Run `python tools\sign_manifest.py sign
 dist\ed-up-manifest-v3.json`, `... sign dist\ed-up-manifest-v2.json`, and
 `... sign dist\ed-up-manifest.json`, then `python tools\sign_manifest.py verify dist`,
-and attach the files from `dist\` the same way. `package_native.py` writes the
+and build the Linux installers below before attaching the files from `dist\`.
+`package_native.py` writes the
 split zips with fixed timestamps and file order, so packaging twice gives the
 same bytes, and it removes older `ed-up-dlss-*.zip`, `ed-up-xess-*.zip` and `ed-up-fsr4-*.zip` from
 `dist\` when a runtime's contents change.
+
+### Build the Linux installers locally
+
+On Linux, `tools/package_linux_launcher.py` can build a `.deb` and a
+`.flatpak` from `build/ed-up-launcher.exe` or the explicit `--launcher-exe`
+path. For a release, pass the same version and Windows launcher used by
+`package.bat`. It writes the installers to `dist/` by default and needs
+`dpkg-deb` and `flatpak` to build both formats. From the checkout root, with
+`version` set to the version being packaged:
+
+```sh
+python3 tools/package_linux_launcher.py "$version" --launcher-exe build/ed-up-launcher.exe
+(
+    cd dist
+    sha256sum -- "ed-up-launcher-linux-$version.deb" \
+        "ed-up-launcher-linux-$version.flatpak" > SHA256SUMS-linux
+    sha256sum -c SHA256SUMS-linux
+)
+```
+
+Copy the installers and `SHA256SUMS-linux` into the release folder. The
+`--format` option selects one format, and `--dry-run` prints the output paths
+without writing them.
 
 To sign the binaries (Authenticode, through Azure Artifact Signing), set
 `EDUP_SIGN=1` for the full `build.bat`. It signs `d3d11.dll` and

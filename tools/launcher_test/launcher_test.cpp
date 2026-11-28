@@ -1474,6 +1474,16 @@ void testUpdater() {
         equal.launcherVersion = "0.4.0";
         Updater upEqual(http, equal);
         check(upEqual.check().launcherNeedsUpdate, "an equal version with a different digest is a launcher update");
+
+        check(adopt(&upSame, upSame.check(), &err), "the release payload is already cached: " + err);
+        UpdaterSettings olderCopy = same;
+        olderCopy.launcherSha256 = std::string(64, '1');
+        Updater upOlderCopy(http, olderCopy);
+        const UpdateCheck launcherOnly = upOlderCopy.check();
+        check(launcherOnly.outcome == UpdateOutcome::Available && launcherOnly.launcherNeedsUpdate,
+              "an older launcher is offered its replacement when the signed release is already cached");
+        check(upSame.check().outcome == UpdateOutcome::UpToDate,
+              "the matching launcher and cached payload are up to date");
     }
     // Commit needs the files; retention keeps three; offline load works; the payload follows.
     {
@@ -6538,10 +6548,12 @@ void testVrHeadsetDetection() {
                   c1[2] == L"Z:\\opt\\xdg\\openxr\\1\\active_runtime.json",
               "linuxOpenXrManifestCandidates follows XDG_CONFIG_HOME and colon-separated XDG_CONFIG_DIRS");
         const auto c2 = linuxOpenXrManifestCandidates(L"", L"/home/pilot", L":::");
-        check(c2.size() == 2 &&
+        const std::wstring imported =
+            L"Z:\\usr\\lib\\pressure-vessel\\overrides\\etc\\xdg\\openxr\\1\\active_runtime.json";
+        check(c2.size() == 3 &&
                   c2[0] == L"Z:\\home\\pilot\\.config\\openxr\\1\\active_runtime.json" &&
-                  c2[1] == L"Z:\\etc\\xdg\\openxr\\1\\active_runtime.json",
-              "linuxOpenXrManifestCandidates falls back to HOME/.config and /etc/xdg when XDG vars are empty/colons");
+                  c2[1] == imported && c2[2] == L"Z:\\etc\\xdg\\openxr\\1\\active_runtime.json",
+              "Linux runtime search uses HOME, the Pressure Vessel import, then /etc/xdg when XDG dirs are absent");
         // XDG Base Directory spec: relative XDG_CONFIG_HOME / XDG_CONFIG_DIRS / XDG_RUNTIME_DIR must be ignored.
         const auto cRel = linuxOpenXrManifestCandidates(L"relative/xdg", L"/home/pilot", L"rel/dir:/opt/xdg");
         check(cRel.size() == 2 &&
@@ -6549,8 +6561,8 @@ void testVrHeadsetDetection() {
                   cRel[1] == L"Z:\\opt\\xdg\\openxr\\1\\active_runtime.json",
               "linuxOpenXrManifestCandidates ignores relative XDG_CONFIG_HOME and relative XDG_CONFIG_DIRS entries");
         const auto cRelAll = linuxOpenXrManifestCandidates(L"relative/xdg", L"relative/home", L"rel/only");
-        check(cRelAll.size() == 1 && cRelAll[0] == L"Z:\\etc\\xdg\\openxr\\1\\active_runtime.json",
-              "linuxOpenXrManifestCandidates ignores relative HOME and falls back to /etc/xdg when all dirs are relative");
+        check(cRelAll.size() == 2 && cRelAll[0] == imported && cRelAll[1] == L"Z:\\etc\\xdg\\openxr\\1\\active_runtime.json",
+              "Linux runtime search ignores relative HOME and checks both system locations when all XDG dirs are relative");
         const auto ws = linuxCompositorSocketPaths(L"/run/user/1000", VrPlatform::Wivrn);
         check(ws.size() == 2 &&
                   ws[0] == L"Z:\\run\\user\\1000\\wivrn\\comp_ipc" &&
@@ -6718,6 +6730,18 @@ void testVrHeadsetDetection() {
         check(r.status == VrStatusKind::Standby && r.activePlatform == VrPlatform::Wivrn &&
                   r.runtimeDisplayName == L"WiVRn" && !r.runtimeMismatch,
               "Proton wineopenxr64.json with Linux host WiVRn hint classifies as WiVRn with wivrn-ipc active");
+    }
+    {
+        VrProbeInputs in;
+        in.underWine = true;
+        in.runtimeSource = EffectiveRuntimeSource::Registry;
+        in.activeRuntimePath = L"C:\\openxr\\wineopenxr64.json";
+        in.activeManifest = {true, in.activeRuntimePath, L"", L"C:\\windows\\system32\\wineopenxr.dll", true, true};
+        in.runningProcesses = {"wivrn-server"};
+        const VrHeadsetReport r = resolveVrHeadsetStatus(in);
+        check(r.status == VrStatusKind::RuntimeUnverified && !r.runtimeMismatch && !r.hasLiveResult &&
+                  r.mismatchRuntimeName == L"WiVRn" && evaluateVrLaunchPreflight(r) == VrPreflightWarning::None,
+              "a running WiVRn host with an unidentified Proton bridge is informational and leaves Play VR available");
     }
     // XR_ERROR_INSTANCE_LOST (-13) on xrCreateInstance resolves to Standby when service is up, RuntimeInactive when off.
     {

@@ -474,7 +474,7 @@ void updateLauncherControls() {
         lg.lastUpdateLabel = updateLabel;
 
         const int innerLeft = kMargin + kCardPad;
-        const int innerRight = kClientWidth - kMargin - kCardPad;
+        const int innerRight = g.layoutWidth - kMargin - kCardPad;
         HDC dc = GetDC(g.window);
         const HFONT font = ui::fonts().body;
 
@@ -488,11 +488,11 @@ void updateLauncherControls() {
             const int btnLeft = innerRight - btnW;
             const int btnY = onPlay ? (lg.launchBottom + 10 + (kPlayBannerH - 28) / 2) : (kUpdatesTop + 34);
             lg.updateTextRight = available ? (btnLeft - 12) : innerRight;
-            MoveWindow(lg.update, dp(btnLeft), dp(btnY), dp(btnW), dp(28), TRUE);
+            moveContentControl(lg.update, dp(btnLeft), dp(btnY), dp(btnW), dp(28), TRUE);
         }
         if (lg.rc) {
             const int rcW = 248;
-            MoveWindow(lg.rc, dp(innerRight - rcW), dp(kUpdatesTop + 8), dp(rcW), dp(22), TRUE);
+            moveContentControl(lg.rc, dp(innerRight - rcW), dp(kUpdatesTop + 8), dp(rcW), dp(22), TRUE);
         }
 
         // Play VR / Play flat buttons sized to localized text so German/Russian labels never clip.
@@ -515,30 +515,30 @@ void updateLauncherControls() {
         }
         int curX = innerLeft;
         if (showPair && showVrButton) {
-            MoveWindow(lg.playVr, dp(curX), dp(kLaunchBtnY), dp(vrW), dp(kLaunchBtnH), TRUE);
+            moveContentControl(lg.playVr, dp(curX), dp(kLaunchBtnY), dp(vrW), dp(kLaunchBtnH), TRUE);
             curX += vrW + 10;
         }
         if (showPair && showFlatButton) {
-            MoveWindow(lg.playFlat, dp(curX), dp(kLaunchBtnY), dp(flatW), dp(kLaunchBtnH), TRUE);
+            moveContentControl(lg.playFlat, dp(curX), dp(kLaunchBtnY), dp(flatW), dp(kLaunchBtnH), TRUE);
             curX += flatW + 10;
         }
         lg.playCaptionLeft = (showPair && (showVrButton || showFlatButton)) ? (curX + 6) : innerLeft;
 
         // Direct launch checkbox gets the full interior width on its own clean row.
         if (lg.direct)
-            MoveWindow(lg.direct, dp(innerLeft), dp(kLaunchDirectY), dp(innerRight - innerLeft), dp(22), TRUE);
+            moveContentControl(lg.direct, dp(innerLeft), dp(kLaunchDirectY), dp(innerRight - innerLeft), dp(22), TRUE);
 
         // Bottom options row inside Launch card.
         const int optY = showDirect ? kLaunchOptWithDirectY : kLaunchOptNoDirectY;
-        if (lg.closeAfter) MoveWindow(lg.closeAfter, dp(innerLeft), dp(optY + 3), dp(340), dp(22), TRUE);
+        if (lg.closeAfter) moveContentControl(lg.closeAfter, dp(innerLeft), dp(optY + 3), dp(340), dp(22), TRUE);
         if (lg.steamFrontier)
-            MoveWindow(lg.steamFrontier, dp(innerLeft + 352), dp(optY + 3), dp(innerRight - (innerLeft + 352)), dp(22), TRUE);
+            moveContentControl(lg.steamFrontier, dp(innerLeft + 352), dp(optY + 3), dp(innerRight - (innerLeft + 352)), dp(22), TRUE);
         if (lg.vrMode) {
             const int comboW = dp(212);
             const int comboRight = dp(innerRight);
             const int comboLeft = comboRight - comboW;
             const int comboTop = dp(optY);
-            MoveWindow(lg.vrMode, comboLeft, comboTop, comboW, dp(28), TRUE);
+            moveContentControl(lg.vrMode, comboLeft, comboTop, comboW, dp(28), TRUE);
             SendMessageW(lg.vrMode, CB_SETITEMHEIGHT, 0, dp(24));
             SendMessageW(lg.vrMode, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), dp(20));
             RECT rc{};
@@ -557,11 +557,7 @@ void updateLauncherControls() {
             if (btnW < 76) btnW = 76;
             if (btnW > 136) btnW = 136;
             const int vrTop = launcherVrTop();
-            MoveWindow(lg.vrRefresh, dp(innerRight - btnW), dp(vrTop + 7), dp(btnW), dp(22), TRUE);
-        }
-
-        if (lg.themeToggle) {
-            MoveWindow(lg.themeToggle, dp(kMargin), dp(kTipTop - 2), dp(70), dp(22), TRUE);
+            moveContentControl(lg.vrRefresh, dp(innerRight - btnW), dp(vrTop + 7), dp(btnW), dp(22), TRUE);
         }
 
         ReleaseDC(g.window, dc);
@@ -635,9 +631,9 @@ void layoutLauncherControls() {
         if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(ui::fonts().body), TRUE);
     for (HWND control : {lg.vrRefresh, lg.themeToggle})
         if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(ui::fonts().caption), TRUE);
-    // Position themeToggle immediately (before kMsgFirstScan creates lg.session) so there is no pop-in.
+    // Position the footer even before kMsgFirstScan creates lg.session.
     if (lg.themeToggle) {
-        MoveWindow(lg.themeToggle, dp(kMargin), dp(kTipTop - 2), dp(70), dp(22), TRUE);
+        moveContentControl(lg.themeToggle, dp(kMargin), dp(layoutBottom(kTipTop - 2)), dp(70), dp(22), TRUE);
     }
     lg.layoutDirty = true;
     updateLauncherControls();
@@ -661,7 +657,7 @@ void paintLauncherVrCard(HDC dc) {
     const int top = launcherVrTop();
     const int bottom = top + kVrCardH;
 
-    const RECT card{dp(kMargin), dp(top), dp(kClientWidth - kMargin), dp(bottom)};
+    const RECT card{dp(kMargin), dp(top), dp(g.layoutWidth - kMargin), dp(bottom)};
     ui::paintCard(dc, card, g.dpi);
 
     const VrHeadsetReport& vr = lg.vrReport;
@@ -674,6 +670,10 @@ void paintLauncherVrCard(HDC dc) {
             break;
         case VrStatusKind::Standby:
             badgeText = tr(L"Standby");
+            badgeColour = t.warn;
+            break;
+        case VrStatusKind::RuntimeUnverified:
+            badgeText = tr(L"Runtime unverified");
             badgeColour = t.warn;
             break;
         case VrStatusKind::RuntimeInactive:
@@ -696,7 +696,7 @@ void paintLauncherVrCard(HDC dc) {
     }
 
     const int innerLeftPx = dp(kMargin + kCardPad);
-    const int innerRightPx = dp(kClientWidth - kMargin - kCardPad);
+    const int innerRightPx = dp(g.layoutWidth - kMargin - kCardPad);
 
     const std::wstring heading = tr(L"VR headset");
     const int headW = ui::textWidth(dc, heading, f.heading);
@@ -719,6 +719,9 @@ void paintLauncherVrCard(HDC dc) {
     } else if (vr.status == VrStatusKind::Standby) {
         headsetLine = tr(L"Waiting for headset");
         headsetDim = true;
+    } else if (vr.status == VrStatusKind::RuntimeUnverified) {
+        headsetLine = tr(L"Headset status unknown");
+        headsetDim = true;
     } else if (vr.status == VrStatusKind::NotConfigured) {
         headsetLine = tr(L"No VR runtime found");
         headsetDim = true;
@@ -727,7 +730,8 @@ void paintLauncherVrCard(HDC dc) {
         headsetDim = true;
     }
 
-    std::wstring runtimeValue = vr.runtimeDisplayName.empty() ? std::wstring(tr(L"None")) : vr.runtimeDisplayName;
+    std::wstring runtimeValue = vr.status == VrStatusKind::RuntimeUnverified ? tr(L"Wine/Proton OpenXR bridge")
+        : vr.runtimeDisplayName.empty() ? tr(L"None") : vr.runtimeDisplayName;
     if (!vr.runtimeVersion.empty() && !vr.runtimeDisplayName.empty()) {
         runtimeValue += L" " + vr.runtimeVersion;
     }
@@ -778,6 +782,18 @@ void paintLauncherVrCard(HDC dc) {
                     tr(L"%s is running, but no active headset responded. Wake or connect your headset, then refresh."),
                     rtName);
             }
+            break;
+        case VrStatusKind::RuntimeUnverified:
+            if (vr.openCompositeInstalled) {
+                detailLine = tr(L"OpenComposite is installed as Elite's openvr_api.dll, so ED-UP's VR bridge is not active.");
+            } else if (!vr.mismatchRuntimeName.empty()) {
+                detailLine = fillVrPlaceholders(
+                    tr(L"%s is running on the host. This Wine/Proton session could not verify OpenXR access."),
+                    vr.mismatchRuntimeName);
+            } else {
+                detailLine = tr(L"The Wine/Proton OpenXR bridge is configured. Access to its Linux runtime could not be verified.");
+            }
+            detailColour = t.warn;
             break;
         case VrStatusKind::RuntimeInactive:
             if (vr.openCompositeInstalled) {
@@ -854,20 +870,20 @@ void paintLauncherPlay(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
 
-    const RECT hero{dp(kMargin), dp(kLaunchTop), dp(kClientWidth - kMargin), dp(lg.launchBottom)};
+    const RECT hero{dp(kMargin), dp(kLaunchTop), dp(g.layoutWidth - kMargin), dp(lg.launchBottom)};
     ui::paintAccentCard(dc, hero, g.dpi);
 
-    RECT launchHead{dp(kMargin + kCardPad), dp(kLaunchTop + 10), dp(kClientWidth - kMargin - kCardPad),
+    RECT launchHead{dp(kMargin + kCardPad), dp(kLaunchTop + 10), dp(g.layoutWidth - kMargin - kCardPad),
                     dp(kLaunchTop + 28)};
     ui::drawText(dc, tr(L"Launch"), launchHead, f.heading, t.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    RECT divider{dp(kMargin + kCardPad), dp(kLaunchDividerY), dp(kClientWidth - kMargin - kCardPad),
+    RECT divider{dp(kMargin + kCardPad), dp(kLaunchDividerY), dp(g.layoutWidth - kMargin - kCardPad),
                  dp(kLaunchDividerY) + 1};
     ui::fillRect(dc, divider, t.cardBorder);
 
     if (!lg.session) return;
 
-    RECT caption{dp(lg.playCaptionLeft), dp(kLaunchBtnY - 2), dp(kClientWidth - kMargin - kCardPad),
+    RECT caption{dp(lg.playCaptionLeft), dp(kLaunchBtnY - 2), dp(g.layoutWidth - kMargin - kCardPad),
                  dp(kLaunchBtnY + kLaunchBtnH + 2)};
     ui::drawText(dc, lg.playCaption, caption, f.caption, t.subtext, DT_LEFT | DT_VCENTER | DT_WORDBREAK | DT_END_ELLIPSIS);
 
@@ -878,7 +894,7 @@ void paintLauncherPlay(HDC dc) {
 
     if (lg.playBannerShown) {
         const int bannerTop = lg.launchBottom + 10;
-        const RECT banner{dp(kMargin), dp(bannerTop), dp(kClientWidth - kMargin), dp(bannerTop + kPlayBannerH)};
+        const RECT banner{dp(kMargin), dp(bannerTop), dp(g.layoutWidth - kMargin), dp(bannerTop + kPlayBannerH)};
         ui::fillRounded(dc, banner, dp(8), t.cardBg);
         ui::strokeRounded(dc, banner, dp(8), t.accent);
         COLORREF colour = t.text;
@@ -895,7 +911,7 @@ void paintLauncherUpdatesCard(HDC dc) {
     const ui::Theme& t = ui::theme();
     const ui::Fonts& f = ui::fonts();
 
-    const RECT updatesCard{dp(kMargin), dp(kUpdatesTop), dp(kClientWidth - kMargin), dp(kUpdatesBottom)};
+    const RECT updatesCard{dp(kMargin), dp(kUpdatesTop), dp(g.layoutWidth - kMargin), dp(kUpdatesBottom)};
     ui::paintCard(dc, updatesCard, g.dpi);
     RECT updatesHead{dp(kMargin + kCardPad), dp(kUpdatesTop + 8), dp(kMargin + kCardPad + 200),
                      dp(kUpdatesTop + 26)};
@@ -977,6 +993,7 @@ void applyLauncherLanguage(const std::string& code) {
     setControlText(kIdDiscord, L"Ask on Discord");
     setControlText(kIdCopyPath, L"Copy path");
     setControlText(kIdShowFolder, L"Show folder");
+    setCaptionLabels();
     if (lg.vrRefresh) SetWindowTextW(lg.vrRefresh, lg.vrProbingBusyUi ? tr(L"Checking...") : tr(L"Refresh"));
     syncThemeToggleLabel();
     if (g.search) SendMessageW(g.search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(tr(L"Search settings")));
@@ -1031,7 +1048,7 @@ void applyLauncherTheme(const std::string& mode) {
     else ui::setThemeMode(ui::ThemeMode::System);
     syncThemeToggleLabel();
     if (g.window) {
-        ui::applyWindowChrome(g.window);
+        if (!g.resizable) ui::applyWindowChrome(g.window);
         applyNativeControlThemes();
         RedrawWindow(g.window, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
@@ -1114,10 +1131,13 @@ void launcherBegin() {
     // work inside a Proton prefix. --direct-dry-run stays, as the way to find out.
     env.directLaunchOffered = !runningUnderWine();
     env.startNewLauncher = [](const std::wstring& exe) {
-        // Under Wine there is no restart: the session then shows "The launcher was updated. Close this window and
-        // start ED-UP again", as it does when a restart fails. A process the launcher starts may be ended with
-        // Steam's runtime container when the first one exits (unverified).
-        if (runningUnderWine()) return false;
+        if (runningUnderWine()) {
+            // The installed Linux wrapper relaunches after this Wine/Proton
+            // process exits. A portable copy can be reopened by the player.
+            wchar_t installed[2]{};
+            return GetEnvironmentVariableW(L"EDUP_LINUX_INSTALLED_LAUNCHER", installed, 2) == 1
+                && installed[0] == L'1';
+        }
         releaseInstanceMutex();  // the replacement waits for it, but not forever
         const bool started = startLauncherProcess(exe, restartArguments(true));
         if (!started) takeInstanceMutex(0);

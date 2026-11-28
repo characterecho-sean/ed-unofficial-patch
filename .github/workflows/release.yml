@@ -1,5 +1,6 @@
 # The one native Windows build: the full build.bat, every gate and rig, and
 # package.bat, for releases and as validation of pull requests and main (#93).
+# The Linux installers then package the validated Windows launcher on Ubuntu.
 # Untagged runs package the runner-only 0.0.0-ci proof version.
 name: Native Windows build
 
@@ -94,14 +95,38 @@ jobs:
           python3 tools/check_agent_material.py --self-test
           python3 tools/check_agent_material.py
 
-  build:
+  linux-launcher:
     needs: changes
     if: needs.changes.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Build and test the Linux launcher entry point
+        run: |
+          mkdir -p build
+          cc -std=c17 -O2 -Wall -Wextra -Werror -no-pie -fno-pie src/installer/linux_launcher.c -o build/ed-up-launcher-linux
+          python3 tools/package_native.py --self-test
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: edup-linux-launcher
+          path: build/ed-up-launcher-linux
+          if-no-files-found: error
+          overwrite: true
+
+  build:
+    needs: [changes, linux-launcher]
+    if: ${{ !cancelled() && needs.changes.outputs.build == 'true' }}
     runs-on: windows-2022
     timeout-minutes: 180
     defaults:
       run:
         shell: powershell
+    outputs:
+      package-version: ${{ steps.package-version.outputs.version }}
+      artifact-id: ${{ steps.validated-build.outputs.artifact-id }}
     steps:
       - name: Initialize diagnostics
         run: |
@@ -114,6 +139,17 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Download the Linux launcher entry point
+        if: needs.linux-launcher.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: edup-linux-launcher
+          path: ${{ runner.temp }}/edup-linux-launcher
+
+      - name: Require the Linux launcher build
+        if: needs.linux-launcher.result != 'success'
+        run: throw 'The Linux launcher entry point failed to build or pass its tests.'
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -138,6 +174,7 @@ jobs:
           Write-Output "Runner image: $image"
 
       - name: Select package version
+        id: package-version
         run: |
           $headCommit = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve checkout HEAD' }
@@ -183,6 +220,7 @@ jobs:
           }
           [IO.File]::AppendAllText($env:GITHUB_ENV, "PACKAGE_VERSION=$version`n", (New-Object Text.UTF8Encoding($false)))
           [IO.File]::AppendAllText($env:GITHUB_ENV, "PACKAGE_KIND=$kind`n", (New-Object Text.UTF8Encoding($false)))
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "version=$version`n", (New-Object Text.UTF8Encoding($false)))
           Write-Output "Packaging $tag ($kind) at $headCommit"
 
       - name: Restore pinned dependency cache
@@ -310,6 +348,8 @@ jobs:
 
       - name: Package the validated build
         run: |
+          $linuxLauncher = Join-Path $env:RUNNER_TEMP 'edup-linux-launcher\ed-up-launcher-linux'
+          Copy-Item -LiteralPath $linuxLauncher -Destination build\ed-up-launcher-linux -ErrorAction Stop
           $batch = Join-Path $env:GITHUB_WORKSPACE 'package.bat'
           $stdout = Join-Path $env:RUNNER_TEMP 'edvr-package.stdout.log'
           $stderr = Join-Path $env:RUNNER_TEMP 'edvr-package.stderr.log'
@@ -383,6 +423,7 @@ jobs:
             build/sharp_weapons_test_run/**
 
       - name: Upload validated build outputs
+        id: validated-build
         if: success()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -411,3 +452,42 @@ jobs:
             dist/ed-up-manifest.json
             dist/ed-up-launcher.exe
             dist/SHA256SUMS
+
+  linux-installers:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download validated build outputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: ${{ runner.temp }}/validated-build
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends flatpak
+
+      - name: Build and checksum the Linux installers
+        env:
+          PACKAGE_VERSION: ${{ needs.build.outputs.package-version }}
+        run: |
+          python3 tools/package_linux_launcher.py "$PACKAGE_VERSION" \
+            --launcher-exe "$RUNNER_TEMP/validated-build/ed-up-launcher.exe" \
+            --output dist/linux-installers
+          cd dist/linux-installers
+          sha256sum -- "ed-up-launcher-linux-$PACKAGE_VERSION.deb" \
+            "ed-up-launcher-linux-$PACKAGE_VERSION.flatpak" > SHA256SUMS-linux
+          sha256sum -c SHA256SUMS-linux
+
+      - name: Upload Linux installers
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: edvr-linux-installers-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          path: dist/linux-installers/
