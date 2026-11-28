@@ -293,6 +293,27 @@ vr::EVRCompositorError EyeCapture::capture(vr::EVREye eye, const vr::Texture_t* 
   return vr::VRCompositorError_None;
 }
 
+HRESULT EyeCapture::adopt(vr::EVREye eye, ID3D11Texture2D* texture, const vr::VRTextureBounds_t& bounds, vr::EColorSpace colorSpace) {
+  if (sharedInitialized_ || !initialized_ || !device_) return E_UNEXPECTED;
+  if (!validEye(eye) || !texture || !validBounds(bounds) || colorSpace < vr::ColorSpace_Auto || colorSpace > vr::ColorSpace_Linear) return E_INVALIDARG;
+  if (!sameDevice(device_.Get(), texture)) return E_INVALIDARG;
+  D3D11_TEXTURE2D_DESC d{};
+  texture->GetDesc(&d);
+  if ((d.Format != DXGI_FORMAT_R8G8B8A8_TYPELESS && d.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS) || !d.Width || !d.Height || d.ArraySize != 1 ||
+      d.MipLevels != 1 || d.SampleDesc.Count != 1 || !(d.BindFlags & D3D11_BIND_SHADER_RESOURCE))
+    return E_INVALIDARG;
+  auto& e = eyes_[eyeIndex(eye)];
+  if (e.copy.Get() != texture) {
+    for (auto& view : e.shaderViews) view.Reset();
+    e.copy = texture;
+  }
+  e.bounds = bounds;
+  e.colorSpace = colorSpace;
+  e.captured = true;
+  e.pending = false;
+  return S_OK;
+}
+
 bool EyeCapture::hasPending() const {
   return eyes_[0].pending || eyes_[1].pending;
 }
